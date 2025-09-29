@@ -2,6 +2,11 @@
 
 A comprehensive system for processing academic papers and books with ISBN extraction, metadata lookup, and Zotero integration.
 
+
+## Work in Progress
+There is a file IMPLEMENTATION_PLAN.md that describes the current status. Some parts of this project are completed and work well, others are still on the planning stage.
+
+
 ## Overview
 
 Research-Tools is organized into three main modules:
