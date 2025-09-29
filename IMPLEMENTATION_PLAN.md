@@ -21,6 +21,24 @@
 - AI-driven paper processing enhancement
 - Academic paper APIs (OpenAlex, CrossRef, PubMed, arXiv)
 
+## Primary Use Case: Paper Scanning Workflow
+
+**Input**: `scan_timestamp.pdf` (single paper scan)
+**Process**:
+1. OCR/AI process first page to extract identifying information
+2. Find paper in academic databases (OpenAlex, CrossRef, PubMed, arXiv)
+3. Retrieve complete metadata
+4. Rename PDF with meaningful filename
+5. Copy to `g:/publications` storage location
+6. Add as linked file in Zotero
+
+**Key Requirements**:
+- First page processing for paper identification
+- Smart routing based on extracted identifiers (DOI, title, authors)
+- Automated filename generation from metadata
+- Windows drive access from WSL for storage
+- Zotero integration for linked files
+
 ## Implementation Phases
 
 ### **Phase 1: Complete Configuration-Driven System** 🚧
@@ -73,17 +91,23 @@ class UnifiedMetadataManager:
 ### **Phase 3: AI-Driven Paper Processing** 🆕
 *Enhance paper processing with AI capabilities*
 
-#### 3.1 AI-Enhanced OCR
+#### 3.1 First Page Processing (Paper Scanning Workflow)
+- [ ] OCR/AI processing of first page for paper identification
+- [ ] Extract DOI, title, authors, abstract from first page
+- [ ] Smart identification strategy (DOI → Title+Authors → Abstract keywords)
+- [ ] Handle multiple identification methods with confidence scoring
+
+#### 3.2 AI-Enhanced OCR
 - [ ] LLM-based text correction for OCR errors
 - [ ] Context-aware metadata extraction
 - [ ] Language detection and processing
 
-#### 3.2 Smart Annotation Processing
+#### 3.3 Smart Annotation Processing
 - [ ] AI-powered annotation separation (handwritten notes, highlights)
 - [ ] Keyword extraction from annotations
 - [ ] Question and note identification
 
-#### 3.3 AI Metadata Enhancement
+#### 3.4 AI Metadata Enhancement
 - [ ] Fill missing metadata fields using AI
 - [ ] Validate and correct extracted metadata
 - [ ] Suggest tags and categories based on content
@@ -109,7 +133,23 @@ class UnifiedMetadataManager:
   - **Action:** Complete integration with config-driven system
   - **Status:** Partially updated, needs full migration
 
-#### 4.3 Cleanup Phase
+#### 4.3 Paper Scanning Workflow Implementation
+- [ ] **First Page OCR/AI Processing**
+  - **Action:** Implement first page processing for paper identification
+  - **Requirements:** Extract DOI, title, authors, abstract
+  - **Status:** New feature for scanning workflow
+
+- [ ] **Automated File Management**
+  - **Action:** Implement PDF renaming and storage workflow
+  - **Requirements:** Meaningful filename generation, copy to `g:/publications`
+  - **Status:** New feature for scanning workflow
+
+- [ ] **Zotero Linked File Integration**
+  - **Action:** Add papers as linked files in Zotero
+  - **Requirements:** Link to stored PDF location
+  - **Status:** New feature for scanning workflow
+
+#### 4.4 Cleanup Phase
 - [ ] **File:** `shared_tools/api/national_libraries.py`
   - **Action:** Delete after migration complete
   - **Status:** Old hardcoded clients, still exists
@@ -234,6 +274,28 @@ class UnifiedMetadataManager:
 3. **Migration Strategy**: Big bang vs incremental?
 4. **Priority Order**: Academic APIs first vs unified system first?
 5. **Performance Optimization**: When to implement local DB integration (Phase 6)?
+
+## Paper Scanning Workflow - Open Questions
+
+1. **First Page Processing**: 
+   - Should we process the entire first page or focus on specific areas?
+   - What's the preferred identification priority (DOI → Title+Authors → Abstract)?
+
+2. **Filename Convention**: 
+   - What naming pattern for renamed PDFs? (`Author_Year_Title.pdf`, `Title_Author_Year.pdf`, etc.)
+   - How to handle special characters in titles/authors?
+
+3. **Storage Location**: 
+   - Is `g:/publications` accessible from WSL? 
+   - Should we use relative paths from config or absolute paths?
+
+4. **Error Handling**: 
+   - What to do if paper cannot be identified from first page?
+   - How to handle multiple matches from database search?
+
+5. **Zotero Integration**: 
+   - Should linked files be added immediately or queued for batch processing?
+   - How to handle duplicate detection in Zotero?
 
 ---
 
