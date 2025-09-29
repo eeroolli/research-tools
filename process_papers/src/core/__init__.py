@@ -1,0 +1,3 @@
+"""
+Core paper processing components.
+"""

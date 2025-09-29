@@ -1,0 +1,16 @@
+
+# Data directory (generated files)
+data/
+logs/
+*.log
+
+# Archive directory
+archive/
+
+# Personal configuration files
+config.personal.conf
+*.personal.conf
+
+# API keys and sensitive data
+*_keys.txt
+*_secrets.conf

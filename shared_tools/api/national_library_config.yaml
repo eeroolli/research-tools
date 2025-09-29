@@ -1,0 +1,347 @@
+# National Library API Configuration
+# This file defines the structure and field mappings for each national library API
+
+libraries:
+  norwegian:
+    name: "Norwegian National Library"
+    country_code: "NO"
+    language_codes: ["no", "nb", "nn"]
+    isbn_prefixes: ["82"]
+    
+    api:
+      base_url: "https://api.nb.no/catalog/v1"
+      endpoints:
+        search: "items"
+        item: "items/{id}"
+      parameters:
+        default_size: 10
+        content_classes_papers: "article,journal"
+        content_classes_books: "book"
+    
+    field_mappings:
+      papers:
+        title: "metadata.title"
+        authors: "metadata.creators"
+        journal: "metadata.originInfo.publisher"
+        year: "metadata.originInfo.issued"
+        doi: "metadata.identifiers[type=DOI].value"
+        issn: "metadata.identifiers[type=ISSN].value"
+        abstract: "metadata.abstract"
+        language: "metadata.languages[0].code"
+        url: "_links.self.href"
+      
+      books:
+        title: "metadata.title"
+        authors: "metadata.creators"
+        publisher: "metadata.originInfo.publisher"
+        year: "metadata.originInfo.issued"
+        isbn: "metadata.identifiers[type=ISBN].value"
+        language: "metadata.languages[0].code"
+        url: "_links.self.href"
+    
+    response_parsing:
+      results_path: "_embedded.items"
+      total_path: "page.totalElements"
+    
+    author_parsing:
+      format: "lastname_firstname"  # "LastName, FirstName"
+      separator: ", "
+      clean_patterns:
+        - "Likhetens paradokser"  # Skip non-author entries
+    
+    tags:
+      content_classes: "metadata.contentClasses"
+      media_types: "metadata.mediaTypes"
+      exclude_patterns:
+        - "legaldeposit"
+        - "jp2"
+        - "bokhylla"
+        - "bokhyllalisens"
+
+  swedish:
+    name: "Swedish National Library (Libris)"
+    country_code: "SE"
+    language_codes: ["sv", "se"]
+    isbn_prefixes: ["91"]
+    
+    api:
+      base_url: "https://libris.kb.se"
+      endpoints:
+        search: "find"
+        item: "find/{id}"
+      headers:
+        Accept: "application/ld+json"
+      parameters:
+        _limit: 10
+    
+    field_mappings:
+      papers:
+        title: "hasTitle[0].mainTitle"
+        authors: "instanceOf.contribution"
+        journal: "publication[0].agent.label"
+        year: "publication[0].year"
+        doi: "identifiedBy[type=DOI].value"
+        issn: "identifiedBy[type=ISSN].value"
+        abstract: "hasNote[].label"
+        language: "instanceOf.language[0].code"
+        url: "@id"
+      
+      books:
+        title: "hasTitle[0].mainTitle"
+        authors: "instanceOf.contribution"
+        publisher: "publication[0].agent.label"
+        year: "publication[0].year"
+        isbn: "identifiedBy[type=ISBN].value"
+        language: "instanceOf.language[0].code"
+        url: "@id"
+    
+    response_parsing:
+      results_path: "items"
+      total_path: "totalItems"
+    
+    author_parsing:
+      format: "name"  # Direct name field
+      separator: null
+      clean_patterns: []
+
+  finnish:
+    name: "Finnish National Library (Finna)"
+    country_code: "FI"
+    language_codes: ["fi", "sv"]
+    isbn_prefixes: ["951", "952"]
+    
+    api:
+      base_url: "https://api.finna.fi"
+      endpoints:
+        search: "v1/search"
+        item: "v1/record/{id}"
+      parameters:
+        limit: 10
+        type: "AllFields"
+    
+    field_mappings:
+      papers:
+        title: "title"
+        authors: "nonPresenterAuthors"
+        journal: "series"
+        year: "year"
+        doi: "cleanDoi"
+        issn: "cleanIssn"
+        abstract: "summary"
+        language: "languages"
+        url: "urls"
+      
+      books:
+        title: "title"
+        authors: "nonPresenterAuthors"
+        publisher: "publishers"
+        year: "year"
+        isbn: "cleanIsbn"
+        language: "languages"
+        url: "urls"
+    
+    response_parsing:
+      results_path: "records"
+      total_path: "resultCount"
+    
+    author_parsing:
+      format: "name"
+      separator: null
+      clean_patterns: []
+
+  danish:
+    name: "Danish National Library"
+    country_code: "DK"
+    language_codes: ["da", "dk"]
+    isbn_prefixes: ["87"]
+    
+    api:
+      base_url: "https://api.dbc.dk"
+      endpoints:
+        search: "search"
+        item: "items/{id}"
+      parameters:
+        default_size: 10
+    
+    field_mappings:
+      papers:
+        title: "title"
+        authors: "authors"
+        journal: "journal"
+        year: "year"
+        doi: "doi"
+        issn: "issn"
+        abstract: "abstract"
+        language: "da"
+        url: "url"
+      
+      books:
+        title: "title"
+        authors: "authors"
+        publisher: "publisher"
+        year: "year"
+        isbn: "isbn"
+        language: "da"
+        url: "url"
+    
+    response_parsing:
+      results_path: "results"
+      total_path: "total"
+    
+    author_parsing:
+      format: "name"
+      separator: null
+      clean_patterns: []
+
+  german:
+    name: "German National Library (DNB) - IN PROGRESS"
+    country_code: "DE"
+    language_codes: ["de", "ger"]
+    isbn_prefixes: ["3"]
+    status: "IN_PROGRESS"  # XML parsing works, but author extraction needs GND lookup
+    notes: "XML parsing implemented, but authors are GND references not names. Not ready for production use."
+    
+    api:
+      base_url: "https://services.dnb.de/sru/dnb"
+      endpoints:
+        search: ""  # No additional path needed
+        item: ""    # No additional path needed
+      parameters:
+        version: "1.1"
+        operation: "searchRetrieve"
+        query: "isbn={query}"  # Use {query} placeholder for ISBN
+        maximumRecords: 10
+    
+    field_mappings:
+      papers:
+        title: "recordData.RDF.Description.title"
+        authors: "recordData.RDF.Description.edt"
+        journal: "recordData.RDF.Description.source"
+        year: "recordData.RDF.Description.issued"
+        doi: "recordData.RDF.Description.identifier[type=doi]"
+        issn: "recordData.RDF.Description.identifier[type=issn]"
+        abstract: "recordData.RDF.Description.abstract"
+        language: "recordData.RDF.Description.language"
+        url: "recordData.RDF.Description.identifier[type=uri]"
+      
+      books:
+        title: "recordData.RDF.Description.title"
+        authors: "recordData.RDF.Description.edt"
+        publisher: "recordData.RDF.Description.publisher"
+        year: "recordData.RDF.Description.issued"
+        isbn: "recordData.RDF.Description.isbn13"
+        language: "recordData.RDF.Description.language"
+        url: "recordData.RDF.Description.identifier[type=uri]"
+    
+    response_parsing:
+      results_path: "records.record"
+      total_path: "numberOfRecords"
+      is_list: false
+    
+    author_parsing:
+      format: "name"
+      separator: null
+      clean_patterns: []
+
+  # English-speaking libraries (default fallbacks)
+  google_books:
+    name: "Google Books API"
+    country_code: "GLOBAL"
+    language_codes: ["en", "eng"]
+    isbn_prefixes: ["0", "1"]  # US/UK prefixes
+    is_default: true  # Mark as default library
+    
+    api:
+      base_url: "https://www.googleapis.com/books/v1"
+      endpoints:
+        search: "volumes"
+        item: "volumes/{id}"
+      parameters:
+        q: "isbn:{isbn}"  # Use ISBN search format
+        maxResults: 10
+        printType: "books"
+    
+    field_mappings:
+      papers:
+        title: "volumeInfo.title"
+        authors: "volumeInfo.authors"
+        journal: "volumeInfo.publisher"
+        year: "volumeInfo.publishedDate"
+        doi: "volumeInfo.industryIdentifiers[type=OTHER].identifier"
+        issn: "volumeInfo.industryIdentifiers[type=ISSN].identifier"
+        abstract: "volumeInfo.description"
+        language: "volumeInfo.language"
+        url: "volumeInfo.infoLink"
+      
+      books:
+        title: "volumeInfo.title"
+        authors: "volumeInfo.authors"
+        publisher: "volumeInfo.publisher"
+        year: "volumeInfo.publishedDate"
+        isbn: "volumeInfo.industryIdentifiers[type=ISBN_13].identifier"
+        language: "volumeInfo.language"
+        url: "volumeInfo.infoLink"
+    
+    response_parsing:
+      results_path: "items"
+      total_path: "totalItems"
+    
+    author_parsing:
+      format: "name"
+      separator: null
+      clean_patterns: []
+
+  openlibrary:
+    name: "OpenLibrary"
+    country_code: "GLOBAL"
+    language_codes: ["en", "eng"]
+    isbn_prefixes: ["0", "1"]
+    is_default: true  # Mark as default library
+    
+    api:
+      base_url: "https://openlibrary.org/api/books"
+      endpoints:
+        search: ""  # No additional path needed
+        item: ""
+      parameters:
+        bibkeys: "ISBN:{query}"  # Use {query} placeholder for ISBN
+        format: "json"
+        jscmd: "data"
+    
+    field_mappings:
+      papers:
+        title: "title"
+        authors: "authors"
+        journal: "publishers[0].name"
+        year: "publish_date"
+        doi: "identifiers.doi"
+        issn: "identifiers.issn"
+        abstract: "excerpts[0].text"
+        language: "languages[0].name"
+        url: "url"
+      
+      books:
+        title: "title"
+        authors: "authors"
+        publisher: "publishers[0].name"
+        year: "publish_date"
+        isbn: "isbn"
+        language: "languages[0].name"
+        url: "url"
+    
+    response_parsing:
+      results_path: "ISBN:{isbn}"  # OpenLibrary returns data keyed by ISBN
+      total_path: null
+      is_direct_result: true  # The response IS the book data, not a list
+    
+    author_parsing:
+      format: "name"
+      separator: null
+      clean_patterns: []
+
+# Global settings
+global_settings:
+  rate_limit_delay: 1.0
+  timeout: 30
+  max_retries: 3
+  default_language: "en"
