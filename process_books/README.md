@@ -20,7 +20,7 @@ This module handles the complete book processing workflow from photo to Zotero l
 conda activate research-tools
 
 # Process books
-python scripts/process_books.py
+python scripts/find_isbn_from_photos.py
 
 # Look up ISBN metadata
 python scripts/enhanced_isbn_lookup_detailed.py

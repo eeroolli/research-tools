@@ -3,7 +3,7 @@
 This module handles the complete academic paper processing workflow from scanning to Zotero library integration.
 
 ## Work in Progress
-There is a document IMPLEMENTATION_PLAN.md that describes how the project is moving along. Some parts of the project are working well. Others do not exist yet.
+There is a document implementation-plan.md that describes how the project is moving along. Some parts of the project are working well. Others do not exist yet.
 
 ## Features
 
