@@ -16,6 +16,7 @@ from collections import Counter
 import concurrent.futures
 import signal
 import configparser
+from ..utils.thread_pool_manager import thread_pool_manager
 
 @dataclass
 class ImageData:
@@ -47,8 +48,21 @@ class SmartIntegratedProcessorV3:
         
         # Load configuration
         config = configparser.ConfigParser()
-        config.read("config/scanpapers.conf")
+        config.read("config/process_books.conf")
         self.ocr_timeout = config.getint('processing', 'ocr_timeout', fallback=60)
+        
+        # Initialize CPU throttling
+        max_concurrent = config.getint('processing', 'max_concurrent_tesseract', fallback=4)
+        cpu_threshold = config.getfloat('processing', 'cpu_threshold', fallback=80.0)
+        throttle_delay = config.getfloat('processing', 'throttle_delay', fallback=1.0)
+        check_interval = config.getfloat('processing', 'cpu_check_interval', fallback=2.0)
+        
+        thread_pool_manager.initialize(
+            max_workers=max_concurrent,
+            cpu_threshold=cpu_threshold,
+            throttle_delay=throttle_delay,
+            check_interval=check_interval
+        )
         
         # Enable Intel GPU acceleration
         try:
@@ -90,6 +104,67 @@ class SmartIntegratedProcessorV3:
         
         # Check for ISBN keyword or ISBN-like patterns
         return bool(self.isbn_pattern.search(text))
+    
+    def _process_strategies_with_images(self, strategies, rotated_images, result, size_suffix, size_description):
+        """
+        Process strategies with given rotated images.
+        
+        Args:
+            strategies: List of (strategy_name, strategy_func) tuples
+            rotated_images: Dict of rotation_name -> image
+            result: ImageData object to update
+            size_suffix: Suffix for preprocessing_used (e.g., "_small", "_full")
+            size_description: Description for logging (e.g., "small image", "full-size")
+            
+        Returns:
+            bool: True if ISBN found, False otherwise
+        """
+        found_isbn = False
+        
+        for strategy_name, strategy_func in strategies:
+            result.attempts += 1
+            print(f"    Trying strategy {result.attempts}/{len(strategies)*2}: {strategy_name} ({size_description})")
+            self.logger.debug(f"Attempt {result.attempts}: {strategy_name} ({size_description})")
+            
+            try:
+                # Apply timeout to entire strategy (all rotations)
+                strategy_start_time = time.time()
+                
+                # Submit all rotation attempts using global thread pool
+                future_to_rotation = {}
+                for rotation_name, rotated_img in rotated_images.items():
+                    future = thread_pool_manager.submit(strategy_func, rotated_img)
+                    future_to_rotation[future] = rotation_name
+                
+                # Wait for first successful result or timeout
+                try:
+                    for future in concurrent.futures.as_completed(future_to_rotation, timeout=self.ocr_timeout):
+                        text = future.result()
+                        if text and self.has_potential_isbn(text):  # Found text with potential ISBN
+                            rotation_name = future_to_rotation[future]
+                            strategy_time = time.time() - strategy_start_time
+                            result.ocr_text = text
+                            result.preprocessing_used = f"{strategy_name}_{rotation_name}{size_suffix}"
+                            self.logger.info(f"✅ Found potential ISBN text with {strategy_name} on {rotation_name} ({size_description}) after {result.attempts} attempts (strategy took {strategy_time:.1f}s)")
+                            found_isbn = True
+                            break
+                        elif text:  # Found text but no ISBN pattern
+                            rotation_name = future_to_rotation[future]
+                            strategy_time = time.time() - strategy_start_time
+                            self.logger.debug(f"Found text with {strategy_name} on {rotation_name} ({size_description}) but no ISBN pattern (strategy took {strategy_time:.1f}s)")
+                            # Continue trying other strategies
+                except concurrent.futures.TimeoutError:
+                    strategy_time = time.time() - strategy_start_time
+                    self.logger.warning(f"Strategy {strategy_name} ({size_description}) timeout after {self.ocr_timeout}s (actual time: {strategy_time:.1f}s)")
+                
+                if found_isbn:
+                    break
+                        
+            except Exception as e:
+                self.logger.debug(f"Strategy {strategy_name} ({size_description}) failed: {e}")
+                continue
+        
+        return found_isbn
     
     def detect_full_frame_size(self, photo_batch: List[Path]):
         """Detect the full frame size from first 10 photos"""
@@ -507,6 +582,7 @@ class SmartIntegratedProcessorV3:
             # First try barcode detection with rotation (fastest)
             barcode_result = self.detect_barcode_with_rotation(image)
             if barcode_result:
+                result.attempts += 1  # Count early barcode detection as attempt 1
                 self.logger.info(f"Barcode found early: {barcode_result}")
                 result.barcode = barcode_result
                 result.preprocessing_used = "barcode_early"
@@ -527,55 +603,41 @@ class SmartIntegratedProcessorV3:
                 # Fall back to original orientation logic
                 image = self.orient_image(image, stats)
             
-            # Create rotated versions for reuse
-            rotated_images = {
+            # Create small image for fast processing (same as fast_rotation_detection)
+            height, width = image.shape[:2]
+            small_height = int(height * self.fast_resize_factor)
+            small_width = int(width * self.fast_resize_factor)
+            small_image = cv2.resize(image, (small_width, small_height))
+            
+            # Create rotated versions for both sizes
+            rotated_images_full = {
                 'original': image,
                 'rotated_270': cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE),
                 'rotated_90': cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE),
                 'rotated_180': cv2.rotate(image, cv2.ROTATE_180)
             }
             
+            rotated_images_small = {
+                'original': small_image,
+                'rotated_270': cv2.rotate(small_image, cv2.ROTATE_90_COUNTERCLOCKWISE),
+                'rotated_90': cv2.rotate(small_image, cv2.ROTATE_90_CLOCKWISE),
+                'rotated_180': cv2.rotate(small_image, cv2.ROTATE_180)
+            }
+            
             # Get processing strategies
             strategies = self.get_processing_strategies(image, stats)
             
-            self.logger.info(f"Will try up to {len(strategies)} strategies")
+            self.logger.info(f"Will try up to {len(strategies) * 2} strategies (two-tier: small images first, then full-size)")
             
-            # Try each strategy
+            # TIER 1: Try small images first (faster, better for blurry images)
             found_isbn = False
-            for strategy_name, strategy_func in strategies:
-                result.attempts += 1
-                print(f"    Trying strategy {result.attempts}/{len(strategies)}: {strategy_name}")
-                self.logger.debug(f"Attempt {result.attempts}: {strategy_name}")
-                
-                try:
-                    # Apply timeout to entire strategy (all rotations)
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        # Submit all rotation attempts
-                        future_to_rotation = {}
-                        for rotation_name, rotated_img in rotated_images.items():
-                            future = executor.submit(strategy_func, rotated_img)
-                            future_to_rotation[future] = rotation_name
-                        
-                        # Wait for first successful result or timeout
-                        try:
-                            for future in concurrent.futures.as_completed(future_to_rotation, timeout=self.ocr_timeout):
-                                text = future.result()
-                                if text:  # Found text with potential ISBN
-                                    rotation_name = future_to_rotation[future]
-                                    result.ocr_text = text
-                                    result.preprocessing_used = f"{strategy_name}_{rotation_name}"
-                                    self.logger.info(f"✅ Found potential ISBN text with {strategy_name} on {rotation_name} after {result.attempts} attempts")
-                                    found_isbn = True
-                                    break
-                        except concurrent.futures.TimeoutError:
-                            self.logger.warning(f"Strategy {strategy_name} timeout after {self.ocr_timeout}s")
-                    
-                    if found_isbn:
-                        break
-                            
-                except Exception as e:
-                    self.logger.debug(f"Strategy {strategy_name} failed: {e}")
-                    continue
+            self.logger.info("Tier 1: Processing with small images (25% size)")
+            found_isbn = self._process_strategies_with_images(strategies, rotated_images_small, result, "_small", "small image")
+            
+            # TIER 2: If no success with small images, try full-size images
+            if not found_isbn:
+                self.logger.info("Tier 2: Processing with full-size images (fallback)")
+                found_isbn = self._process_strategies_with_images(strategies, rotated_images_full, result, "_full", "full-size")
             
             if not found_isbn:
                 self.logger.warning(f"❌ No ISBN-like text found after {result.attempts} attempts")

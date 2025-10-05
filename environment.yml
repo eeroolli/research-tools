@@ -1,5 +1,5 @@
 # environment.yml
-# Consolidated environment for SmartIntegratedProcessorV3 with Intel GPU optimization
+# Clean environment for research-tools with only actively used dependencies
 # Optimized for Intel i7 with UHD 620 GPU
 
 name: research-tools
@@ -8,11 +8,9 @@ channels:
   - defaults
 dependencies:
   - python=3.11  # Intel Python 3.11 for better optimization
-  - opencv  # Intel optimized OpenCV
+  - opencv  # Intel optimized OpenCV for image preprocessing
   - pyzbar  # Barcode detection
   - pillow  # Image processing
-  - sqlite  # Database
-  - pandas  # Data processing
   - pyyaml  # Configuration files
   - pytesseract  # OCR engine
   - requests  # API calls
@@ -23,10 +21,5 @@ dependencies:
   - tbb  # Intel Threading Building Blocks
   - pip
   - pip:
-    - easyocr  # Alternative OCR with GPU support
-    - paddlepaddle  # Intel optimized version
-    - paddleocr  # Alternative OCR
     - pyzotero  # Zotero API integration
-    - intel-extension-for-pytorch  # Intel PyTorch optimizations
-    - pymupdf  # PDF processing for academic papers
-    - fuzzywuzzy  # Fuzzy string matching for Zotero integration
+    - psutil  # System and process monitoring for CPU throttling

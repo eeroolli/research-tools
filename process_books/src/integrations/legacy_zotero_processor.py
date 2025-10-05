@@ -313,8 +313,8 @@ class ZoteroAPIBookProcessor:
         self.isbn_lookup = DetailedISBNLookupService()
         
         # File paths
-        self.isbn_log_file = "/mnt/f/prog/research-tools/data/book_processing_log.json"
-        self.decisions_file = "/mnt/f/prog/research-tools/data/book_decisions.json"
+        self.isbn_log_file = "data/books/book_processing_log.csv"
+        self.decisions_file = "data/books/book_decisions.json"
         
         print(f"Enhanced Zotero API Processor initialized")
         print(f"Library: {self.library_type}/{self.library_id}")
@@ -593,9 +593,13 @@ class ZoteroAPIBookProcessor:
         
         try:
             # Read from the book processing log
-            log_file = "/mnt/f/prog/research-tools/data/book_processing_log.json"
-            with open(log_file, 'r') as f:
-                data = json.load(f)
+            log_file = "data/books/book_processing_log.csv"
+            import csv
+            data = []
+            if Path(log_file).exists():
+                with open(log_file, 'r', encoding='utf-8', newline='') as f:
+                    reader = csv.DictReader(f)
+                    data = list(reader)
                 
             for file_path, result in data.items():
                 if result.get('status') == 'success' and result.get('isbn'):
