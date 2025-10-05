@@ -14,3 +14,5 @@ config.personal.conf
 # API keys and sensitive data
 *_keys.txt
 *_secrets.conf
+__pycache__/
+*.pyc
