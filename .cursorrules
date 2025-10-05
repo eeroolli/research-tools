@@ -1,0 +1,110 @@
+# Cursor AI Rules
+
+## Problem Analysis First
+- Always ask clarifying questions until there is complete clarity
+- Verify we are working on the right problem before proceeding
+- Never lose sight of the core purpose and objectives
+
+## Code Quality Standards
+- Write robust, clear, and maintainable code
+- Avoid fragile hacks and shortcuts
+- Prefer explicit, well-documented logic over clever tricks
+- Use appropriate tools for the task (e.g., `csvtool` for CSVs, not `awk` or `read`)
+
+## Path Management
+- Use relative paths for all critical files (logs, CSVs, hash databases)
+- Ensure paths relate to config to reduce ambiguity
+- Scripts must work regardless of current working directory
+
+## Configuration Management
+- All scripts in a project must source a single config file
+- Use `config.conf` or `[project_name].conf` for centralized settings
+- No hardcoded paths in scripts—everything must be configurable
+- Store paths, log locations, and settings in config files
+
+## Naming Conventions
+- Use clear, consistent terminology throughout the project
+- Maintain naming consistency across all files and functions
+
+## Efficiency and Incremental Processing
+- Scripts must be incremental and efficient
+- Avoid reprocessing or rehashing files unnecessarily
+- Use persistent hash databases and update only as needed
+
+## Safety First
+- Deletion scripts must be safe
+- Only delete images provably imported by hash
+- Always prompt for confirmation before destructive actions
+- Never delete images based on filename alone—use hash verification
+
+## Comprehensive Logging
+- Maintain both human-readable summary logs and detailed CSV logs
+- Log all operations with appropriate detail levels
+- Use year-based log rotation for easy management and review
+
+## Tool Selection
+- Use standard, well-established tools when possible
+- Document installation and usage for any non-standard tools
+- Choose tools appropriate for project nature (bash, python, powershell, R, etc.)
+
+## Environment Considerations
+- Ignore `.bak` files created by UltraEdit in Git
+- Use IDE features to identify problems and suggest fixes
+- Account for Win 11 with WSL2 environment
+- Support Zotero 7 integration
+- Handle bash, python, and powershell scripts appropriately
+
+## Code Bloat Prevention
+- Do not add new functions without considering if existing code can be improved
+- Refactor existing code before adding new functionality
+- Bigger is not better—simplicity and clarity are paramount
+
+## Commit Message Standards
+- Use project-wide prefixes in all commit messages:
+  - `fix:` for bug fixes
+  - `debug:` for debugging changes
+  - `feature:` for new features
+  - `minor:` for minor improvements
+
+## Documentation Requirements
+- Keep documentation synchronized with codebase changes
+- Update docs when changing workflows, file names, or conventions
+- Write clean, simple comments—code should be readable without them
+- Maintain up-to-date README and configuration documentation
+
+## Best Practices Adherence
+- Follow industry best practices for security, robustness, testing, and formatting
+- Prioritize maintainability and code quality
+- Implement proper error handling and validation
+
+## Mentorship and Learning
+- Guide toward best practices in security, robustness, testing, formatting, and maintenance
+- Act as a mentor by pointing out areas for improvement
+- Teach proper techniques and explain reasoning
+- Help choose the best tools for the right problems
+- Question approach complexity—are we overcomplicating solutions?
+
+## Communication Format
+- Do not use icons except for error or success indicators in user messages
+- Keep communication clear and professional
+
+## AI Assistant Workflow
+1. **Problem Analysis**
+   - Analyze the issue thoroughly
+   - Identify root causes
+   - Present findings clearly
+
+2. **Solution Proposal**
+   - Propose specific solutions
+   - Explain what will change
+   - Highlight risks and considerations
+
+3. **Permission Request**
+   - Always ask: "Would you like me to implement this solution?"
+   - Wait for explicit approval before making changes
+   - Never assume permission to proceed
+
+4. **Implementation After Approval**
+   - Implement only after receiving "yes" or "proceed"
+   - Make changes exactly as proposed
+   - Confirm completion and results
