@@ -159,7 +159,7 @@ class UnifiedMetadataManager:
 *New dedicated workflow for academic papers using Ollama 7B*
 
 #### 4.1 Paper Processing Architecture
-- [ ] **Create `scripts/process_scanned_papers.py`** - New paper workflow script
+- [x] **Create `scripts/process_scanned_papers.py`** - New paper workflow scaffold
 - [ ] **Extend existing `DetailedISBNLookupService`** - Add academic paper APIs
 - [ ] **Reuse Zotero integration** - Leverage existing `ZoteroAPIBookProcessor` code
 - [ ] **Shared utilities** - Common OCR, file management, logging functions
@@ -167,7 +167,7 @@ class UnifiedMetadataManager:
 #### 4.2 Ollama 7B Integration
 - [ ] **Identifier extraction** - Extract DOI, title, authors, journal, year from first page
 - [ ] **OCR text cleaning** - Handle messy OCR output with AI
-- [ ] **Structured output** - Return JSON with extracted identifiers
+- [x] **Structured output** - Return JSON with extracted identifiers (scaffold in place)
 - [ ] **Fallback strategies** - Multiple extraction approaches if primary fails
 
 #### 4.3 Academic Metadata Lookup
@@ -213,7 +213,14 @@ class UnifiedMetadataManager:
 #### 5.3 Cleanup Phase
 - [ ] **File:** `shared_tools/api/national_libraries.py`
   - **Action:** Delete after migration complete
-  - **Status:** Old hardcoded clients, still exists
+  - **Status:** Old hardcoded clients, still exists, **VERIFIED UNUSED**
+- [ ] **File:** `process_papers/` (entire directory)
+  - **Action:** Delete unused paper processing module
+  - **Status:** Not used, paper processing planned for Phase 4
+- [ ] **File:** `test_isbn_detection.py`
+  - **Action:** Delete obsolete test file
+  - **Status:** Temporary debugging file, not used
+- [ ] **Reference:** See `cleaning_the_codebase_after_verification.md` for detailed cleanup analysis
 
 ### **Phase 6: Integration & Testing** 🧪
 *End-to-end testing and core functionality validation*
@@ -410,7 +417,165 @@ def process_document_photo(photo_path):
 7. **Paper Workflow**: Ollama 7B vs cloud AI for identifier extraction?
 8. **Hybrid Processing**: Is photo-based document classification worth the complexity?
 
-## Recent Work Completed
+## Completed Features & Current Capabilities
+
+### **Book Processing System** ✅
+*Fully functional with advanced features*
+
+#### Core Functionality
+- **ISBN Extraction**: Barcode detection (pyzbar) + OCR processing (Tesseract)
+- **Smart Image Processing**: SmartIntegratedProcessorV3 with Intel GPU optimization
+- **Multi-Strategy OCR**: 8+ different preprocessing strategies with intelligent fallback
+- **Batch Processing**: Handles multiple photos with intelligent crop detection
+- **Success Tracking**: Moves successful photos to `done/`, failed to `failed/`
+
+#### ISBN Processing Pipeline
+- **Barcode Detection**: 0.6 seconds average, 95% success rate
+- **OCR Processing**: 60-120 seconds with multiple strategies
+- **ISBN Validation**: Enhanced regex patterns with ISBN-10/ISBN-13 conversion
+- **CSV Logging**: Comprehensive logging to `data/books/book_processing_log.csv`
+
+#### Metadata Lookup System
+- **OpenLibrary API**: Books with detailed metadata, subjects, excerpts
+- **Google Books API**: Additional book information, categories
+- **Norwegian National Library API**: Norwegian-specific books, content classes
+- **Smart Scoring**: Combines results from all sources, picks best match
+- **Tag Integration**: Merges metadata tags from all sources
+
+#### Zotero Integration
+- **Multi-Digit Input System**: Combine actions like `17` (group1 tags + update metadata)
+- **Configurable Tag Groups**: group1, group2, group3 from config files
+- **Smart Item Handling**: Different workflows for existing vs new items
+- **Duplicate Detection**: Searches existing library, shows duplicates found
+- **Interactive Menu**: Enhanced menu with action descriptions and differences
+- **Metadata Comparison**: Shows differences between Zotero and online data
+- **Tag Management**: Add/remove tags, combine with metadata tags
+- **Item Updates**: Update author, title, or all metadata fields
+- **Item Removal**: Delete items with confirmation
+
+#### Configuration System
+- **Two-Tier Config**: `config.conf` (public) + `config.personal.conf` (private)
+- **Tag Groups**: Configurable tag groups for different purposes
+- **Action Definitions**: Configurable actions with descriptions
+- **Menu Options**: Configurable display options
+- **API Credentials**: Secure Zotero API key management
+
+#### File Management
+- **Photo Organization**: Automatic sorting into `done/` and `failed/` folders
+- **CSV Logging**: Standardized logging format for analysis
+- **Error Handling**: Comprehensive error logging and retry logic
+- **Path Management**: Relative paths for portability
+
+### **Shared Tools & Infrastructure** ✅
+*Common utilities and services used across the system*
+
+#### ISBN Matching System
+- **ISBNMatcher Class**: Centralized ISBN utilities in `shared_tools/utils/isbn_matcher.py`
+- **Normalization**: Converts ISBN-10 to ISBN-13, handles various formats
+- **Extraction**: Extracts clean ISBN from text with additional info like "(pbk.)"
+- **Validation**: Validates ISBN checksums and formats
+- **Matching**: Enhanced matching with substring approach and format conversion
+
+#### Configuration Management
+- **ConfigParser Integration**: Loads from multiple config files with override logic
+- **Personal Overrides**: `config.personal.conf` overrides `config.conf` settings
+- **Section Support**: TAG_GROUPS, ACTIONS, MENU_OPTIONS, APIS sections
+- **Error Handling**: Graceful fallback when config sections missing
+
+#### Data Structure
+- **Centralized Data Directory**: Single `data/` directory with organized subfolders
+- **CSV Logging**: Converted from JSON to CSV for better analysis
+- **Standardized Fields**: filename, status, isbn, method, confidence, attempts, processing_time, retry_count, timestamp, error
+- **Zotero Fields**: Extended with zotero_decision, zotero_item_key, zotero_action_taken, zotero_timestamp
+
+#### API Integration
+- **Zotero API**: Full CRUD operations (create, read, update, delete)
+- **Rate Limiting**: Built-in delays to respect API limits
+- **Error Handling**: Comprehensive error handling with user feedback
+- **Library Support**: Both user and group libraries supported
+
+### **Development Infrastructure** ✅
+*Tools and processes for development and maintenance*
+
+#### Environment Setup
+- **Conda Environment**: `research-tools` environment with all dependencies
+- **Intel GPU Optimization**: OpenVINO integration for image preprocessing
+- **CPU Throttling**: Global thread pool manager prevents system overload
+- **Dependency Management**: Cleaned up unused dependencies (EasyOCR, PaddleOCR, PyMuPDF)
+
+#### Testing & Debugging
+- **Debug Mode**: Environment variable `DEBUG=1` for verbose output
+- **Process Indicators**: Real-time feedback during processing
+- **Error Logging**: Comprehensive error tracking and reporting
+- **Success Metrics**: Performance tracking and success rate monitoring
+
+#### Code Quality
+- **Modular Design**: Shared utilities and common functions
+- **Error Handling**: Graceful failure with detailed error messages
+- **Code Refactoring**: Eliminated duplication, improved maintainability
+- **Documentation**: Inline comments and docstrings throughout
+
+### **Current Scripts & Functionality** ✅
+*Working scripts and their specific capabilities*
+
+#### `scripts/find_isbn_from_photos.py`
+- **Purpose**: Extract ISBNs from book photos using barcode detection and OCR
+- **Input**: Photos in `/mnt/i/FraMobil/Camera/Books/`
+- **Output**: CSV log with ISBNs and processing details
+- **Features**: 
+  - SmartIntegratedProcessorV3 with Intel GPU optimization
+  - 6 OCR preprocessing strategies with fallback
+  - Automatic photo organization (done/failed folders)
+  - Comprehensive error logging and retry logic
+
+#### `scripts/add_or_remove_books_zotero.py`
+- **Purpose**: Interactive Zotero integration for processed ISBNs
+- **Input**: ISBNs from `data/books/book_processing_log.csv`
+- **Output**: Books added to Zotero with rich metadata
+- **Features**:
+  - Multi-digit input system (e.g., `17` for group1 tags + update metadata)
+  - Configurable tag groups (group1, group2, group3)
+  - Smart item handling (existing vs new items)
+  - Duplicate detection and management
+  - Metadata comparison and updates
+  - Interactive menu with action descriptions
+
+#### `scripts/manual_isbn_metadata_search.py`
+- **Purpose**: Manual ISBN lookup and metadata search
+- **Input**: Single ISBN from user input
+- **Output**: Detailed metadata from multiple sources
+- **Features**:
+  - Interactive ISBN input and validation
+  - Multi-source metadata lookup (OpenLibrary, Google Books, Norwegian Library)
+  - Rich metadata display with tags and abstracts
+  - Zotero integration for adding items
+
+#### `shared_tools/utils/isbn_matcher.py`
+- **Purpose**: Centralized ISBN utilities and matching
+- **Features**:
+  - ISBN normalization (ISBN-10 ↔ ISBN-13)
+  - Clean ISBN extraction from complex text
+  - ISBN validation with checksum verification
+  - Enhanced matching with format conversion
+  - Substring matching for partial ISBNs
+
+### **Data Files & Logs** ✅
+*Current data structure and logging system*
+
+#### `data/books/book_processing_log.csv`
+- **Purpose**: Central log for all book processing activities
+- **Fields**: filename, status, isbn, method, confidence, attempts, processing_time, retry_count, timestamp, error, zotero_decision, zotero_item_key, zotero_action_taken, zotero_timestamp
+- **Usage**: Tracks processing history and Zotero decisions
+
+#### `data/logs/`
+- **Purpose**: Application logs for debugging and monitoring
+- **Content**: Processing logs, error logs, performance metrics
+- **Rotation**: Year-based log rotation for easy management
+
+#### `config.conf` & `config.personal.conf`
+- **Purpose**: Configuration management with personal overrides
+- **Sections**: TAG_GROUPS, ACTIONS, MENU_OPTIONS, APIS
+- **Security**: Personal config not committed to GitHub
 
 ### **OCR Processing Improvements** ✅
 - **CPU Throttling**: Implemented global thread pool manager with CPU monitoring
