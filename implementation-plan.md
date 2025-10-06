@@ -53,6 +53,12 @@
 ### **Phase 0: Data Structure Cleanup** 🧹
 *Consolidate scattered data directories and logs*
 
+#### 0.0 Ollama Installation and Setup
+- [ ] **Install Ollama** - Local AI for privacy-sensitive processing
+- [ ] **Configure models** - llama2, codellama, mistral for different tasks
+- [ ] **Environment setup** - GPU acceleration with Intel UHD Graphics 630
+- [ ] **Integration testing** - Verify Ollama works with research-tools system
+
 #### 0.1 Consolidate Data Directories ✅
 - [x] **Remove duplicate data directories** - process_books/data/, process_papers/data/, scripts/data/
 - [x] **Consolidate all logs** - Move scattered logs to data/logs/
@@ -127,11 +133,15 @@ class UnifiedMetadataManager:
 - [ ] Extract DOI, title, authors, abstract from first page
 - [ ] Smart identification strategy (DOI → Title+Authors → Abstract keywords)
 - [ ] Handle multiple identification methods with confidence scoring
+- [ ] **Hybrid AI approach** - Claude for complex reasoning, Ollama for privacy-sensitive data
+- [ ] **Fallback strategy** - Use both AI systems for redundancy and accuracy
 
 #### 3.2 AI-Enhanced OCR
 - [ ] LLM-based text correction for OCR errors
 - [ ] Context-aware metadata extraction
 - [ ] Language detection and processing
+- [ ] **Ollama integration** - Local AI for OCR text correction and metadata parsing
+- [ ] **Claude integration** - Cloud AI for complex reasoning and high-accuracy extraction
 
 #### 3.3 Smart Annotation Processing
 - [ ] AI-powered annotation separation (handwritten notes, highlights)
@@ -142,11 +152,47 @@ class UnifiedMetadataManager:
 - [ ] Fill missing metadata fields using AI
 - [ ] Validate and correct extracted metadata
 - [ ] Suggest tags and categories based on content
+- [ ] **Dual AI validation** - Cross-check results between Claude and Ollama
+- [ ] **Confidence scoring** - Rate metadata quality from each AI system
 
-### **Phase 4: Detailed Migration Tasks** 📋
+### **Phase 4: Paper Scanning Workflow** 📄
+*New dedicated workflow for academic papers using Ollama 7B*
+
+#### 4.1 Paper Processing Architecture
+- [ ] **Create `scripts/process_scanned_papers.py`** - New paper workflow script
+- [ ] **Extend existing `DetailedISBNLookupService`** - Add academic paper APIs
+- [ ] **Reuse Zotero integration** - Leverage existing `ZoteroAPIBookProcessor` code
+- [ ] **Shared utilities** - Common OCR, file management, logging functions
+
+#### 4.2 Ollama 7B Integration
+- [ ] **Identifier extraction** - Extract DOI, title, authors, journal, year from first page
+- [ ] **OCR text cleaning** - Handle messy OCR output with AI
+- [ ] **Structured output** - Return JSON with extracted identifiers
+- [ ] **Fallback strategies** - Multiple extraction approaches if primary fails
+
+#### 4.3 Academic Metadata Lookup
+- [ ] **CrossRef API integration** - DOI-based paper lookup
+- [ ] **PubMed API integration** - Medical/biological papers
+- [ ] **arXiv API integration** - Preprints and technical papers
+- [ ] **OpenAlex API integration** - Comprehensive academic database
+- [ ] **Smart routing** - Route queries to appropriate APIs based on identifiers
+
+#### 4.4 File Management System
+- [ ] **PDF processing** - Extract first page for OCR
+- [ ] **File renaming** - `Author_Year_Title.pdf` format
+- [ ] **Directory organization** - Store in `g:/publications/` structure
+- [ ] **Zotero linking** - Attach renamed files to Zotero items
+
+#### 4.5 Workflow Integration
+- [ ] **Separate but similar** - Books and papers use same underlying systems
+- [ ] **Configuration sharing** - Reuse existing config system
+- [ ] **Logging consistency** - Same CSV logging format
+- [ ] **User interface** - Similar interaction patterns
+
+### **Phase 5: Detailed Migration Tasks** 📋
 *From archive/AI_CHAT_DOCUMENTS.md - migrate existing hardcoded systems*
 
-#### 4.1 Book Processing Migration
+#### 5.1 Book Processing Migration
 - [ ] **File:** `process_books/scripts/enhanced_isbn_lookup_detailed.py`
   - **Action:** Replace hardcoded national library calls with config-driven manager
   - **Status:** Uses old hardcoded system, needs migration
@@ -159,50 +205,86 @@ class UnifiedMetadataManager:
   - **Action:** Update to use new system
   - **Status:** Uses old hardcoded system, needs migration
 
-#### 4.2 Paper Processing Migration
+#### 5.2 Paper Processing Migration
 - [ ] **File:** `process_papers/src/core/metadata_extractor.py`
   - **Action:** Complete integration with config-driven system
   - **Status:** Partially updated, needs full migration
 
-#### 4.3 Cleanup Phase
+#### 5.3 Cleanup Phase
 - [ ] **File:** `shared_tools/api/national_libraries.py`
   - **Action:** Delete after migration complete
   - **Status:** Old hardcoded clients, still exists
 
-### **Phase 5: Integration & Testing** 🧪
+### **Phase 6: Integration & Testing** 🧪
 *End-to-end testing and core functionality validation*
 
-#### 5.1 Comprehensive Testing
+#### 6.1 Comprehensive Testing
 - [ ] Test all migration scenarios
 - [ ] Validate unified metadata system with edge cases
 - [ ] Test AI-driven paper processing
 - [ ] Core functionality validation
 
-#### 5.2 Documentation & Cleanup
+#### 6.2 Documentation & Cleanup
 - [ ] Update all documentation
 - [ ] Archive old planning documents
 - [ ] Create user guides
 - [ ] Basic performance benchmarks
 
-### **Phase 6: Performance Optimization** ⚡
+### **Phase 7: Performance Optimization** ⚡
 *Local DB integration and performance enhancements*
 
-#### 6.1 Local Zotero Database Integration
+#### 7.1 Local Zotero Database Integration
 - [ ] Investigate Zotero SQLite schema
 - [ ] Implement local duplicate detection and metadata lookup
 - [ ] Add schema version checking and fallback to API-only mode
 - [ ] Background sync management (start, during operations, end)
 
-#### 6.2 Hybrid Lookup + API Approach
+#### 7.2 Hybrid Lookup + API Approach
 - [ ] Implement local DB lookup for performance
 - [ ] API-only for all write operations (add/update/delete)
 - [ ] User choice presentation based on local data
 - [ ] Batch local lookups for multiple items
 
-#### 6.3 Advanced Performance Features
+#### 7.3 Advanced Performance Features
 - [ ] Caching strategies for frequently accessed data
 - [ ] Optimized sync timing and background operations
 - [ ] Performance monitoring and metrics
+
+### **Phase 8: Hybrid Photo Processing** 📸
+*Experimental workflow combining book and paper approaches*
+
+#### 8.1 Photo-Based Document Processing
+- [ ] **Photo capture** - Take photo of book cover or paper title page
+- [ ] **OCR processing** - Extract text from photo
+- [ ] **AI analysis** - Use Ollama 7B to determine document type (book vs paper)
+- [ ] **Smart routing** - Route to appropriate workflow based on AI analysis
+- [ ] **Metadata extraction** - Extract identifiers using appropriate method
+
+#### 8.2 Hybrid Workflow Logic
+```python
+def process_document_photo(photo_path):
+    """Process photo to determine document type and extract metadata"""
+    # 1. OCR the photo
+    ocr_text = extract_ocr_from_photo(photo_path)
+    
+    # 2. Use AI to determine document type
+    doc_type = ollama_analyze_document_type(ocr_text)
+    
+    # 3. Route to appropriate workflow
+    if doc_type == "book":
+        return process_as_book(ocr_text)
+    elif doc_type == "paper":
+        return process_as_paper(ocr_text)
+    else:
+        return manual_classification(ocr_text)
+```
+
+#### 8.3 Implementation Considerations
+- [ ] **Accuracy assessment** - Evaluate AI's ability to distinguish document types
+- [ ] **Fallback handling** - Manual classification when AI is uncertain
+- [ ] **User interface** - Clear indication of detected document type
+- [ ] **Performance impact** - Additional AI processing time
+- [ ] **Value proposition** - Determine if complexity is worth the convenience
 
 ## Technical Architecture
 
@@ -243,6 +325,36 @@ class UnifiedMetadataManager:
 └─────────────────────────────────────────────────────────┘
 ```
 
+### **Paper Scanning Workflow Architecture**
+```
+┌─────────────────────────────────────────────────────────┐
+│                Paper Processing Pipeline                │
+├─────────────────────────────────────────────────────────┤
+│  PDF → First Page OCR → Ollama 7B → Identifier Extraction │
+│   ↓           ↓              ↓              ↓             │
+│  File    Raw Text      Clean Text    DOI/Title/Authors   │
+│   ↓           ↓              ↓              ↓             │
+│  Storage  AI Analysis   Structured    Academic APIs      │
+│   ↓           ↓              ↓              ↓             │
+│  Zotero  Document Type  JSON Output   Metadata Lookup    │
+└─────────────────────────────────────────────────────────┘
+```
+
+### **Hybrid AI Architecture**
+```
+┌─────────────────────────────────────────────────────────┐
+│                Dual AI Processing System               │
+├─────────────────────────────────────────────────────────┤
+│  OCR Text → Routing Logic → AI Processing               │
+│     ↓           ↓              ↓                         │
+│  Raw Text  Sensitive?    Claude (Cloud)                │
+│     ↓           ↓              ↓                         │
+│  Clean Text  Public?     Ollama (Local)                │
+│     ↓           ↓              ↓                         │
+│  Metadata ← Cross-Validation ← Results                 │
+└─────────────────────────────────────────────────────────┘
+```
+
 ## Success Metrics
 
 ### **Configuration-Driven System**
@@ -263,25 +375,29 @@ class UnifiedMetadataManager:
 ## Implementation Priority
 
 ### **Immediate (Next Session)**
-1. **Add OpenAlex API** - Start with academic paper sources
-2. **Design unified metadata system** - Smart routing architecture
-3. **Test unified approach** - Validate with edge cases
-4. **Migrate existing hardcoded systems** - Replace old book processing scripts
+1. **Install and configure Ollama** - Local AI for privacy-sensitive processing
+2. **Add OpenAlex API** - Start with academic paper sources
+3. **Design unified metadata system** - Smart routing architecture
+4. **Test unified approach** - Validate with edge cases
+5. **Migrate existing hardcoded systems** - Replace old book processing scripts
 
 ### **Short Term (1-2 Sessions)**
 1. Complete academic APIs (CrossRef, PubMed, arXiv)
 2. Implement unified metadata manager
 3. Start book processing migration
+4. **Begin paper scanning workflow** - Create `process_scanned_papers.py`
 
 ### **Medium Term (3-4 Sessions)**
 1. Complete all migration tasks
 2. Implement AI-driven paper processing
 3. Comprehensive testing and core functionality validation
+4. **Complete paper scanning workflow** - Full integration with Zotero
 
 ### **Long Term (5+ Sessions)**
 1. Local DB performance optimization
 2. Advanced AI features
 3. User interface and documentation
+4. **Hybrid photo processing** - Experimental workflow evaluation
 
 ## Key Decisions Needed
 
@@ -291,6 +407,8 @@ class UnifiedMetadataManager:
 4. **Priority Order**: Academic APIs first vs unified system first?
 5. **Performance Optimization**: When to implement local DB integration (Phase 6)?
 6. **GPU OCR Optimization**: When to implement Intel OpenVINO for GPU-accelerated OCR?
+7. **Paper Workflow**: Ollama 7B vs cloud AI for identifier extraction?
+8. **Hybrid Processing**: Is photo-based document classification worth the complexity?
 
 ## Recent Work Completed
 
@@ -338,6 +456,35 @@ class UnifiedMetadataManager:
   - Batch processing of duplicate lists
   - Integration with Zotero API for safe removal
 
+### **Ollama Installation and Configuration** 🤖
+- **Installation Commands**:
+  ```bash
+  # Install Ollama
+  curl -fsSL https://ollama.ai/install.sh | sh
+  
+  # Pull useful models
+  ollama pull llama2:7b        # General purpose AI
+  ollama pull codellama:7b      # Code assistance
+  ollama pull mistral:7b        # Alternative general model
+  
+  # Test installation
+  ollama run llama2:7b "Hello, how are you?"
+  ```
+- **GPU Configuration** (Intel UHD Graphics 630):
+  ```bash
+  # Enable Intel GPU acceleration
+  export OLLAMA_GPU_LAYERS=1
+  export OLLAMA_GPU_MEMORY_FRACTION=0.5
+  
+  # Test GPU acceleration
+  ollama run llama2:7b "Test GPU performance"
+  ```
+- **Integration with Research-Tools**:
+  - Privacy-sensitive PDF processing
+  - Offline metadata extraction
+  - Fallback AI system for redundancy
+  - Local processing for confidential research data
+
 ---
 
-*This plan combines the detailed migration tasks from archive/AI_CHAT_DOCUMENTS.md with the unified metadata system design and AI-driven paper processing enhancement.*
+*This plan combines the detailed migration tasks from archive/AI_CHAT_DOCUMENTS.md with the unified metadata system design, AI-driven paper processing enhancement, and the new paper scanning workflow using Ollama 7B.*
