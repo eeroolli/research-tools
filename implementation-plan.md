@@ -24,11 +24,16 @@
 - **Environment cleanup** - Removed unused dependencies for leaner setup
 - **Data structure cleanup** - Consolidated scattered data directories and logs
 
+### 🚧 **In Progress:**
+- Smart preprocessing and evidence-based classification for Ollama optimization
+- Sample testing and validation (20 PDFs per type)
+- Document profiler implementation
+
 ### ❌ **Not Completed:**
 - Detailed migration tasks from `archive/AI_CHAT_DOCUMENTS.md` (Phases 2-4)
 - Unified metadata system with smart routing
-- AI-driven paper processing enhancement
-- Academic paper APIs (OpenAlex, CrossRef, PubMed, arXiv)
+- Academic paper APIs (OpenAlex, PubMed) - CrossRef and arXiv completed ✅
+- Smart preprocessing Phase C-E implementation
 
 ## Primary Use Case: Paper Scanning Workflow
 
@@ -53,11 +58,12 @@
 ### **Phase 0: Data Structure Cleanup** 🧹
 *Consolidate scattered data directories and logs*
 
-#### 0.0 Ollama Installation and Setup
-- [ ] **Install Ollama** - Local AI for privacy-sensitive processing
-- [ ] **Configure models** - llama2, codellama, mistral for different tasks
-- [ ] **Environment setup** - GPU acceleration with Intel UHD Graphics 630
-- [ ] **Integration testing** - Verify Ollama works with research-tools system
+#### 0.0 Ollama Installation and Setup ✅
+- [x] **Install Ollama** - Local AI for privacy-sensitive processing (v0.12.3)
+- [x] **Configure models** - llama2:7b installed and tested
+- [x] **Environment setup** - CPU-based (Intel GPU has limited LLM support)
+- [x] **Integration testing** - Verified Ollama works, discovered hallucination issues
+- [x] **Smart workflow** - Created optimized extraction: regex → API → Ollama fallback (60-100x faster for papers with DOI)
 
 #### 0.1 Consolidate Data Directories ✅
 - [x] **Remove duplicate data directories** - process_books/data/, process_papers/data/, scripts/data/
@@ -66,6 +72,100 @@
 - [x] **Test functionality** - Ensure all scripts work with new structure
 - [x] **Migrate legacy data** - Copied 66 book records + 25+ log files from scanpapers
 - [x] **Convert legacy data** - JSON to CSV conversion for compatibility
+
+#### 0.2 Smart Paper Processing System ✅
+*Optimized paper metadata extraction with validation*
+
+- [x] **Identifier Extraction** - Fast regex-based DOI/ISSN/ISBN/**arXiv ID**/URL extraction (1-2 seconds)
+- [x] **Identifier Validation** - ISSN/ISBN checksum validation, DOI/arXiv/URL format validation, hallucination detection
+- [x] **CrossRef API Client** - Full Zotero fields: title, authors, journal, volume, issue, pages, abstract, tags
+- [x] **arXiv API Client** - Preprint metadata with categories, abstracts, DOI of published versions
+- [x] **Ollama Integration** - Fallback AI for papers without identifiers (with validation and hallucination detection)
+- [x] **Smart Workflow** - Priority: DOI → arXiv → ISBN → URL/Ollama → Nothing/Ollama
+- [x] **Testing Framework** - pytest with 25 unit tests for validation
+- [x] **Performance** - 60-100x faster for papers with DOIs/arXiv IDs (1s vs 120-180s)
+- [x] **Code Organization** - Prototypes in `scripts/prototypes/`, production in `shared_tools/`, analysis in `scripts/analysis/`
+- [x] **Configuration Management** - CrossRef email in config files (polite pool), auto-activation of conda environment
+- [x] **Context-Aware Prompts** - Comprehensive Ollama prompts with international date formats, multilingual support
+- [x] **Book Chapter Support** - Extracts chapter + book metadata, uses repeating headers as valuable clues
+- [x] **User-Facing Script** - `scripts/process_scanned_papers.py` with done/failed directories and CSV logging
+
+#### 0.3 Evidence-Based Document Classification 🔬
+*Intelligent preprocessing and classification for Ollama optimization*
+
+##### Current Approach (Implemented):
+- Regex finds identifiers (DOI, ISBN, URL)
+- If found → Fast API lookup (1-2s)
+- If not found → Ollama fallback (120-180s)
+
+##### Optimization Strategy (Planned):
+**Problem**: Ollama searches for identifiers we know don't exist, wastes time/effort
+
+**Solution**: Preprocessing + targeted prompts based on document characteristics
+
+**Phase A: Evidence-Based Analysis** ✅
+- [x] **Analyze existing collection** - 17,490 Zotero items analyzed in 40 seconds
+- [x] **Extract patterns** - Discovered clear patterns by document type:
+  * **Journal articles**: 32.3% have DOI, 87.4% have pages field (1,600 items)
+  * **Book chapters**: 0% have DOI, 81.7% have pages field (1,052 items) 
+  * **Newspaper articles**: 50% have URL, 54.8% have PDFs (42 items)
+  * **Reports**: 56.8% have pages field, 38.2% have PDFs (838 items)
+  * **Thesis**: 12.2% have PDFs (188 items)
+- [x] **Discovered orphaned PDFs** - Only 11 out of 1,950 attachments (well-organized library!)
+- [ ] **Build classifier rules** - Evidence-based heuristics from discovered data
+
+**Phase B: Test Smaller Model**
+- [ ] **Install llama3.2:3b** - 3x faster for simple classification
+- [ ] **Compare performance** - Classification speed/accuracy vs llama2:7b
+- [ ] **Decide on model** - Speed vs accuracy tradeoff
+
+**Phase C: Smart Preprocessing**
+- [ ] **Document profiling** - Extract metadata before Ollama:
+  * Page count
+  * Word count
+  * Has URL? (from regex)
+  * Has identifiers? (from regex)
+  * Text patterns (Chapter, Abstract, Submitted, etc.)
+  * Language detection
+  * Repeating text detection (headers/footers)
+- [ ] **Classification hints** - Pass to Ollama:
+  * "Likely NEWS ARTICLE (2 pages, URL found, no DOI/ISBN)"
+  * "Likely BOOK CHAPTER (15 pages, repeating headers, no identifiers)"
+  * "Likely REPORT (45 pages, no URL, no identifiers)"
+- [ ] **Targeted prompts** - Don't ask Ollama for what can't exist:
+  * News articles: Skip DOI/ISBN search, focus on "By [Author]" pattern
+  * Book chapters: Skip DOI/URL, focus on chapter+book metadata, use headers
+  * Reports: Skip URL, focus on organization, report number, ISSN
+
+**Phase D: Multi-Page Extraction**
+- [ ] **Extract 2-3 pages** - Makes repeating headers obvious
+- [ ] **Pattern detection** - Identify what repeats (book title vs chapter title)
+- [ ] **Better context** - More data for Ollama to work with
+
+**Phase E: Iterative Testing & Validation**
+- [ ] **Move orphaned PDFs** - 11 PDFs from Zotero to scanner for testing
+- [ ] **Random sampling** - Select 20 random PDFs per document type from existing collection
+- [ ] **Process sample** - Run smart workflow on samples (~400 PDFs total)
+- [ ] **Quality validation** - Compare extracted metadata vs Zotero metadata
+  * Measure accuracy: title match, author match, year match, type detection
+  * Identify systematic errors and hallucinations
+  * Calculate success rates by document type
+- [ ] **Iterate improvements** - Fix issues, refine prompts, adjust rules
+- [ ] **Scale testing** - Once quality is good, test with 100 per type
+- [ ] **Production readiness** - Deploy when accuracy > 90% on sample
+
+**Phase F: Metadata Enrichment** (Future)
+- [ ] **Enrich existing Zotero items** - Add missing abstracts, keywords, tags
+- [ ] **Batch processing** - Process items with incomplete metadata
+- [ ] **Quality improvement** - Fill gaps in existing collection
+- [ ] **Smart updates** - Only update if new data is higher quality
+
+**Expected Results:**
+- Faster Ollama processing (60-90s vs 120-180s)
+- Higher accuracy (focused extraction)
+- Better book chapter handling (headers used correctly)
+- Validated quality through comparison with known data
+- Scalable to commercial use (evidence-based, not guesswork)
 
 ### **Phase 1: Complete Configuration-Driven System** 🚧
 *Extend current working system with remaining APIs*
@@ -83,9 +183,9 @@
 
 #### 1.1 Add Academic Paper APIs
 - [ ] **OpenAlex API** (200M+ papers, comprehensive academic metadata)
-- [ ] **CrossRef API** (130M+ scholarly works, DOI-based)
+- [x] **CrossRef API** (130M+ scholarly works, DOI-based) - ✅ Implemented with full Zotero fields
 - [ ] **PubMed API** (35M+ biomedical papers)
-- [ ] **arXiv API** (2M+ preprints, physics/math)
+- [x] **arXiv API** (2M+ preprints, physics/math) - ✅ Implemented with categories and abstracts
 
 #### 1.2 Enhanced Configuration
 - [ ] Split config into `books_metadata_config.yaml` and `papers_metadata_config.yaml`
