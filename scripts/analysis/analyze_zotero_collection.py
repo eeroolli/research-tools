@@ -243,14 +243,14 @@ class ZoteroAnalyzer:
         summary_file = output_dir / "zotero_type_summary.csv"
         with open(summary_file, 'w', newline='', encoding='utf-8') as f:
             if analysis_results:
-                writer = csv.DictWriter(f, fieldnames=analysis_results[0].keys())
+                writer = csv.DictWriter(f, fieldnames=analysis_results[0].keys(), delimiter=';', quotechar='"', quoting=csv.QUOTE_ALL)
                 writer.writeheader()
                 writer.writerows(analysis_results)
         
         # Save detailed type counts
         counts_file = output_dir / "zotero_type_counts.csv"
         with open(counts_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
+            writer = csv.writer(f, delimiter=';', quotechar='"', quoting=csv.QUOTE_ALL)
             writer.writerow(['document_type', 'count', 'percentage'])
             for type_name, count in sorted(type_counts.items(), key=lambda x: x[1], reverse=True):
                 pct = (count / total * 100) if total > 0 else 0

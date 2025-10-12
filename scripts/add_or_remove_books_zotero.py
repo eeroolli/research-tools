@@ -1346,7 +1346,7 @@ class ZoteroAPIBookProcessor:
                          'zotero_decision', 'zotero_item_key', 'zotero_action_taken', 'zotero_timestamp']
             
             with open(self.isbn_log_file, 'w', encoding='utf-8', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=';', quotechar='"', quoting=csv.QUOTE_ALL)
                 writer.writeheader()
                 for row in existing_data.values():
                     # Ensure all fields exist with empty string defaults

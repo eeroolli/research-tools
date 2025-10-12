@@ -50,9 +50,9 @@ class ScannedPaperProcessor:
             self._init_log_file()
     
     def _init_log_file(self):
-        """Initialize CSV log file with headers."""
+        """Initialize CSV log file with headers (European CSV2 format: semicolon-delimited, quoted)."""
         with open(self.log_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
+            writer = csv.writer(f, delimiter=';', quotechar='"', quoting=csv.QUOTE_ALL)
             writer.writerow([
                 'timestamp',
                 'original_filename',
@@ -294,7 +294,7 @@ class ScannedPaperProcessor:
             error_message: Error message if failed
         """
         with open(self.log_file, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
+            writer = csv.writer(f, delimiter=';', quotechar='"', quoting=csv.QUOTE_ALL)
             
             timestamp = datetime.now().isoformat()
             
