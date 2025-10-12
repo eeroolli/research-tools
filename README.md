@@ -5,17 +5,48 @@ A comprehensive system for processing academic papers and books with ISBN extrac
 ## Current Status
 
 **✅ Book Processing**: Fully functional with advanced OCR capabilities  
-**🚧 Paper Processing**: Planned (see [Implementation Plan](implementation-plan.md))  
+**✅ Paper Processing**: Interactive daemon with metadata extraction and Zotero integration  
 **🤖 AI Integration**: Ollama 7B installed and ready for paper processing
 
 For detailed development status, technical architecture, and upcoming features, see the [Implementation Plan](implementation-plan.md).
+
+## 🚀 Quick Start: Process Scanned Papers
+
+**Want to scan and process academic papers?**
+
+1. **Start the daemon:**
+   - Windows: Double-click `scripts/START_HERE_Process_Papers.bat`
+   - Linux/WSL: `python scripts/paper_processor_daemon.py`
+
+2. **Scan your papers** to the configured scanner folder (see `config.conf: scanner_papers_dir`)
+   - Use any scanner that saves PDFs
+   - Or drag-drop PDFs manually
+
+3. **Review each paper** in the interactive menu:
+   - Approve extracted metadata
+   - Edit if needed
+   - Search local Zotero database
+   - Skip non-academic documents
+
+4. **Stop when done:** Press Ctrl+C in the terminal
+
+**Features:**
+- ✅ Automatic metadata extraction (DOI, title, authors, year)
+- ✅ Interactive review and approval
+- ✅ Local Zotero database search
+- ✅ Duplicate detection
+- ✅ Smart filename generation
+
+[Detailed scanner setup (Epson auto-trigger) →](SCANNER_SETUP.md)
+
+---
 
 ## Overview
 
 Research-Tools provides two main workflows:
 
 - **Book Processing** - Extract ISBNs from photos and add to Zotero with rich metadata
-- **Paper Processing** - Scan academic papers and integrate with Zotero (planned)
+- **Paper Processing** - Scan academic papers and integrate with Zotero with interactive workflow
 
 ## Quick Start
 
@@ -23,12 +54,12 @@ Research-Tools provides two main workflows:
 # Activate conda environment
 conda activate research-tools
 
-# Process books (working)
+# Process books
 python scripts/find_isbn_from_photos.py
 python scripts/add_or_remove_books_zotero.py
 
-# Process papers (planned - see implementation plan)
-# python scripts/process_scanned_papers.py
+# Process papers (see Quick Start section above for interactive daemon)
+python scripts/paper_processor_daemon.py
 ```
 
 ## Book Processing (Working)
