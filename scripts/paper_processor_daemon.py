@@ -173,7 +173,7 @@ class PaperProcessorDaemon:
         return any(filename.startswith(p) for p in prefixes)
     
     def process_paper(self, pdf_path: Path):
-        """Process a single paper.
+        """Process a single paper with full user interaction.
         
         Args:
             pdf_path: Path to PDF file
@@ -185,46 +185,43 @@ class PaperProcessorDaemon:
             self.logger.info("Extracting metadata...")
             result = self.metadata_processor.process_pdf(pdf_path, use_ollama_fallback=True)
             
-            if not result['success'] or not result['metadata']:
-                self.logger.warning("No metadata extracted")
-                self.move_to_failed(pdf_path)
-                return
+            extraction_time = result.get('processing_time_seconds', 0)
             
-            metadata = result['metadata']
-            self.logger.info(f"Title: {metadata.get('title', 'Unknown')[:60]}...")
-            authors = metadata.get('authors', [])
-            if authors:
-                author_str = ', '.join(authors[:2])
-                if len(authors) > 2:
-                    author_str += f" (+{len(authors)-2} more)"
-                self.logger.info(f"Authors: {author_str}")
-            
-            # Step 2: Generate filename
-            new_filename = self.generate_filename(metadata)
-            self.logger.debug(f"New filename: {new_filename}")
-            
-            # Step 3: Copy to final destination
-            final_path = self.copy_to_publications(pdf_path, new_filename)
-            if not final_path:
-                self.logger.error("Failed to copy to publications")
-                self.move_to_failed(pdf_path)
-                return
-            
-            # Step 4: Add to Zotero
-            self.logger.info("Adding to Zotero...")
-            zotero_result = self.zotero_processor.add_paper(metadata, final_path)
-            
-            if zotero_result['success']:
-                if zotero_result['action'] == 'duplicate_skipped':
-                    self.logger.info(f"Duplicate skipped ({result['processing_time_seconds']:.1f}s)")
-                else:
-                    self.logger.info(f"Added to Zotero ({result['processing_time_seconds']:.1f}s)")
-                
-                # Step 5: Move original to done/
-                self.move_to_done(pdf_path)
+            # Step 2: Display metadata (even if extraction failed)
+            if result['success'] and result['metadata']:
+                metadata = result['metadata']
             else:
-                self.logger.error(f"Zotero error: {zotero_result.get('error')}")
-                self.move_to_failed(pdf_path)
+                self.logger.warning("Metadata extraction failed - will ask user for help")
+                metadata = {
+                    'title': 'Unknown',
+                    'authors': [],
+                    'year': '',
+                    'document_type': 'unknown',
+                    'extraction_failed': True
+                }
+            
+            self.display_metadata(metadata, pdf_path, extraction_time)
+            
+            # Step 3: Show interactive menu
+            choice = self.display_interactive_menu()
+            
+            # Step 4: Handle user choice
+            if choice == 'q':
+                self.logger.info("User requested quit")
+                self.shutdown(None, None)
+            
+            elif choice == '4':  # Skip
+                self.move_to_skipped(pdf_path)
+                self.logger.info("Document skipped by user")
+            
+            elif choice == '5':  # Manual processing
+                self.logger.info("Moved to manual review")
+                # Don't move file - leave in scanner directory for manual processing
+            
+            else:
+                # Choices 1, 2, 3 - to be implemented in next tasks
+                self.logger.info(f"Choice '{choice}' not yet implemented")
+                self.logger.info("Leaving in scanner directory for now")
             
         except Exception as e:
             self.logger.error(f"Processing error: {e}", exc_info=self.debug)
@@ -300,6 +297,19 @@ class PaperProcessorDaemon:
         dest = failed_dir / pdf_path.name
         shutil.move(str(pdf_path), str(dest))
         self.logger.info(f"Moved to failed/")
+    
+    def move_to_skipped(self, pdf_path: Path):
+        """Move non-academic PDF to skipped/ directory.
+        
+        Args:
+            pdf_path: PDF to move
+        """
+        skipped_dir = self.watch_dir / "skipped"
+        skipped_dir.mkdir(exist_ok=True)
+        
+        dest = skipped_dir / pdf_path.name
+        shutil.move(str(pdf_path), str(dest))
+        self.logger.info(f"Moved to skipped/")
     
     def start(self):
         """Start the daemon."""
@@ -417,21 +427,5 @@ def main():
 
 
 if __name__ == "__main__":
-    # Quick test for Task 1 - testing menu display functions
-    # TODO: Restore main() call in Task 2
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == '--test-menu':
-        daemon = PaperProcessorDaemon(Path("/tmp"), debug=True)
-        metadata = {
-            'title': 'Test Paper',
-            'authors': ['Smith, J.', 'Johnson, A.'],
-            'year': '2024',
-            'document_type': 'journal_article',
-            'doi': '10.1234/test'
-        }
-        daemon.display_metadata(metadata, Path("test.pdf"), 5.3)
-        choice = daemon.display_interactive_menu()
-        print(f"You chose: {choice}")
-    else:
-        main()
+    main()
 
