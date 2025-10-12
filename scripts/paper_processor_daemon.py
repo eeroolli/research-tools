@@ -87,6 +87,65 @@ class PaperProcessorDaemon:
         
         self.logger = logging.getLogger(__name__)
     
+    def display_metadata(self, metadata: dict, pdf_path: Path, extraction_time: float):
+        """Display extracted metadata to user.
+        
+        Args:
+            metadata: Extracted metadata dict
+            pdf_path: Path to PDF file
+            extraction_time: Time taken for extraction
+        """
+        print("\n" + "="*60)
+        print(f"SCANNED DOCUMENT: {pdf_path.name}")
+        print("="*60)
+        print(f"\nMetadata extracted in {extraction_time:.1f}s")
+        print("\nEXTRACTED METADATA:")
+        print("-" * 40)
+        print(f"Title:    {metadata.get('title', 'Unknown')}")
+        
+        authors = metadata.get('authors', [])
+        if authors:
+            author_str = ', '.join(authors[:3])
+            if len(authors) > 3:
+                author_str += f" (+{len(authors)-3} more)"
+            print(f"Authors:  {author_str}")
+        else:
+            print(f"Authors:  Unknown")
+        
+        print(f"Year:     {metadata.get('year', 'Unknown')}")
+        print(f"Type:     {metadata.get('document_type', 'unknown')}")
+        print(f"Journal:  {metadata.get('journal', 'N/A')}")
+        print(f"DOI:      {metadata.get('doi', 'Not found')}")
+        
+        if metadata.get('abstract'):
+            abstract = metadata['abstract'][:150]
+            print(f"Abstract: {abstract}..." if len(metadata['abstract']) > 150 else f"Abstract: {abstract}")
+        
+        print("-" * 40)
+    
+    def display_interactive_menu(self) -> str:
+        """Display interactive menu and get user choice.
+        
+        Returns:
+            User's menu choice as string
+        """
+        print("\nWHAT WOULD YOU LIKE TO DO?")
+        print()
+        print("[1] Use extracted metadata as-is")
+        print("[2] Edit metadata manually")
+        print("[3] Search local Zotero database")
+        print("[4] Skip document (not academic)")
+        print("[5] Manual processing later")
+        print("[q] Quit daemon")
+        print()
+        
+        while True:
+            choice = input("Your choice: ").strip().lower()
+            if choice in ['1', '2', '3', '4', '5', 'q']:
+                return choice
+            else:
+                print("Invalid choice. Please try again.")
+    
     def write_pid_file(self):
         """Write daemon PID to file."""
         import os
@@ -358,5 +417,21 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Quick test for Task 1 - testing menu display functions
+    # TODO: Restore main() call in Task 2
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == '--test-menu':
+        daemon = PaperProcessorDaemon(Path("/tmp"), debug=True)
+        metadata = {
+            'title': 'Test Paper',
+            'authors': ['Smith, J.', 'Johnson, A.'],
+            'year': '2024',
+            'document_type': 'journal_article',
+            'doi': '10.1234/test'
+        }
+        daemon.display_metadata(metadata, Path("test.pdf"), 5.3)
+        choice = daemon.display_interactive_menu()
+        print(f"You chose: {choice}")
+    else:
+        main()
 
