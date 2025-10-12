@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""
+Zotero integration for academic papers.
+Similar to book_processor.py but for papers.
+
+Handles:
+- Adding papers to Zotero
+- Duplicate detection (by DOI and title)
+- PDF linking (linked files, not uploaded)
+- Item type detection (journal article, conference paper, etc.)
+- Metadata conversion from internal format to Zotero format
+"""
+
+import sys
+import requests
+import configparser
+from pathlib import Path
+from typing import Dict, Optional
+from difflib import SequenceMatcher
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+
+class ZoteroPaperProcessor:
+    """Zotero integration for academic papers."""
+    
+    def __init__(self, config_file: str = None):
+        """Initialize processor.
+        
+        Args:
+            config_file: Path to config file (uses default if None)
+        """
+        if config_file is None:
+            root_dir = Path(__file__).parent.parent.parent
+            config_file = root_dir / "config.personal.conf"
+        
+        self.config_file = config_file
+        self.load_config()
+        
+        # Zotero API setup
+        self.base_url = f"https://api.zotero.org/users/{self.library_id}"
+        self.headers = {
+            'Zotero-API-Key': self.api_key,
+            'Content-Type': 'application/json'
+        }
+    
+    def load_config(self):
+        """Load Zotero configuration."""
+        config = configparser.ConfigParser()
+        
+        # Read both config files (personal overrides main)
+        root_dir = Path(__file__).parent.parent.parent
+        config.read([
+            root_dir / 'config.conf',
+            root_dir / 'config.personal.conf'
+        ])
+        
+        # Try new format first, fall back to legacy
+        self.api_key = config.get('APIS', 'zotero_api_key', fallback='').strip()
+        self.library_id = config.get('APIS', 'zotero_library_id', fallback='').strip()
+        self.library_type = config.get('APIS', 'zotero_library_type', fallback='user').strip()
+        
+        if not self.api_key or not self.library_id:
+            # Fall back to legacy format
+            self.api_key = config.get('zotero', 'zotero_api_key', fallback='').strip()
+            self.library_id = config.get('zotero', 'zotero_library_id', fallback='').strip()
+            self.library_type = config.get('zotero', 'zotero_library_type', fallback='user').strip()
+        
+        if not self.api_key or not self.library_id:
+            raise ValueError("Missing Zotero API credentials in config")
+    
+    def add_paper(self, metadata: Dict, pdf_path: Path) -> Dict:
+        """Add paper to Zotero library.
+        
+        Args:
+            metadata: Paper metadata from extraction
+            pdf_path: Path to PDF file (in publications directory)
+            
+        Returns:
+            Result dict with success status and item key
+        """
+        result = {
+            'success': False,
+            'item_key': None,
+            'error': None,
+            'action': None
+        }
+        
+        try:
+            # Step 1: Check for duplicates
+            doi = metadata.get('doi')
+            title = metadata.get('title')
+            
+            if doi:
+                existing = self.search_by_doi(doi)
+                if existing:
+                    result['action'] = 'duplicate_skipped'
+                    result['item_key'] = existing['key']
+                    result['success'] = True
+                    return result
+            
+            if title:
+                existing = self.search_by_title(title)
+                if existing:
+                    result['action'] = 'duplicate_skipped'
+                    result['item_key'] = existing['key']
+                    result['success'] = True
+                    return result
+            
+            # Step 2: Create Zotero item
+            item_template = self.metadata_to_zotero(metadata)
+            item_key = self.create_item(item_template)
+            
+            if not item_key:
+                result['error'] = "Failed to create Zotero item"
+                return result
+            
+            # Step 3: Attach PDF
+            pdf_attached = self.attach_pdf(item_key, pdf_path, title)
+            
+            if pdf_attached:
+                result['success'] = True
+                result['item_key'] = item_key
+                result['action'] = 'added_with_pdf'
+            else:
+                result['success'] = True
+                result['item_key'] = item_key
+                result['action'] = 'added_without_pdf'
+                result['error'] = "PDF attachment failed"
+            
+            return result
+            
+        except Exception as e:
+            result['error'] = str(e)
+            return result
+    
+    def metadata_to_zotero(self, metadata: Dict) -> Dict:
+        """Convert our metadata format to Zotero item format.
+        
+        Args:
+            metadata: Our internal metadata format
+            
+        Returns:
+            Zotero item template
+        """
+        # Determine item type
+        item_type = self.determine_item_type(metadata)
+        
+        # Build creators list
+        creators = []
+        for author in metadata.get('authors', []):
+            # Split "LastName, FirstName" or "FirstName LastName"
+            if ',' in author:
+                parts = author.split(',', 1)
+                last_name = parts[0].strip()
+                first_name = parts[1].strip() if len(parts) > 1 else ''
+            else:
+                parts = author.rsplit(' ', 1)
+                first_name = parts[0].strip() if len(parts) > 1 else ''
+                last_name = parts[-1].strip()
+            
+            creators.append({
+                'creatorType': 'author',
+                'firstName': first_name,
+                'lastName': last_name
+            })
+        
+        # Build item template
+        item = {
+            'itemType': item_type,
+            'title': metadata.get('title', ''),
+            'creators': creators,
+            'abstractNote': metadata.get('abstract', ''),
+            'date': str(metadata.get('year', '')),
+            'language': metadata.get('language', ''),
+            'DOI': metadata.get('doi', ''),
+            'url': metadata.get('url', ''),
+            'tags': []
+        }
+        
+        # Add type-specific fields
+        if item_type == 'journalArticle':
+            item['publicationTitle'] = metadata.get('journal', '')
+            item['volume'] = metadata.get('volume', '')
+            item['issue'] = metadata.get('issue', '')
+            item['pages'] = metadata.get('pages', '')
+            item['ISSN'] = metadata.get('issn', '')
+        
+        elif item_type == 'conferencePaper':
+            item['proceedingsTitle'] = metadata.get('journal', '')  # Journal field often contains conference
+            item['pages'] = metadata.get('pages', '')
+        
+        elif item_type == 'bookSection':
+            item['bookTitle'] = metadata.get('book_title', '')
+            item['publisher'] = metadata.get('publisher', '')
+            item['pages'] = metadata.get('pages', '')
+            item['ISBN'] = metadata.get('isbn', '')
+        
+        # Add tags from metadata
+        if metadata.get('keywords'):
+            for keyword in metadata['keywords']:
+                item['tags'].append({'tag': keyword})
+        
+        return item
+    
+    def determine_item_type(self, metadata: Dict) -> str:
+        """Determine Zotero item type from metadata.
+        
+        Args:
+            metadata: Paper metadata
+            
+        Returns:
+            Zotero item type string
+        """
+        doc_type = metadata.get('document_type', '').lower()
+        
+        # Map our types to Zotero types
+        type_mapping = {
+            'journal_article': 'journalArticle',
+            'conference_paper': 'conferencePaper',
+            'book_chapter': 'bookSection',
+            'preprint': 'preprint',
+            'report': 'report',
+            'thesis': 'thesis',
+            'news_article': 'newspaperArticle',
+            'web_article': 'webpage'
+        }
+        
+        zotero_type = type_mapping.get(doc_type, 'journalArticle')
+        
+        # Additional heuristics if type unclear
+        if zotero_type == 'journalArticle':
+            if metadata.get('book_title'):
+                zotero_type = 'bookSection'
+            elif metadata.get('url') and not metadata.get('doi'):
+                zotero_type = 'webpage'
+        
+        return zotero_type
+    
+    def search_by_doi(self, doi: str) -> Optional[Dict]:
+        """Search Zotero library for item by DOI.
+        
+        Args:
+            doi: DOI to search for
+            
+        Returns:
+            Zotero item or None
+        """
+        try:
+            response = requests.get(
+                f"{self.base_url}/items",
+                headers=self.headers,
+                params={
+                    'q': doi,
+                    'qmode': 'everything',
+                    'format': 'json',
+                    'limit': 10
+                },
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                items = response.json()
+                for item in items:
+                    item_doi = item['data'].get('DOI', '').strip()
+                    if item_doi.lower() == doi.lower():
+                        return item
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def search_by_title(self, title: str, threshold: float = 0.85) -> Optional[Dict]:
+        """Search Zotero library for item by title similarity.
+        
+        Args:
+            title: Title to search for
+            threshold: Similarity threshold (0-1)
+            
+        Returns:
+            Zotero item or None
+        """
+        try:
+            response = requests.get(
+                f"{self.base_url}/items",
+                headers=self.headers,
+                params={
+                    'q': title,
+                    'qmode': 'everything',
+                    'format': 'json',
+                    'limit': 20
+                },
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                items = response.json()
+                for item in items:
+                    item_title = item['data'].get('title', '')
+                    similarity = SequenceMatcher(None, title.lower(), item_title.lower()).ratio()
+                    if similarity >= threshold:
+                        return item
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def create_item(self, item_template: Dict) -> Optional[str]:
+        """Create new item in Zotero library.
+        
+        Args:
+            item_template: Zotero item template
+            
+        Returns:
+            Item key or None
+        """
+        try:
+            response = requests.post(
+                f"{self.base_url}/items",
+                headers=self.headers,
+                json=[item_template],
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result['successful']['0']['key']
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def attach_pdf(self, item_key: str, pdf_path: Path, title: str) -> bool:
+        """Attach PDF to Zotero item as linked file.
+        
+        Args:
+            item_key: Zotero item key
+            pdf_path: Path to PDF file
+            title: PDF title
+            
+        Returns:
+            True if successful
+        """
+        try:
+            # Create attachment item
+            attachment = {
+                'itemType': 'attachment',
+                'linkMode': 'linked_file',
+                'title': title,
+                'path': str(pdf_path),
+                'parentItem': item_key
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/items",
+                headers=self.headers,
+                json=[attachment],
+                timeout=10
+            )
+            
+            return response.status_code == 200
+            
+        except Exception:
+            return False
+
+
+if __name__ == "__main__":
+    # Test
+    processor = ZoteroPaperProcessor()
+    print("Zotero Paper Processor initialized")
+    print(f"Library: {processor.library_type}/{processor.library_id}")
+

@@ -255,39 +255,73 @@ class UnifiedMetadataManager:
 - [ ] **Dual AI validation** - Cross-check results between Claude and Ollama
 - [ ] **Confidence scoring** - Rate metadata quality from each AI system
 
-### **Phase 4: Paper Scanning Workflow** 📄
-*New dedicated workflow for academic papers using Ollama 7B*
 
-#### 4.1 Paper Processing Architecture
-- [x] **Create `scripts/process_scanned_papers.py`** - New paper workflow scaffold
-- [ ] **Extend existing `DetailedISBNLookupService`** - Add academic paper APIs
-- [ ] **Reuse Zotero integration** - Leverage existing `ZoteroAPIBookProcessor` code
-- [ ] **Shared utilities** - Common OCR, file management, logging functions
+### **Phase 4: Paper Scanning Workflow** 🚧
+*New dedicated workflow for academic papers - DETAILED SPECIFICATION COMPLETE*
 
-#### 4.2 Ollama 7B Integration
-- [ ] **Identifier extraction** - Extract DOI, title, authors, journal, year from first page
-- [ ] **OCR text cleaning** - Handle messy OCR output with AI
-- [x] **Structured output** - Return JSON with extracted identifiers (scaffold in place)
-- [ ] **Fallback strategies** - Multiple extraction approaches if primary fails
+**Status:** 🚧 **Ready for Implementation** - Detailed specification in `daemon_implementation_spec.md`
 
-#### 4.3 Academic Metadata Lookup
-- [ ] **CrossRef API integration** - DOI-based paper lookup
-- [ ] **PubMed API integration** - Medical/biological papers
-- [ ] **arXiv API integration** - Preprints and technical papers
-- [ ] **OpenAlex API integration** - Comprehensive academic database
-- [ ] **Smart routing** - Route queries to appropriate APIs based on identifiers
+**Architecture Decision:** Daemon-based real-time processing triggered by Epson scanner
 
-#### 4.4 File Management System
-- [ ] **PDF processing** - Extract first page for OCR
-- [ ] **File renaming** - `Author_Year_Title.pdf` format
-- [ ] **Directory organization** - Store in `g:/publications/` structure
-- [ ] **Zotero linking** - Attach renamed files to Zotero items
+#### 4.1 Paper Processing Architecture ✅
+- [x] **Architecture designed** - File-watching daemon with smart launcher
+- [x] **Folder structure defined** - `I:\FraScanner\papers\` with done/failed subdirectories
+- [x] **Integration points identified** - Reuses existing `PaperMetadataProcessor` and config system
+- [x] **Shared utilities planned** - Common OCR, file management, logging functions
+- [ ] **Implementation in progress** - See `daemon_implementation_spec.md` for details
 
-#### 4.5 Workflow Integration
-- [ ] **Separate but similar** - Books and papers use same underlying systems
-- [ ] **Configuration sharing** - Reuse existing config system
-- [ ] **Logging consistency** - Same CSV logging format
-- [ ] **User interface** - Similar interaction patterns
+#### 4.2 Daemon System Design ✅
+- [x] **Smart launcher** - `scripts/start_paper_processor.py` (idempotent, Epson-triggered)
+- [x] **File watcher daemon** - `scripts/paper_processor_daemon.py` (watchdog-based)
+- [x] **Clean shutdown** - `scripts/stop_paper_processor.py` (signal handling)
+- [x] **PID management** - Process tracking and stale file cleanup
+- [x] **Implementation complete** - All daemon components implemented (Oct 11, 2025)
+
+#### 4.3 Zotero Integration for Papers ✅
+- [x] **Zotero processor designed** - `shared_tools/zotero/paper_processor.py`
+- [x] **Duplicate detection** - By DOI and title similarity
+- [x] **Item type detection** - Journal article, conference paper, book chapter, etc.
+- [x] **PDF linking** - Linked files to `G:\my Drive\publications\`
+- [x] **Metadata mapping** - Our format → Zotero format
+- [x] **API integration complete** - paper_processor.py implemented (Oct 11, 2025)
+- [x] **Local DB search complete** - local_search.py for fast fuzzy matching (Oct 11, 2025)
+- [x] **Dual access pattern** - Read from local DB, write through API
+
+#### 4.4 File Management System ✅
+- [x] **PDF processing** - Extract first page for metadata (reuses existing code)
+- [x] **File renaming** - `Author_Year_Title.pdf` format (implemented in process_scanned_papers.py)
+- [x] **Directory organization** - Store in `G:\my Drive\publications\` (single folder for now)
+- [x] **Original preservation** - Move to `done/` folder with scanner filename
+- [ ] **Extraction to shared module** - Move common functions to `shared_tools/papers/file_manager.py`
+
+#### 4.5 Workflow Integration 🚧
+- [x] **Separate workflows** - Books and papers use same underlying systems but different entry points
+- [x] **Configuration sharing** - Reuse existing config system (config.personal.conf)
+- [x] **Logging consistency** - Extend CSV logging with Zotero fields
+- [ ] **Scanner integration** - Epson buttons to be configured for NO/EN/DE languages
+- [x] **Conference detection** - conference_detector.py for presentations (Oct 11, 2025)
+- [ ] **Interactive menu** - PENDING: Add to process_scanned_papers.py (NEXT SESSION)
+- [ ] **Testing** - End-to-end testing with real scanner
+
+#### 4.6 User Workflow (Target) ✅
+```
+1. Press Epson scanner button (NO/EN/DE)
+2. Scanner saves PDF to I:\FraScanner\papers\
+3. Scanner triggers start_paper_processor.py
+4. Daemon processes automatically (5-130 seconds depending on identifiers)
+5. User sees result in terminal, makes choices and paper is moved and Zotero is updated
+6. Ready for next scan
+```
+
+**Target timing:** 5-10 seconds for papers with DOI/arXiv, 65-130 seconds for papers needing Ollama
+
+**Next steps:**
+1. Review `daemon_implementation_spec.md`
+2. Implement in Cursor (estimated 2-3 hours)
+3. Test with sample PDFs
+4. Configure Epson scanner
+5. Process first papers from backlog!
+
 
 ### **Phase 5: Detailed Migration Tasks** 📋
 *From archive/AI_CHAT_DOCUMENTS.md - migrate existing hardcoded systems*

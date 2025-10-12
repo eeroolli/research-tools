@@ -21,6 +21,7 @@ dependencies:
   - mkl-service
   - intel-openmp  # Intel OpenMP
   - tbb  # Intel Threading Building Blocks
+  - watchdog  # File system monitoring for paper processor daemon
   - pip
   - pip:
     - pyzotero  # Zotero API integration
