@@ -8,6 +8,7 @@ Use this for SEARCHING only - all updates go through API.
 
 import sqlite3
 import logging
+import re
 from pathlib import Path
 from typing import List, Dict, Optional
 from difflib import SequenceMatcher
@@ -336,6 +337,105 @@ class ZoteroLocalSearch:
         """Context manager entry."""
         self.connect()
         return self
+    
+    def search_by_author(self, author_name: str, limit: int = 10) -> list:
+        """Search local Zotero database by author name.
+        
+        Args:
+            author_name: Author's last name or full name
+            limit: Maximum number of results
+            
+        Returns:
+            List of matching items with metadata
+        """
+        if not self.db_connection:
+            self.connect()
+        
+        try:
+            cursor = self.db_connection.cursor()
+            
+            # Search in creators table
+            query = """
+            SELECT DISTINCT i.itemID, i.key, 
+                   COALESCE(fv_title.value, '') as title,
+                   COALESCE(fv_date.value, '') as date,
+                   it.typeName as itemType
+            FROM items i
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            JOIN itemCreators ic ON i.itemID = ic.itemID
+            JOIN creators c ON ic.creatorID = c.creatorID
+            LEFT JOIN itemData id_title ON i.itemID = id_title.itemID 
+                AND id_title.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'title')
+            LEFT JOIN itemDataValues fv_title ON id_title.valueID = fv_title.valueID
+            LEFT JOIN itemData id_date ON i.itemID = id_date.itemID 
+                AND id_date.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'date')
+            LEFT JOIN itemDataValues fv_date ON id_date.valueID = fv_date.valueID
+            WHERE (c.lastName LIKE ? OR c.firstName LIKE ?)
+            AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+            ORDER BY fv_date.value DESC
+            LIMIT ?
+            """
+            
+            search_pattern = f"%{author_name}%"
+            cursor.execute(query, (search_pattern, search_pattern, limit))
+            
+            results = []
+            for row in cursor.fetchall():
+                item = {
+                    'itemID': row[0],
+                    'key': row[1],
+                    'title': row[2],
+                    'date': row[3],
+                    'itemType': row[4]
+                }
+                
+                # Get full author list
+                item['creators'] = self._get_item_creators(cursor, item['itemID'])
+                
+                # Extract year from date
+                date_str = item.get('date', '')
+                year_match = re.search(r'\b(19|20)\d{2}\b', date_str)
+                item['year'] = year_match.group(0) if year_match else ''
+                
+                # Check for attachments
+                item['hasAttachment'] = self._has_attachment(item['itemID'])
+                
+                results.append(item)
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Error searching by author: {e}")
+            return []
+    
+    def _get_item_creators(self, cursor, item_id: int) -> list:
+        """Get creators for an item."""
+        creators = []
+        
+        try:
+            query = """
+            SELECT c.lastName, c.firstName, ct.creatorType
+            FROM itemCreators ic
+            JOIN creators c ON ic.creatorID = c.creatorID
+            JOIN creatorTypes ct ON ic.creatorTypeID = ct.creatorTypeID
+            WHERE ic.itemID = ?
+            ORDER BY ic.orderIndex
+            """
+            
+            cursor.execute(query, (item_id,))
+            results = cursor.fetchall()
+            
+            for last_name, first_name, creator_type in results:
+                creators.append({
+                    'lastName': last_name,
+                    'firstName': first_name,
+                    'creatorType': creator_type
+                })
+        
+        except Exception as e:
+            self.logger.error(f"Error getting creators: {e}")
+        
+        return creators
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""

@@ -258,6 +258,50 @@ class PaperMetadataProcessor:
             result['processing_time_seconds'] = time.time() - start_time
             return result
     
+    def search_by_doi(self, doi: str) -> Dict:
+        """Search for metadata using a DOI.
+        
+        Args:
+            doi: DOI to search for
+            
+        Returns:
+            Dictionary with success status and metadata
+        """
+        try:
+            metadata = self.crossref.get_metadata(doi)
+            if metadata:
+                return {
+                    'success': True,
+                    'metadata': metadata,
+                    'method': 'crossref_api'
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': f'No metadata found for DOI: {doi}'
+                }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'Error searching DOI {doi}: {e}'
+            }
+    
+    def search_by_isbn(self, isbn: str) -> Dict:
+        """Search for metadata using an ISBN.
+        
+        Args:
+            isbn: ISBN to search for
+            
+        Returns:
+            Dictionary with success status and metadata
+        """
+        # For now, return a placeholder since book processing uses a different workflow
+        return {
+            'success': False,
+            'error': 'ISBN search not implemented - use existing book processing workflow',
+            'metadata': {'note': 'Use existing book processing workflow for ISBNs'}
+        }
+    
     def display_result(self, result: Dict):
         """Display processing result in a nice format."""
         print(f"\n{'='*80}")

@@ -383,6 +383,198 @@ class PaperProcessorDaemon:
             print("❌ Error searching Zotero database")
             return []
     
+    def handle_failed_extraction(self, pdf_path: Path) -> dict:
+        """Handle failed metadata extraction with guided workflow.
+        
+        Args:
+            pdf_path: Path to PDF
+            
+        Returns:
+            Manually entered metadata dict
+        """
+        print("\n⚠️  METADATA EXTRACTION FAILED")
+        print("Let's gather information manually to help identify this document.")
+        print()
+        
+        # Step 1: Document type selection
+        # TODO: later to maximize portability this could be moved to a config file       
+        print("📚 What type of document is this?")
+        print()
+        print("[1] Journal Article")
+        print("[2] Book Chapter")
+        print("[3] Conference Paper")
+        print("[4] Book")
+        print("[5] Thesis/Dissertation")
+        print("[6] Report")
+        print("[7] News Article")
+        print("[8] Other")
+        print()
+        
+        doc_type_map = {
+            '1': ('journal_article', 'Journal Article'),
+            '2': ('book_chapter', 'Book Chapter'),
+            '3': ('conference_paper', 'Conference Paper'),
+            '4': ('book', 'Book'),
+            '5': ('thesis', 'Thesis'),
+            '6': ('report', 'Report'),
+            '7': ('news_article', 'News Article'),
+            '8': ('unknown', 'Other')
+        }
+        
+        while True:
+            type_choice = input("Document type: ").strip()
+            if type_choice in doc_type_map:
+                doc_type, doc_type_name = doc_type_map[type_choice]
+                break
+            print("Invalid choice. Please try again.")
+        
+        print(f"\n✅ Document type: {doc_type_name}")
+        
+        # Step 2: Try to get unique identifier
+        metadata = {'document_type': doc_type}
+        
+        print("\n🔍 Let's try to find this document with a unique identifier.")
+        print("(If you don't have one, press Enter to skip)")
+        print()
+        
+        # Ask for DOI
+        doi = input("DOI (e.g., 10.1234/example): ").strip()
+        if doi:
+            metadata['doi'] = doi
+            print("\n⏳ Searching for metadata with DOI...")
+            # Try metadata search again
+            search_result = self.metadata_processor.search_by_doi(doi)
+            if search_result and search_result.get('success'):
+                print("✅ Found metadata!")
+                return search_result['metadata']
+            else:
+                print("❌ No metadata found with this DOI")
+        
+        # Ask for ISBN (for books/chapters)
+        if doc_type in ['book', 'book_chapter']:
+            isbn = input("ISBN (if visible): ").strip()
+            if isbn:
+                metadata['isbn'] = isbn
+                print("\n⏳ Searching for metadata with ISBN...")
+                search_result = self.metadata_processor.search_by_isbn(isbn)
+                if search_result and search_result.get('success'):
+                    print("✅ Found metadata!")
+                    return search_result['metadata']
+                else:
+                    print("❌ No metadata found with this ISBN")
+        
+        # No unique identifier worked - proceed to manual entry
+        return self.manual_metadata_entry(metadata, doc_type)
+    
+    def manual_metadata_entry(self, partial_metadata: dict, doc_type: str) -> dict:
+        """Guide user through manual metadata entry.
+        
+        Args:
+            partial_metadata: Already collected metadata (document type, etc.)
+            doc_type: Document type code
+            
+        Returns:
+            Complete metadata dict
+        """
+        print("\n📝 MANUAL METADATA ENTRY")
+        print("We'll search local Zotero as you type to help find matches.")
+        print()
+        
+        metadata = partial_metadata.copy()
+        
+        # Get author
+        author = input("First author's last name: ").strip()
+        if author:
+            metadata['authors'] = [author]
+            
+            # Search local Zotero by author
+            print(f"\n🔍 Searching Zotero for papers by '{author}'...")
+            author_matches = self.local_zotero.search_by_author(author)
+            
+            if author_matches:
+                print(f"Found {len(author_matches)} paper(s) by this author in Zotero:")
+                print()
+                
+                for i, match in enumerate(author_matches[:10], 1):
+                    print(f"[{i}] {match.get('title', 'Unknown')}")
+                    print(f"    Year: {match.get('year', '?')}")
+                    print(f"    Type: {match.get('itemType', '?')}")
+                    print()
+                
+                print("[0] None of these - continue manual entry")
+                print()
+                
+                match_choice = input("Is this your paper? (0-10): ").strip()
+                
+                if match_choice.isdigit():
+                    idx = int(match_choice)
+                    if 1 <= idx <= min(10, len(author_matches)):
+                        # User selected a match
+                        selected = author_matches[idx - 1]
+                        print(f"\n✅ Using: {selected.get('title')}")
+                        return self.convert_zotero_item_to_metadata(selected)
+        
+        # Continue with manual entry
+        title = input("\nPaper title: ").strip()
+        if title:
+            metadata['title'] = title
+        
+        year = input("Publication year: ").strip()
+        if year:
+            metadata['year'] = year
+        
+        # Type-specific fields
+        if doc_type in ['journal_article', 'conference_paper']:
+            journal = input("Journal/Conference name: ").strip()
+            if journal:
+                metadata['journal'] = journal
+        
+        elif doc_type == 'book_chapter':
+            book_title = input("Book title: ").strip()
+            if book_title:
+                metadata['book_title'] = book_title
+        
+        print("\n✅ Manual metadata entry complete")
+        return metadata
+    
+    def convert_zotero_item_to_metadata(self, zotero_item: dict) -> dict:
+        """Convert Zotero item to our metadata format.
+        
+        Args:
+            zotero_item: Item from local Zotero DB
+            
+        Returns:
+            Metadata dict in our format
+        """
+        metadata = {
+            'title': zotero_item.get('title', ''),
+            'year': zotero_item.get('year', ''),
+            'document_type': zotero_item.get('itemType', 'unknown'),
+            'zotero_key': zotero_item.get('key'),
+            'from_zotero': True
+        }
+        
+        # Extract authors
+        creators = zotero_item.get('creators', [])
+        authors = []
+        for creator in creators:
+            if creator.get('creatorType') == 'author':
+                last = creator.get('lastName', '')
+                first = creator.get('firstName', '')
+                if last:
+                    authors.append(f"{last}, {first}" if first else last)
+        metadata['authors'] = authors
+        
+        # Copy other fields if present
+        if zotero_item.get('DOI'):
+            metadata['doi'] = zotero_item['DOI']
+        if zotero_item.get('publicationTitle'):
+            metadata['journal'] = zotero_item['publicationTitle']
+        if zotero_item.get('abstractNote'):
+            metadata['abstract'] = zotero_item['abstractNote']
+        
+        return metadata
+    
     def write_pid_file(self):
         """Write daemon PID to file."""
         import os
@@ -424,20 +616,23 @@ class PaperProcessorDaemon:
             
             extraction_time = result.get('processing_time_seconds', 0)
             
-            # Step 2: Display metadata (even if extraction failed)
+            # Step 2: Check if extraction succeeded
             if result['success'] and result['metadata']:
                 metadata = result['metadata']
+                self.display_metadata(metadata, pdf_path, extraction_time)
             else:
-                self.logger.warning("Metadata extraction failed - will ask user for help")
-                metadata = {
-                    'title': 'Unknown',
-                    'authors': [],
-                    'year': '',
-                    'document_type': 'unknown',
-                    'extraction_failed': True
-                }
-            
-            self.display_metadata(metadata, pdf_path, extraction_time)
+                # Extraction failed - use guided workflow
+                self.logger.warning("Metadata extraction failed - starting guided workflow")
+                metadata = self.handle_failed_extraction(pdf_path)
+                
+                if metadata:
+                    # Display what we gathered
+                    self.display_metadata(metadata, pdf_path, extraction_time)
+                else:
+                    # User gave up
+                    self.move_to_failed(pdf_path)
+                    self.logger.info("User cancelled - moved to failed/")
+                    return
             
             # Step 3: Show interactive menu
             choice = self.display_interactive_menu()
