@@ -284,7 +284,7 @@ class PaperProcessorDaemon:
         elif field_name == 'Match Confidence':
             if isinstance(field_value, (int, float)):
                 print(f"  {field_name}: {field_value:.1f}%")
-            else:
+        else:
                 print(f"  {field_name}: {field_value}")
         
         elif field_name == 'From Zotero':
@@ -575,6 +575,125 @@ class PaperProcessorDaemon:
         
         return metadata
     
+    def use_metadata_as_is(self, pdf_path: Path, metadata: dict) -> bool:
+        """Process paper using extracted/entered metadata.
+        
+        Args:
+            pdf_path: Path to PDF
+            metadata: Metadata to use
+            
+        Returns:
+            True if successful
+        """
+        # Generate filename
+        proposed_filename = self.generate_filename(metadata)
+        
+        print(f"\n📄 Proposed filename: {proposed_filename}")
+        
+        confirm = input("Use this filename? (y/n): ").strip().lower()
+        if confirm != 'y':
+            new_name = input("Enter custom filename (without .pdf): ").strip()
+            if new_name:
+                proposed_filename = f"{new_name}.pdf"
+            else:
+                print("❌ Cancelled")
+                return False
+        
+        # Check for duplicates in publications directory
+        final_path = self.publications_dir / proposed_filename
+        
+        if final_path.exists():
+            print(f"\n⚠️  FILE ALREADY EXISTS: {proposed_filename}")
+            print(f"   Existing: {self.get_file_info(final_path)}")
+            print(f"   Scanned:  {self.get_file_info(pdf_path)}")
+            print()
+            print("What would you like to do?")
+            print("[1] Keep both (rename scan with _scanned suffix)")
+            print("[2] Replace original with scan")
+            print("[3] Keep original, discard scan")
+            print("[4] Manual review later")
+            
+            dup_choice = input("\nChoice: ").strip()
+            
+            if dup_choice == '1':
+                # Rename with suffix
+                stem = final_path.stem
+                suffix = final_path.suffix
+                final_path = self.publications_dir / f"{stem}_scanned{suffix}"
+                proposed_filename = final_path.name
+                print(f"✅ Will save as: {proposed_filename}")
+                
+            elif dup_choice == '2':
+                # Backup and replace
+                backup_path = self.publications_dir / f"{final_path.stem}_original{final_path.suffix}"
+                shutil.move(str(final_path), str(backup_path))
+                print(f"📦 Original backed up as: {backup_path.name}")
+                
+            elif dup_choice == '3':
+                # Keep original
+                self.move_to_done(pdf_path)
+                print("✅ Kept original, moved scan to done/")
+                return True
+                
+            else:  # Manual review
+                print("📋 Leaving in scanner directory for manual review")
+                return False
+        
+        # Copy to publications
+        try:
+            shutil.copy2(str(pdf_path), str(final_path))
+            print(f"✅ Copied to: {final_path}")
+            
+            # Check if we should add to Zotero
+            if metadata.get('from_zotero'):
+                # This came from Zotero - just attach PDF
+                print("\n📖 Attaching PDF to existing Zotero item...")
+                zotero_key = metadata.get('zotero_key')
+                if zotero_key:
+                    attach_result = self.zotero_processor.attach_pdf_to_existing(zotero_key, final_path)
+                    if attach_result:
+                        print("✅ PDF attached to Zotero item")
+                    else:
+                        print("⚠️  Could not attach PDF to Zotero")
+            else:
+                # New metadata - ask about Zotero
+                add_zotero = input("\nAdd to Zotero? (y/n): ").strip().lower()
+                if add_zotero == 'y':
+                    print("📖 Adding to Zotero...")
+                    zotero_result = self.zotero_processor.add_paper(metadata, final_path)
+                    if zotero_result['success']:
+                        print(f"✅ Added to Zotero")
+                    else:
+                        print(f"⚠️  Zotero error: {zotero_result.get('error')}")
+            
+            # Move original to done/
+            self.move_to_done(pdf_path)
+            print("✅ Processing complete!")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error copying file: {e}")
+            print(f"❌ Error: {e}")
+            return False
+    
+    def get_file_info(self, file_path: Path) -> str:
+        """Get file size and modification time.
+        
+        Args:
+            file_path: Path to file
+            
+        Returns:
+            Formatted string with file info
+        """
+        try:
+            stat = file_path.stat()
+            size_mb = stat.st_size / (1024 * 1024)
+            from datetime import datetime
+            mod_time = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+            return f"{size_mb:.1f} MB, modified {mod_time}"
+        except Exception:
+            return "unknown"
+    
     def write_pid_file(self):
         """Write daemon PID to file."""
         import os
@@ -627,7 +746,7 @@ class PaperProcessorDaemon:
                 
                 if metadata:
                     # Display what we gathered
-                    self.display_metadata(metadata, pdf_path, extraction_time)
+            self.display_metadata(metadata, pdf_path, extraction_time)
                 else:
                     # User gave up
                     self.move_to_failed(pdf_path)
@@ -641,6 +760,11 @@ class PaperProcessorDaemon:
             if choice == 'q':
                 self.logger.info("User requested quit")
                 self.shutdown(None, None)
+            
+            elif choice == '1':  # Use metadata as-is
+                success = self.use_metadata_as_is(pdf_path, metadata)
+                if not success:
+                    self.logger.info("Processing cancelled or failed")
             
             elif choice == '4':  # Skip
                 self.move_to_skipped(pdf_path)
