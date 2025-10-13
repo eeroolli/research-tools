@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared_tools.metadata.paper_processor import PaperMetadataProcessor
 from shared_tools.zotero.paper_processor import ZoteroPaperProcessor
+from shared_tools.zotero.local_search import ZoteroLocalSearch
 
 
 class PaperProcessorDaemon:
@@ -52,6 +53,14 @@ class PaperProcessorDaemon:
         # Initialize processors
         self.metadata_processor = PaperMetadataProcessor()
         self.zotero_processor = ZoteroPaperProcessor()
+        
+        # Initialize local Zotero search (read-only)
+        try:
+            self.local_zotero = ZoteroLocalSearch()
+            self.logger.info("Connected to live Zotero database (read-only mode)")
+        except Exception as e:
+            self.logger.error(f"Failed to connect to Zotero database: {e}")
+            self.local_zotero = None
         
         # Setup signal handlers for clean shutdown
         signal.signal(signal.SIGINT, self.shutdown)
@@ -88,7 +97,10 @@ class PaperProcessorDaemon:
         self.logger = logging.getLogger(__name__)
     
     def display_metadata(self, metadata: dict, pdf_path: Path, extraction_time: float):
-        """Display extracted metadata to user.
+        """Display extracted metadata to user with universal field handling.
+        
+        Shows all non-empty fields with smart grouping and labeling.
+        Works for any document type and metadata source.
         
         Args:
             metadata: Extracted metadata dict
@@ -101,27 +113,194 @@ class PaperProcessorDaemon:
         print(f"\nMetadata extracted in {extraction_time:.1f}s")
         print("\nEXTRACTED METADATA:")
         print("-" * 40)
-        print(f"Title:    {metadata.get('title', 'Unknown')}")
         
-        authors = metadata.get('authors', [])
-        if authors:
-            author_str = ', '.join(authors[:3])
-            if len(authors) > 3:
-                author_str += f" (+{len(authors)-3} more)"
-            print(f"Authors:  {author_str}")
-        else:
-            print(f"Authors:  Unknown")
-        
-        print(f"Year:     {metadata.get('year', 'Unknown')}")
-        print(f"Type:     {metadata.get('document_type', 'unknown')}")
-        print(f"Journal:  {metadata.get('journal', 'N/A')}")
-        print(f"DOI:      {metadata.get('doi', 'Not found')}")
-        
-        if metadata.get('abstract'):
-            abstract = metadata['abstract'][:150]
-            print(f"Abstract: {abstract}..." if len(metadata['abstract']) > 150 else f"Abstract: {abstract}")
+        # Universal field display using smart grouping
+        self._display_metadata_universal(metadata)
         
         print("-" * 40)
+    
+    def _display_metadata_universal(self, metadata: dict):
+        """Universal metadata display that handles any document type and source.
+        
+        Args:
+            metadata: Metadata dictionary to display
+        """
+        # Define field groups and their display order
+        field_groups = [
+            ('BASIC INFORMATION', self._get_basic_info_fields()),
+            ('PUBLICATION DETAILS', self._get_publication_fields()),
+            ('IDENTIFIERS', self._get_identifier_fields()),
+            ('CONTENT INFO', self._get_content_fields()),
+            ('ZOTERO STATUS', self._get_zotero_fields()),
+            ('TECHNICAL INFO', self._get_technical_fields())
+        ]
+        
+        # Display each group if it has non-empty fields
+        for group_name, field_mapping in field_groups:
+            group_fields = self._extract_group_fields(metadata, field_mapping)
+            if group_fields:
+                print(f"\n{group_name}:")
+                for field_name, field_value in group_fields.items():
+                    self._display_field(field_name, field_value)
+    
+    def _get_basic_info_fields(self) -> dict:
+        """Get field mapping for basic information."""
+        return {
+            'title': 'Title',
+            'authors': 'Authors',
+            'year': 'Year',
+            'document_type': 'Type',
+            'language': 'Language'
+        }
+    
+    def _get_publication_fields(self) -> dict:
+        """Get field mapping for publication details."""
+        return {
+            'journal': 'Journal',
+            'conference': 'Conference',
+            'book_title': 'Book Title',
+            'book_editors': 'Book Editors',
+            'publisher': 'Publisher',
+            'volume': 'Volume',
+            'issue': 'Issue',
+            'pages': 'Pages',
+            'edition': 'Edition',
+            'series': 'Series',
+            'location': 'Location',
+            'date_published': 'Date Published',
+            'university': 'University',
+            'advisor': 'Advisor',
+            'degree_type': 'Degree Type'
+        }
+    
+    def _get_identifier_fields(self) -> dict:
+        """Get field mapping for identifiers."""
+        return {
+            'doi': 'DOI',
+            'isbn': 'ISBN',
+            'issn': 'ISSN',
+            'pmid': 'PMID',
+            'arxiv_id': 'arXiv ID',
+            'url': 'URL',
+            'report_number': 'Report Number',
+            'patent_number': 'Patent Number',
+            'case_number': 'Case Number'
+        }
+    
+    def _get_content_fields(self) -> dict:
+        """Get field mapping for content information."""
+        return {
+            'abstract': 'Abstract',
+            'keywords': 'Keywords',
+            'tags': 'Tags',
+            'subjects': 'Subjects',
+            'summary': 'Summary'
+        }
+    
+    def _get_zotero_fields(self) -> dict:
+        """Get field mapping for Zotero-specific information."""
+        return {
+            'item_key': 'Item Key',
+            'has_attachment': 'Has PDF',
+            'similarity': 'Match Confidence',
+            'method': 'Match Method',
+            'from_zotero': 'From Zotero'
+        }
+    
+    def _get_technical_fields(self) -> dict:
+        """Get field mapping for technical information."""
+        return {
+            'source': 'Data Source',
+            'confidence': 'Confidence',
+            'processing_time': 'Processing Time',
+            'extraction_method': 'Extraction Method',
+            'raw_type': 'Raw Type'
+        }
+    
+    def _extract_group_fields(self, metadata: dict, field_mapping: dict) -> dict:
+        """Extract non-empty fields for a group.
+        
+        Args:
+            metadata: Full metadata dictionary
+            field_mapping: Field mapping for this group
+            
+        Returns:
+            Dictionary of non-empty fields in this group
+        """
+        group_fields = {}
+        
+        for field_key, field_label in field_mapping.items():
+            if field_key in metadata:
+                value = metadata[field_key]
+                if self._is_non_empty_value(value):
+                    group_fields[field_label] = value
+        
+        return group_fields
+    
+    def _is_non_empty_value(self, value) -> bool:
+        """Check if a value is considered non-empty for display."""
+        if value is None:
+            return False
+        if isinstance(value, (list, tuple)):
+            return len(value) > 0
+        if isinstance(value, str):
+            return value.strip() != ''
+        if isinstance(value, bool):
+            return True  # Always show boolean values
+        if isinstance(value, (int, float)):
+            return True  # Always show numeric values
+        return True  # Default to showing other types
+    
+    def _display_field(self, field_name: str, field_value):
+        """Display a single field with appropriate formatting.
+        
+        Args:
+            field_name: Display name for the field
+            field_value: Value to display
+        """
+        if field_name == 'Authors':
+            if isinstance(field_value, list):
+                if len(field_value) > 3:
+                    author_str = ', '.join(field_value[:3]) + f" (+{len(field_value)-3} more)"
+                else:
+                    author_str = ', '.join(field_value)
+                print(f"  {field_name}: {author_str}")
+            else:
+                print(f"  {field_name}: {field_value}")
+        
+        elif field_name == 'Abstract':
+            if isinstance(field_value, str):
+                abstract = field_value[:150]
+                if len(field_value) > 150:
+                    print(f"  {field_name}: {abstract}...")
+                else:
+                    print(f"  {field_name}: {abstract}")
+            else:
+                print(f"  {field_name}: {field_value}")
+        
+        elif field_name == 'Has PDF':
+            print(f"  {field_name}: {'✅ Yes' if field_value else '❌ No'}")
+        
+        elif field_name == 'Match Confidence':
+            if isinstance(field_value, (int, float)):
+                print(f"  {field_name}: {field_value:.1f}%")
+            else:
+                print(f"  {field_name}: {field_value}")
+        
+        elif field_name == 'From Zotero':
+            print(f"  {field_name}: {'✅ Yes' if field_value else '❌ No'}")
+        
+        elif isinstance(field_value, list):
+            if len(field_value) == 0:
+                print(f"  {field_name}: (empty)")
+            elif len(field_value) <= 3:
+                print(f"  {field_name}: {', '.join(str(v) for v in field_value)}")
+            else:
+                items = ', '.join(str(v) for v in field_value[:3])
+                print(f"  {field_name}: {items} (+{len(field_value)-3} more)")
+        
+        else:
+            print(f"  {field_name}: {field_value}")
     
     def display_interactive_menu(self) -> str:
         """Display interactive menu and get user choice.
@@ -145,6 +324,64 @@ class PaperProcessorDaemon:
                 return choice
             else:
                 print("Invalid choice. Please try again.")
+    
+    def search_and_display_local_zotero(self, metadata: dict) -> list:
+        """Search local Zotero database and display matches.
+        
+        SAFETY: This method only performs READ operations on the database.
+        No write operations are possible.
+        
+        Args:
+            metadata: Metadata to search with
+            
+        Returns:
+            List of matching Zotero items
+        """
+        if not self.local_zotero:
+            print("❌ Zotero database not available")
+            return []
+        
+        print("\n🔍 Searching live Zotero database (read-only)...")
+        
+        try:
+            matches = self.local_zotero.search_by_metadata(metadata, max_matches=5)
+            
+            if not matches:
+                print("❌ No matches found in local Zotero database")
+                return []
+            
+            print(f"\n✅ Found {len(matches)} potential match(es):")
+            print()
+            
+            for i, match in enumerate(matches, 1):
+                print(f"[{i}] {match.get('title', 'Unknown title')}")
+                
+                authors = match.get('authors', [])
+                if authors:
+                    author_str = ', '.join(authors[:2])
+                    if len(authors) > 2:
+                        author_str += f" et al."
+                    print(f"    Authors: {author_str}")
+                
+                print(f"    Year: {match.get('year', 'Unknown')}")
+                print(f"    Similarity: {match.get('similarity', 0):.1f}%")
+                print(f"    Method: {match.get('method', 'Unknown')}")
+                
+                # Check for existing PDF
+                has_pdf = match.get('has_attachment', False)
+                print(f"    PDF: {'✅ Yes' if has_pdf else '❌ No'}")
+                
+                if match.get('DOI'):
+                    print(f"    DOI: {match['DOI']}")
+                
+                print()
+            
+            return matches
+            
+        except Exception as e:
+            self.logger.error(f"Error searching Zotero database: {e}")
+            print("❌ Error searching Zotero database")
+            return []
     
     def write_pid_file(self):
         """Write daemon PID to file."""
@@ -218,8 +455,67 @@ class PaperProcessorDaemon:
                 self.logger.info("Moved to manual review")
                 # Don't move file - leave in scanner directory for manual processing
             
+            elif choice == '3':  # Search local Zotero
+                matches = self.search_and_display_local_zotero(metadata)
+                
+                if matches:
+                    print("\nWhat would you like to do?")
+                    print("[1-5] Use this Zotero item (attach PDF)")
+                    print("[n]   None of these - create new item")
+                    print("[b]   Back to main menu")
+                    
+                    sub_choice = input("\nYour choice: ").strip().lower()
+                    
+                    if sub_choice == 'b':
+                        # Show menu again (recursive call)
+                        choice = self.display_interactive_menu()
+                        # Handle new choice in next iteration
+                        self.logger.info(f"Returned to main menu - choice: {choice}")
+                        
+                    elif sub_choice == 'n':
+                        # Create new - use standard workflow
+                        success = self.use_metadata_as_is(pdf_path, metadata)
+                        if not success:
+                            self.logger.info("Processing cancelled or failed")
+                        
+                    elif sub_choice.isdigit():
+                        # User selected a match
+                        idx = int(sub_choice)
+                        if 1 <= idx <= min(5, len(matches)):
+                            selected_match = matches[idx - 1]
+                            success = self.attach_to_existing_zotero_item(pdf_path, selected_match, metadata)
+                            if success:
+                                self.logger.info("Successfully attached to existing Zotero item")
+                            else:
+                                self.logger.info("Failed to attach to Zotero item")
+                        else:
+                            print("Invalid selection")
+                            
+                else:
+                    # No matches - offer other options
+                    print("\nNo matches found. What next?")
+                    print("[1] Use extracted metadata as-is")
+                    print("[2] Edit metadata manually")
+                    print("[4] Skip document")
+                    print("[5] Manual processing later")
+                    
+                    fallback_choice = input("\nYour choice: ").strip()
+                    
+                    if fallback_choice == '1':
+                        success = self.use_metadata_as_is(pdf_path, metadata)
+                    elif fallback_choice == '2':
+                        edited_metadata = self.edit_metadata_interactively(metadata)
+                        confirm = input("\nProceed with edited metadata? (y/n): ").strip().lower()
+                        if confirm == 'y':
+                            success = self.use_metadata_as_is(pdf_path, edited_metadata)
+                    elif fallback_choice == '4':
+                        self.move_to_skipped(pdf_path)
+                        self.logger.info("Document skipped by user")
+                    else:
+                        self.logger.info("Left for manual processing")
+            
             else:
-                # Choices 1, 2, 3 - to be implemented in next tasks
+                # Choices 1, 2 - to be implemented in next tasks
                 self.logger.info(f"Choice '{choice}' not yet implemented")
                 self.logger.info("Leaving in scanner directory for now")
             

@@ -309,11 +309,24 @@ class UnifiedMetadataManager:
 2. Scanner saves PDF to I:\FraScanner\papers\
 3. Scanner triggers start_paper_processor.py
 4. Daemon processes automatically (5-130 seconds depending on identifiers)
-5. User sees result in terminal, makes choices and paper is moved and Zotero is updated
-6. Ready for next scan
+5. ✅ INTERACTIVE MENU: User reviews and approves actions
+6. Execute approved actions
+7. Ready for next scan
 ```
 
 **Target timing:** 5-10 seconds for papers with DOI/arXiv, 65-130 seconds for papers needing Ollama
+
+#### 4.7 Interactive Menu System ✅ ENHANCED
+**Status:** 🚧 **In Progress** - Universal metadata display system implemented (Oct 13, 2025)
+
+- ✅ **Universal Metadata Display**: Smart field grouping and intelligent formatting for any document type
+- ✅ **Document Type Awareness**: Shows relevant fields for journal articles, book chapters, conference papers, books, legal docs, etc.
+- ✅ **Metadata Source Flexibility**: Works with Zotero local, CrossRef API, arXiv, national libraries, OCR extraction, manual entry
+- ✅ **Future-Proof Design**: Automatically displays new fields without code changes
+- ✅ **Enhanced User Experience**: Grouped, formatted, intelligent display with proper field labeling
+- 🚧 **Interactive Menu**: Menu system with user choices (use as-is, edit, search Zotero, skip, manual processing)
+- 🚧 **Failed Extraction Workflow**: Guided manual metadata entry for failed extractions
+- 🚧 **Metadata Editing**: Interactive field editing with current value display
 
 **Next steps:**
 1. Review `daemon_implementation_spec.md`
