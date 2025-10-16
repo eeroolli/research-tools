@@ -12,6 +12,8 @@ This guide explains how to configure your Epson scanner to automatically trigger
 - ✅ WSL2 with research-tools installed
 - ✅ Paper processor daemon implemented
 - ✅ Batch/PowerShell launcher scripts created
+- ✅ **GROBID Integration** - Advanced academic paper metadata extraction
+- ✅ **Docker** - For GROBID container (auto-started by daemon)
 
 ---
 
@@ -66,30 +68,14 @@ Starting paper processor daemon...
 2. **Enable:** "Run program after job completion"
 3. **Choose ONE option:**
 
-   **Option A: Batch File (Recommended)**
+   **VBS Launcher (Recommended)**
    ```
-   F:\prog\research-tools\scripts\start_scanner_daemon.bat
+   F:\prog\research-tools\scripts\start_scanner_daemon.vbs
    ```
-   - Simple
-   - Easy to debug
-   - Shows clear output
-
-   **Option B: PowerShell Script**
-   ```
-   powershell.exe -ExecutionPolicy Bypass -File "F:\prog\research-tools\scripts\start_scanner_daemon.ps1"
-   ```
-   - Prettier output
-   - More modern
-   - Requires ExecutionPolicy bypass
-
-   **Option C: Direct WSL Command**
-   ```
-   wsl.exe bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate research-tools && python /mnt/f/prog/research-tools/scripts/start_paper_processor.py"
-   ```
-   - Most direct
-   - No intermediate files
-   - Harder to debug
-   - **Important:** Activates conda environment properly!
+   - Epson compatible
+   - Shows helpful startup message
+   - Works on any Windows computer
+   - User-friendly feedback
 
 4. **Save settings**
 
@@ -105,19 +91,19 @@ Create separate jobs/profiles for each language:
 - Name: "Papers - Norwegian"
 - Language prefix: NO_
 - Destination: I:\FraScanner\papers\
-- Post-action: Run scripts\start_scanner_daemon.bat
+- Post-action: Run scripts\start_scanner_daemon.vbs
 
 **English Button:**
 - Name: "Papers - English"
 - Language prefix: EN_
 - Destination: I:\FraScanner\papers\
-- Post-action: Run scripts\start_scanner_daemon.bat
+- Post-action: Run scripts\start_scanner_daemon.vbs
 
 **German Button:**
 - Name: "Papers - German"
 - Language prefix: DE_
 - Destination: I:\FraScanner\papers\
-- Post-action: Run scripts\start_scanner_daemon.bat
+- Post-action: Run scripts\start_scanner_daemon.vbs
 
 ---
 
@@ -323,8 +309,7 @@ Create different batch files for different workflows:
 
 | File | Windows Path | WSL Path |
 |------|-------------|----------|
-| Batch launcher | `F:\prog\research-tools\scripts\start_scanner_daemon.bat` | `/mnt/f/prog/research-tools/scripts/start_scanner_daemon.bat` |
-| PowerShell launcher | `F:\prog\research-tools\scripts\start_scanner_daemon.ps1` | `/mnt/f/prog/research-tools/scripts/start_scanner_daemon.ps1` |
+| VBS launcher | `F:\prog\research-tools\scripts\start_scanner_daemon.vbs` | `/mnt/f/prog/research-tools/scripts/start_scanner_daemon.vbs` |
 | Python launcher | `F:\prog\research-tools\scripts\start_paper_processor.py` | `/mnt/f/prog/research-tools/scripts/start_paper_processor.py` |
 | Daemon script | `F:\prog\research-tools\scripts\paper_processor_daemon.py` | `/mnt/f/prog/research-tools/scripts/paper_processor_daemon.py` |
 | Scanner destination | `I:\FraScanner\papers\` | `/mnt/i/FraScanner/papers/` |
@@ -332,12 +317,54 @@ Create different batch files for different workflows:
 
 ---
 
+## GROBID Configuration
+
+The paper processor daemon uses **GROBID** (GeneRation Of BIbliographic Data) for advanced academic paper metadata extraction.
+
+### Automatic Setup
+- ✅ **Auto-start**: GROBID Docker container starts automatically when daemon launches
+- ✅ **Auto-stop**: Container stops when daemon shuts down (configurable)
+- ✅ **Smart Processing**: Extracts metadata from first 2 pages only (prevents citation pollution)
+- ✅ **Document Type Detection**: Automatically identifies journal articles, books, conferences, etc.
+
+### Configuration Options
+Edit `config.conf` to customize GROBID behavior:
+
+```ini
+[GROBID]
+# Automatically start GROBID Docker container if not running
+auto_start = true
+# Stop GROBID container when daemon shuts down (if we started it)
+auto_stop = true
+# Docker container name for GROBID
+container_name = grobid
+# GROBID server port (default is 8070)
+port = 8070
+# Maximum pages to process for metadata extraction (prevents extracting authors from references)
+max_pages = 2
+```
+
+### GROBID Features
+- **Smart Author Extraction** - Only processes first 2 pages to avoid extracting authors from references
+- **Document Type Detection** - Identifies journal articles, books, conferences, theses, reports, preprints
+- **Enhanced Metadata** - Extracts keywords, publisher, volume, issue, pages, language, conference info
+- **Fallback Support** - Falls back to Ollama 7B if GROBID is unavailable
+
+### Troubleshooting GROBID
+If GROBID fails to start:
+1. **Check Docker**: Ensure Docker is running on Windows
+2. **Check Port**: Verify port 8070 is not in use
+3. **Check Logs**: Run `docker logs grobid` to see container logs
+4. **Manual Start**: `docker start grobid` to manually start container
+
+---
+
 ## Testing Commands
 
 **From Windows:**
 ```cmd
-REM Test batch file
-F:\prog\research-tools\scripts\start_scanner_daemon.bat
+REM Test VBS launcher
+F:\prog\research-tools\scripts\start_scanner_daemon.vbs
 
 REM Check daemon status
 wsl cat /mnt/i/FraScanner/papers/.daemon.pid
@@ -345,8 +372,7 @@ wsl cat /mnt/i/FraScanner/papers/.daemon.pid
 REM View daemon output
 wsl tail -f /tmp/daemon.log
 
-REM Stop daemon
-wsl python /mnt/f/prog/research-tools/scripts/stop_paper_processor.py
+REM Stop daemon (Ctrl+C in daemon terminal)
 ```
 
 **From WSL:**
@@ -359,8 +385,7 @@ python scripts/start_paper_processor.py
 cat /mnt/i/FraScanner/papers/.daemon.pid
 ps aux | grep paper_processor_daemon
 
-# Stop daemon
-python scripts/stop_paper_processor.py
+# Stop daemon (Ctrl+C in daemon terminal)
 ```
 
 ---

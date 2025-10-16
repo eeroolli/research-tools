@@ -5,7 +5,8 @@ A comprehensive system for processing academic papers and books with ISBN extrac
 ## Current Status
 
 **✅ Book Processing**: Fully functional with advanced OCR capabilities  
-**✅ Paper Processing**: Interactive daemon with metadata extraction and Zotero integration  
+**✅ Paper Processing**: Complete interactive daemon with 3-step UX workflow  
+**✅ Zotero Integration**: Enhanced workflow for attaching PDFs to existing items  
 **🤖 AI Integration**: Ollama 7B installed and ready for paper processing
 
 For detailed development status, technical architecture, and upcoming features, see the [Implementation Plan](implementation-plan.md).
@@ -15,8 +16,8 @@ For detailed development status, technical architecture, and upcoming features, 
 **Want to scan and process academic papers?**
 
 1. **Start the daemon:**
-   - Windows: Double-click `scripts/START_HERE_Process_Papers.bat`
-   - Linux/WSL: `python scripts/paper_processor_daemon.py`
+   - **Windows**: Double-click `scripts/start_scanner_daemon.vbs`
+   - **Linux/WSL**: `python scripts/paper_processor_daemon.py`
 
 2. **Scan your papers** to the configured scanner folder (see `config.conf: scanner_papers_dir`)
    - Use any scanner that saves PDFs
@@ -30,12 +31,26 @@ For detailed development status, technical architecture, and upcoming features, 
 
 4. **Stop when done:** Press Ctrl+C in the terminal
 
+**Setup for Epson Scanner:**
+1. In Epson Capture Pro, set "After Scan" action to run Application `scripts/start_scanner_daemon.vbs`.
+2. The VBS shows a helpful message about startup time (30 seconds, can be closed)
+3. Daemon continues starting in background even if you close the message
+
+**Startup Time:**
+- **First scan of day**: ~60 seconds (Ollama startup + Python imports)
+- **Subsequent scans**: ~5 seconds (Ollama already running)
+
 **Features:**
-- ✅ Automatic metadata extraction (DOI, title, authors, year)
-- ✅ Interactive review and approval
-- ✅ Local Zotero database search
-- ✅ Duplicate detection
+- ✅ **GROBID Integration** - Advanced academic paper metadata extraction
+- ✅ **Smart Author Extraction** - Processes only first 2 pages to avoid citation pollution
+- ✅ **Document Type Detection** - Automatically identifies journal articles, books, conferences, etc.
+- ✅ **Enhanced Metadata** - Extracts keywords, publisher, volume, issue, pages, language
+- ✅ Interactive review and approval with 3-step workflow
+- ✅ Local Zotero database search with enhanced UX
+- ✅ Metadata comparison and field-by-field merging
+- ✅ Duplicate detection and conflict resolution
 - ✅ Smart filename generation
+- ✅ Manual processing option for ambiguous cases
 
 [Detailed scanner setup (Epson auto-trigger) →](SCANNER_SETUP.md)
 
@@ -91,16 +106,37 @@ python scripts/paper_processor_daemon.py
 - **Success rate**: 100% in recent tests
 - **Intel GPU**: Acceleration enabled and working
 
-## Paper Processing (Planned)
+## Paper Processing (Working)
 
-### What It Will Do
-- Process scanned academic papers using Ollama 7B for identifier extraction
-- Extract DOI, title, authors, journal information from first page
-- Look up complete metadata from academic databases (CrossRef, PubMed, arXiv, OpenAlex)
+### What It Does
+- **GROBID Integration** - Advanced academic paper metadata extraction using GROBID
+- **Smart Processing** - Extracts metadata from first 2 pages only (configurable)
+- **Document Type Detection** - Automatically identifies journal articles, books, conferences, theses, etc.
+- **Enhanced Metadata** - Extracts keywords, publisher, volume, issue, pages, language, conference info
+- **Fallback Processing** - Uses Ollama 7B when GROBID is unavailable
+- Look up complete metadata from academic databases (CrossRef, arXiv)
 - Add papers to Zotero with proper file linking and organization
+- **Enhanced 3-step workflow** for attaching PDFs to existing Zotero items
+
+### Enhanced 3-Step UX Workflow
+When a Zotero match is found, users get a sophisticated 3-step process:
+
+#### Step 1: Metadata Comparison
+- Side-by-side comparison of extracted vs Zotero metadata
+- 6 user options including manual processing and creating new items
+- Field-by-field merging capability
+
+#### Step 2: Tags Comparison  
+- Integration with existing interactive tag system
+- Tag groups, online tags, and custom tag management
+
+#### Step 3: PDF Attachment
+- PDF conflict resolution (keep both/replace/cancel)
+- Smart filename generation and duplicate handling
+- Complete file management and cleanup
 
 ### Current Status
-Paper processing is planned for **Phase 4** of development. See the [Implementation Plan](implementation-plan.md) for detailed technical specifications and timeline.
+✅ **Paper processing is fully implemented and working!** The interactive daemon provides a complete workflow for processing scanned academic papers with enhanced Zotero integration.
 
 ### Scaffold (available now)
 To preview the future workflow shape without changing current behavior, a minimal scaffold exists:
@@ -191,9 +227,15 @@ For detailed technical architecture and development phases, see the [Implementat
 - Configuration management
 - International metadata sources
 - Ollama 7B installation
+- **Complete interactive paper processing workflow**
+- **3-step UX flow for Zotero PDF attachment**
+- **Enhanced metadata comparison and merging**
+- **GROBID Integration** - Advanced academic paper metadata extraction
+- **Smart Author Extraction** - Page-limited processing to avoid citation pollution
+- **Document Type Detection** - Automatic classification of academic documents
+- **Enhanced Metadata Extraction** - Keywords, publisher, volume, issue, pages, language
 
 ### 🚧 In Progress
-- Paper scanning workflow (Phase 4)
 - Academic metadata APIs (Phase 4)
 - Unified metadata system (Phase 2-3)
 
@@ -234,6 +276,7 @@ This project follows the coding standards defined in `programming_preferences.md
 - **[Programming Preferences](programming_preferences.md)** - Coding standards and best practices
 - **[Ollama Setup](ollama-network-sharing.md)** - Ollama 7B installation and configuration
 - **[GPU Optimization](gpu-optimization-suggestions.md)** - Performance optimization options
+- **[GROBID Setup](GROBID_SETUP.md)** - GROBID integration and configuration guide
 
 ## License
 
