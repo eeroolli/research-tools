@@ -55,10 +55,10 @@
 - Handle bash, python, and powershell scripts appropriately
 
 ## Code Bloat Prevention
-- Do not add new functions without considering if existing code can be improved
+- Do not add new functions without considering if existing code can be improved or reused. Many task are already solved. Check first, then write.
 - Refactor existing code before adding new functionality
 - Bigger is not better—simplicity and clarity are paramount
-
+- Always use standard libraries, rather than writing a new function or method.
 ## Commit Message Standards
 - Use project-wide prefixes in all commit messages:
   - `fix:` for bug fixes

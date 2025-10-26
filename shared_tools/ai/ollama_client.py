@@ -33,7 +33,7 @@ class OllamaClient:
         self.validator = IdentifierValidator()
     
     def extract_paper_metadata(self, text: str, validate: bool = True, 
-                              document_context: str = "general") -> Optional[Dict]:
+                              document_context: str = "general", progress_callback=None, found_info: dict = None, debug: bool = False) -> Optional[Dict]:
         """Extract structured metadata from paper text using Ollama.
         
         Args:
@@ -48,6 +48,30 @@ class OllamaClient:
         prompt = self._build_extraction_prompt(text, document_context)
         
         try:
+            # Debug: Show extracted text if requested
+            if debug:
+                print(f"\n🔍 DEBUG: Extracted text (first 1000 chars):")
+                print("=" * 60)
+                print(text[:1000])
+                print("=" * 60)
+            
+            # Start progress indicator if callback provided
+            if progress_callback:
+                import threading
+                import time
+                
+                def show_progress():
+                    elapsed = 0
+                    while True:
+                        time.sleep(1)
+                        elapsed += 1
+                        progress_callback(found_info or {}, elapsed)
+                        if elapsed >= self.timeout:
+                            break
+                
+                progress_thread = threading.Thread(target=show_progress, daemon=True)
+                progress_thread.start()
+            
             # Run ollama with the prompt
             result = subprocess.run(
                 ["ollama", "run", self.model_name, prompt],
@@ -95,7 +119,10 @@ class OllamaClient:
 - Return ONLY information you can see in the text
 - If you cannot find a field, use null - DO NOT GUESS OR INVENT
 - DO NOT make up fake identifiers like "1234-5678" or "John Doe"
-- ONLY extract what is actually present in the text"""
+- ONLY extract what is actually present in the text
+- FOR AUTHORS: Look for ALL authors mentioned - check title page, headers, footers, and bylines
+- AUTHORS can be separated by commas, "and", "&", or line breaks
+- Look for patterns like "By [Name]", "Authors: [Names]", "[Name] and [Name]", etc."""
         
         # Comprehensive hints for ALL document types (always included - Ollama uses what applies)
         comprehensive_hints = """
@@ -127,6 +154,20 @@ REPORTS:
 - ISSN or ISBN possible
 - Organization name
 - document_type: "report"
+
+WORKING PAPERS:
+- Usually from institutions (universities, think tanks, research centers)
+- Often have "Working Paper" in title or header
+- May have working paper numbers (e.g., "WP-2024-01")
+- Institution name usually prominent
+- URL often provided for download
+- document_type: "working_paper"
+
+MANUSCRIPTS:
+- Unpublished papers without institutional affiliation
+- Usually just authors and title
+- No publisher or institution
+- document_type: "manuscript"
 """
         
         return f"""Extract structured information from this document text. 
@@ -145,7 +186,7 @@ Return ONLY valid JSON with these exact fields:
 - publisher (string or null) - Publishing organization
 - year (string or null) - Publication year
 - pages (string or null) - Page range (e.g., "145-178" or "pp. 89-120")
-- document_type (string) - One of: journal_article, report, legal_document, conference_paper, news_article, book_chapter, unknown
+- document_type (string) - One of: journal_article, report, legal_document, conference_paper, news_article, book_chapter, working_paper, manuscript, unknown
 
 FOR BOOK CHAPTERS ONLY (if document_type is "book_chapter"):
 - book_title (string or null) - The book title (often in headers/footers)

@@ -16,12 +16,14 @@ dependencies:
   - requests  # API calls
   - configparser  # Configuration parsing
   - pdfplumber  # PDF text extraction
+  - pymupdf  # PDF manipulation and rotation
   - pytest  # Testing framework
   - mkl  # Intel Math Kernel Library
   - mkl-service
   - intel-openmp  # Intel OpenMP
   - tbb  # Intel Threading Building Blocks
   - watchdog  # File system monitoring for paper processor daemon
+  - pathvalidate  # Cross-platform filename sanitization
   - pip
   - pip:
     - pyzotero  # Zotero API integration

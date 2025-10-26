@@ -12,9 +12,9 @@ from datetime import datetime
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from process_books.src.extractors.isbn_extractor import ISBNExtractor
-from process_books.src.processors.smart_integrated_processor_v3 import SmartIntegratedProcessorV3
-from process_books.src.utils.file_manager import FileManager
+from shared_tools.extractors.isbn_extractor import ISBNExtractor
+from shared_tools.processors.smart_integrated_processor_v3 import SmartIntegratedProcessorV3
+from shared_tools.utils.file_manager import FileManager
 
 def setup_logging():
     """Set up logging configuration"""

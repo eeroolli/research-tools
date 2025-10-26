@@ -249,7 +249,15 @@ class PaperProcessorDaemon:
         
         # Check GROBID availability
         from shared_tools.api.grobid_client import GrobidClient
-        self.grobid_client = GrobidClient(f"http://localhost:{self.grobid_port}")
+        
+        # Create GROBID config with rotation settings
+        grobid_config = {
+            'handle_rotation': self.config.getboolean('GROBID', 'handle_rotation', fallback=True),
+            'rotation_check_pages': self.config.getint('GROBID', 'rotation_check_pages', fallback=2),
+            'tesseract_path': self.config.get('PROCESSING', 'tesseract_path', fallback=None)
+        }
+        
+        self.grobid_client = GrobidClient(f"http://localhost:{self.grobid_port}", config=grobid_config)
         
         if self.grobid_client.is_available(verbose=False):
             self.grobid_ready = True

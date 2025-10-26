@@ -11,19 +11,36 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Optional
 import logging
+import tempfile
+import os
+
+# Import PDF rotation handler
+try:
+    from ..pdf.pdf_rotation_handler import PDFRotationHandler
+except ImportError:
+    # Fallback for direct execution
+    import sys
+    sys.path.append(str(Path(__file__).parent.parent))
+    from pdf.pdf_rotation_handler import PDFRotationHandler
 
 
 class GrobidClient:
     """Client for GROBID server."""
     
-    def __init__(self, base_url: str = "http://localhost:8070"):
+    def __init__(self, base_url: str = "http://localhost:8070", config: Dict = None):
         """Initialize GROBID client.
         
         Args:
             base_url: GROBID server URL
+            config: Configuration dictionary for rotation handling
         """
         self.base_url = base_url.rstrip('/')
         self.logger = logging.getLogger(__name__)
+        self.config = config or {}
+        
+        # Initialize PDF rotation handler
+        self.rotation_handler = PDFRotationHandler(config)
+        self.temp_files = []  # Track temporary files for cleanup
     
     def is_available(self, verbose: bool = False) -> bool:
         """Check if GROBID server is available.
@@ -42,19 +59,39 @@ class GrobidClient:
                 self.logger.debug(f"GROBID not available: {e}")
             return False
     
-    def extract_metadata(self, pdf_path: Path, max_pages: int = 2) -> Optional[Dict]:
-        """Extract metadata from PDF using GROBID.
+    def extract_metadata(self, pdf_path: Path, max_pages: int = 2, handle_rotation: bool = True) -> Optional[Dict]:
+        """Extract metadata from PDF using GROBID with optional rotation handling.
         
         Args:
             pdf_path: Path to PDF file
             max_pages: Maximum number of pages to process (default: 2)
+            handle_rotation: Whether to detect and correct PDF rotation (default: True)
             
         Returns:
             Dictionary with extracted metadata or None if failed
         """
         try:
+            # Handle PDF rotation if enabled
+            pdf_to_process = pdf_path
+            rotation_applied = None
+            
+            if handle_rotation:
+                self.logger.info("Checking PDF for rotation issues...")
+                corrected_pdf, rotation_applied = self.rotation_handler.process_pdf_with_rotation(
+                    pdf_path, max_pages
+                )
+                
+                if rotation_applied:
+                    self.logger.info(f"Applied rotation correction: {rotation_applied}")
+                    pdf_to_process = corrected_pdf
+                    # Track temp file for cleanup
+                    if corrected_pdf != pdf_path:
+                        self.temp_files.append(corrected_pdf)
+                else:
+                    self.logger.info("No rotation correction needed")
+            
             # Send PDF to GROBID with page limit for better author extraction
-            with open(pdf_path, 'rb') as f:
+            with open(pdf_to_process, 'rb') as f:
                 files = {'input': f}
                 # Limit to specified pages to avoid extracting authors from references
                 data = {'start': '1', 'end': str(max_pages)}
@@ -77,7 +114,10 @@ class GrobidClient:
             
             if metadata:
                 metadata['extraction_method'] = 'grobid'
-                metadata['extraction_note'] = f'extracted from pages 1-{max_pages} only'
+                extraction_note = f'extracted from pages 1-{max_pages} only'
+                if rotation_applied:
+                    extraction_note += f', rotation corrected ({rotation_applied})'
+                metadata['extraction_note'] = extraction_note
                 author_count = len(metadata.get('authors', []))
                 self.logger.info(f"GROBID extracted: {author_count} authors from first {max_pages} pages")
             
@@ -257,6 +297,21 @@ class GrobidClient:
         lang_elem = root.find('.//{http://www.tei-c.org/ns/1.0}textLang')
         if lang_elem is not None and lang_elem.text:
             metadata['language'] = lang_elem.text.strip()
+    
+    def cleanup_temp_files(self):
+        """Clean up temporary files created during processing."""
+        for temp_file in self.temp_files:
+            try:
+                if temp_file.exists():
+                    temp_file.unlink()
+                    self.logger.debug(f"Cleaned up temp file: {temp_file}")
+            except Exception as e:
+                self.logger.warning(f"Failed to clean up temp file {temp_file}: {e}")
+        self.temp_files.clear()
+    
+    def __del__(self):
+        """Cleanup on destruction."""
+        self.cleanup_temp_files()
 
 
 if __name__ == "__main__":

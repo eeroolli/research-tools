@@ -337,8 +337,9 @@ class ZoteroAPIBookProcessor:
 
     def load_config(self) -> Tuple[str, str, str]:
         """Load configuration from config file with personal overrides"""
-        # Load default config first
-        default_config_path = Path("/mnt/f/prog/research-tools/config.conf")
+        # Load default config first  
+        root_dir = Path(self.config_file).parent.parent
+        default_config_path = root_dir / "config.conf"
         personal_config_path = Path(self.config_file)
         
         config = configparser.ConfigParser()
@@ -376,8 +377,9 @@ class ZoteroAPIBookProcessor:
 
     def load_tag_groups(self) -> Dict[str, List[str]]:
         """Load tag groups from configuration with personal overrides"""
-        # Load default config first
-        default_config_path = Path("/mnt/f/prog/research-tools/config.conf")
+        # Load default config first  
+        root_dir = Path(self.config_file).parent.parent
+        default_config_path = root_dir / "config.conf"
         personal_config_path = Path(self.config_file)
         
         config = configparser.ConfigParser()

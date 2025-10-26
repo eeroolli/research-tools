@@ -12,8 +12,9 @@ This makes 90% of papers process in seconds instead of minutes.
 
 import sys
 import configparser
+import re
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -43,6 +44,27 @@ class PaperMetadataProcessor:
         self.crossref = CrossRefClient(email=email)
         self.arxiv = ArxivClient()
         self.ollama = OllamaClient()
+        
+        # Regex patterns for author extraction
+        self.author_patterns = [
+            # Pattern 1: "By [Author]" or "Authors: [Author1], [Author2]"
+            r'(?:By|Authors?)\s*:?\s*([^.\n]+)',
+            # Pattern 2: "Author Name" at start of line
+            r'^([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+            # Pattern 3: "Lastname, Firstname" pattern
+            r'([A-Z][a-z]+),\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*',
+            # Pattern 4: "Firstname Lastname" pattern
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+            # Pattern 5: "Lastname & Lastname" or "Lastname and Lastname"
+            r'([A-Z][a-z]+)\s+(?:and|&)\s+([A-Z][a-z]+)',
+        ]
+        
+        # Common academic name patterns
+        self.name_patterns = [
+            r'[A-Z][a-z]+\s+[A-Z][a-z]+',  # First Last
+            r'[A-Z][a-z]+,\s*[A-Z][a-z]+',  # Last, First
+            r'[A-Z][a-z]+\s+[A-Z]\.\s*[A-Z][a-z]+',  # First M. Last
+        ]
     
     def _read_email_from_config(self) -> Optional[str]:
         """Read CrossRef email from config files.
@@ -68,7 +90,95 @@ class PaperMetadataProcessor:
         except Exception:
             return None
     
-    def process_pdf(self, pdf_path: Path, use_ollama_fallback: bool = True) -> Dict:
+    def _extract_authors_with_regex(self, text: str) -> List[str]:
+        """Extract authors using regex patterns as fallback.
+        
+        Args:
+            text: Extracted text from PDF
+            
+        Returns:
+            List of author names found
+        """
+        authors = set()
+        
+        # Try each pattern
+        for pattern in self.author_patterns:
+            matches = re.findall(pattern, text, re.MULTILINE | re.IGNORECASE)
+            for match in matches:
+                if isinstance(match, tuple):
+                    # Handle patterns that capture multiple groups
+                    for group in match:
+                        if group and len(group.strip()) > 2:
+                            authors.add(group.strip())
+                else:
+                    if match and len(match.strip()) > 2:
+                        authors.add(match.strip())
+        
+        # Clean up and validate names
+        cleaned_authors = []
+        for author in authors:
+            # Remove common prefixes/suffixes
+            author = re.sub(r'^(By|Authors?|Author)\s*:?\s*', '', author, flags=re.IGNORECASE)
+            author = re.sub(r'\s+', ' ', author.strip())
+            
+            # Must have at least first and last name
+            if len(author.split()) >= 2 and len(author) > 3:
+                cleaned_authors.append(author)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_authors = []
+        for author in cleaned_authors:
+            if author.lower() not in seen:
+                seen.add(author.lower())
+                unique_authors.append(author)
+        
+        return unique_authors
+
+    def _extract_authors_with_regex_simple(self, text: str) -> List[str]:
+        """Simple regex extraction focusing on common academic patterns.
+        
+        Args:
+            text: Extracted text from PDF
+            
+        Returns:
+            List of author names found
+        """
+        authors = set()
+        
+        # Look for common academic name patterns
+        for pattern in self.name_patterns:
+            matches = re.findall(pattern, text)
+            for match in matches:
+                if match and len(match.strip()) > 3:
+                    authors.add(match.strip())
+        
+        # Look for "and" or "&" separated names
+        and_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:and|&)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'
+        and_matches = re.findall(and_pattern, text)
+        for match in and_matches:
+            if match[0] and match[1]:
+                authors.add(match[0].strip())
+                authors.add(match[1].strip())
+        
+        # Clean up
+        cleaned_authors = []
+        for author in authors:
+            author = re.sub(r'\s+', ' ', author.strip())
+            if len(author.split()) >= 2 and len(author) > 3:
+                cleaned_authors.append(author)
+        
+        # Remove duplicates
+        seen = set()
+        unique_authors = []
+        for author in cleaned_authors:
+            if author.lower() not in seen:
+                seen.add(author.lower())
+                unique_authors.append(author)
+        
+        return unique_authors
+    
+    def process_pdf(self, pdf_path: Path, use_ollama_fallback: bool = True, progress_callback=None) -> Dict:
         """Process a PDF to extract metadata using smart workflow.
         
         Args:
@@ -189,17 +299,72 @@ class PaperMetadataProcessor:
         has_urls = len(identifiers.get('urls', [])) > 0
         
         if has_urls and not valid_dois and not valid_isbns:
-            print(f"\n🌐 Step 4: URL found but no DOI/ISBN - likely news/web article")
-            print(f"  Found URLs: {len(identifiers['urls'])}")
+            # Analyze URLs to determine likely document type
+            urls = identifiers.get('urls', [])
+            institutional_domains = ['.edu', '.ac.', 'university', 'college', 'institute', 'ssrn.com', 'arxiv.org', 'repec.org']
+            is_institutional = any(any(domain in url.lower() for domain in institutional_domains) for url in urls)
+            
+            if is_institutional:
+                print(f"\n🏛️ Step 4: Institutional URL found - likely working paper, preprint, or academic publication")
+                print(f"  Found URLs: {len(urls)}")
+                document_context = "working_paper"
+                context_hint = "institutional/academic document"
+            else:
+                print(f"\n🌐 Step 4: URL found but no DOI/ISBN - could be working paper, preprint, or web content")
+                print(f"  Found URLs: {len(urls)}")
+                document_context = "academic_paper"
+                context_hint = "general document"
+            
+            # Try regex extraction first
+            print(f"  🔍 Trying regex author extraction...")
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                text = pdf.pages[0].extract_text()
+            
+            regex_authors = self._extract_authors_with_regex_simple(text)
+            if regex_authors:
+                print(f"  ✅ Regex found {len(regex_authors)} author(s): {', '.join(regex_authors)}")
+                
+                # Create metadata with regex authors
+                metadata = {
+                    'title': identifiers.get('title', ''),
+                    'authors': regex_authors,
+                    'url': identifiers['urls'][0] if identifiers['urls'] else '',
+                    'document_type': 'working_paper' if is_institutional else 'academic_paper',
+                    'extraction_method': 'regex_fallback'
+                }
+                
+                result['method'] = 'regex_web_article'
+                result['metadata'] = metadata
+                result['success'] = True
+                result['processing_time_seconds'] = time.time() - start_time
+                print(f"  ✅ Got metadata from regex in {result['processing_time_seconds']:.1f}s")
+                return result
+            else:
+                print(f"  ❌ Regex found no authors, trying Ollama...")
+                
             if use_ollama_fallback:
-                print(f"  🤖 Using Ollama with NEWS ARTICLE prompt...")
+                print(f"  🤖 Using Ollama with {context_hint} prompt...")
                 print(f"  ⚠️  This is slow (60-120 seconds)...")
-                # Pass context hint for better extraction
-                import pdfplumber
-                with pdfplumber.open(pdf_path) as pdf:
-                    text = pdf.pages[0].extract_text()
+                
+                # Display found information before Ollama processing
+                found_info = {
+                    'title': identifiers.get('title'),
+                    'authors': identifiers.get('authors'),
+                    'institution': identifiers.get('institution'),
+                    'urls': identifiers.get('urls', []),
+                    'doi': identifiers.get('doi'),
+                    'context_hint': context_hint
+                }
+                
+                if progress_callback:
+                    progress_callback(found_info, 0)
+                
+                # Start Ollama processing with progress indicator
                 metadata = self.ollama.extract_paper_metadata(text, validate=True, 
-                                                              document_context="news_article")
+                                                              document_context=document_context,
+                                                              progress_callback=progress_callback,
+                                                              found_info=found_info)
                 if metadata:
                     # Add URL to metadata
                     if not metadata.get('url') and identifiers['urls']:
@@ -228,31 +393,55 @@ class PaperMetadataProcessor:
         
         # Step 5: Ollama fallback if no identifiers found at all (book chapters, scanned papers)
         if use_ollama_fallback:
-            print(f"\n🤖 Step 5: No identifiers found - using Ollama with BOOK CHAPTER prompt...")
-            print(f"  ⚠️  This is slow (60-120 seconds)...")
-            # Pass context hint for better extraction of chapters
+            print(f"\n🤖 Step 5: No identifiers found - trying regex first, then Ollama...")
+            
+            # Try regex extraction first
+            print(f"  🔍 Trying regex author extraction...")
             import pdfplumber
             with pdfplumber.open(pdf_path) as pdf:
                 text = pdf.pages[0].extract_text()
-            metadata = self.ollama.extract_paper_metadata(text, validate=True,
-                                                          document_context="book_chapter")
-            if metadata:
-                result['method'] = 'ollama_fallback'
+            
+            regex_authors = self._extract_authors_with_regex_simple(text)
+            if regex_authors:
+                print(f"  ✅ Regex found {len(regex_authors)} author(s): {', '.join(regex_authors)}")
+                
+                # Create basic metadata with regex authors
+                metadata = {
+                    'title': identifiers.get('title', ''),
+                    'authors': regex_authors,
+                    'document_type': 'book_chapter',
+                    'extraction_method': 'regex_fallback'
+                }
+                
+                result['method'] = 'regex_fallback'
                 result['metadata'] = metadata
                 result['success'] = True
                 result['processing_time_seconds'] = time.time() - start_time
-                print(f"  ✅ Got metadata from Ollama in {result['processing_time_seconds']:.1f}s")
-                
-                if metadata.get('has_hallucinations'):
-                    print(f"  ⚠️  WARNING: Possible hallucinations detected:")
-                    for flag in metadata.get('confidence_flags', []):
-                        print(f"      - {flag}")
-                
+                print(f"  ✅ Got metadata from regex in {result['processing_time_seconds']:.1f}s")
                 return result
             else:
-                print(f"  ❌ Ollama extraction failed")
-                result['processing_time_seconds'] = time.time() - start_time
-                return result
+                print(f"  ❌ Regex found no authors, trying Ollama...")
+                print(f"  ⚠️  This is slow (60-120 seconds)...")
+                
+                metadata = self.ollama.extract_paper_metadata(text, validate=True,
+                                                              document_context="book_chapter")
+                if metadata:
+                    result['method'] = 'ollama_fallback'
+                    result['metadata'] = metadata
+                    result['success'] = True
+                    result['processing_time_seconds'] = time.time() - start_time
+                    print(f"  ✅ Got metadata from Ollama in {result['processing_time_seconds']:.1f}s")
+                    
+                    if metadata.get('has_hallucinations'):
+                        print(f"  ⚠️  WARNING: Possible hallucinations detected:")
+                        for flag in metadata.get('confidence_flags', []):
+                            print(f"      - {flag}")
+                    
+                    return result
+                else:
+                    print(f"  ❌ Ollama extraction failed")
+                    result['processing_time_seconds'] = time.time() - start_time
+                    return result
         else:
             print(f"\n⚠️  No valid identifiers found and Ollama fallback disabled")
             result['processing_time_seconds'] = time.time() - start_time

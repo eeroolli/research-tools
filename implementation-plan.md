@@ -175,6 +175,62 @@
 - Validated quality through comparison with known data
 - Scalable to commercial use (evidence-based, not guesswork)
 
+#### 0.4 Repository Cleanup and Refactoring ✅
+*Clean codebase, remove unused code, and reorganize module structure*
+
+**Phase 0.4A: Deleted Unused Code** ✅ COMPLETED (January 2025)
+- [x] **Removed unused national library system** - `shared_tools/api/national_libraries.py` (467 lines - verified no imports)
+- [x] **Removed unused process_papers module** - Entire `process_papers/` directory (old paper processing structure)
+- [x] **Removed prototype scripts** - `scripts/prototypes/` directory (6 development test files)
+- [x] **Removed obsolete test files** - 3 test files for deleted modules
+- [x] **Removed temporary debug files** - `test_isbn_detection.py`, `test_ollama_startup.py`, `test_filename_patterns.py`
+- [x] **Removed old backup directory** - `data_backup_20251003_150957/`
+- [x] **Removed duplicate documentation** - `chat_about_interactive_paper_processor(000).md`
+
+**Impact:** ~30 files deleted, ~3000+ lines of code removed, cleaner repository structure
+
+**Phase 0.4B: Module Refactoring** ✅ COMPLETED (January 2025)
+- [x] **Created shared_tools/extractors/** - Moved ISBN extraction from process_books
+- [x] **Created shared_tools/processors/** - Moved image processing from process_books
+- [x] **Consolidated utilities** - Moved file_manager, thread_pool_manager, cpu_monitor to shared_tools/utils
+- [x] **Updated imports** - Fixed `scripts/find_isbn_from_photos.py` to use new paths
+- [x] **Verified functionality** - Tested all imports work correctly
+- [x] **Removed old structure** - Deleted process_books/ directory after successful migration
+
+**New Structure:**
+```
+shared_tools/
+├── extractors/
+│   └── isbn_extractor.py
+├── processors/
+│   └── smart_integrated_processor_v3.py
+└── utils/
+    ├── file_manager.py
+    ├── thread_pool_manager.py
+    ├── cpu_monitor.py
+    ├── isbn_matcher.py
+    ├── identifier_extractor.py
+    └── identifier_validator.py
+```
+
+**Impact:** Better module organization, clearer architecture, easier maintenance
+
+**Phase 0.4C: Testing Infrastructure** 🚧 PLANNED
+- [ ] **Create pytest configuration** - Set up proper test framework
+- [ ] **Add test fixtures** - Sample PDFs, images, API responses
+- [ ] **Core unit tests** - ISBN extraction, matching, file management
+- [ ] **Image processing tests** - OCR strategies, rotation handling
+- [ ] **API integration tests** - CrossRef, arXiv, national libraries
+- [ ] **End-to-end workflow tests** - Complete book and paper processing
+- [ ] **Set up CI/CD** - Automated testing (optional)
+
+**Target Coverage:**
+- Core utilities: > 90%
+- ISBN processing: > 85%
+- Image processing: > 75%
+- API integration: > 70%
+- Workflows: > 60%
+
 ### **Phase 1: Complete Configuration-Driven System** 🚧
 *Extend current working system with remaining APIs*
 
@@ -385,34 +441,27 @@ class UnifiedMetadataManager:
 *From archive/AI_CHAT_DOCUMENTS.md - migrate existing hardcoded systems*
 
 #### 5.1 Book Processing Migration
-- [ ] **File:** `process_books/scripts/enhanced_isbn_lookup_detailed.py`
-  - **Action:** Replace hardcoded national library calls with config-driven manager
-  - **Status:** Uses old hardcoded system, needs migration
-
-- [ ] **File:** `process_books/scripts/zotero_api_book_processor_enhanced.py`
-  - **Action:** Update to use new unified metadata system
-  - **Status:** Uses old hardcoded system, needs migration
-
-- [ ] **File:** `process_books/src/integrations/legacy_zotero_processor.py`
-  - **Action:** Update to use new system
-  - **Status:** Uses old hardcoded system, needs migration
+- [ ] **File:** `scripts/add_or_remove_books_zotero.py` (CURRENT ACTIVE FILE)
+  - **Action:** Replace hardcoded DetailedISBNLookupService class (lines 30-296) with config-driven manager
+  - **Status:** Uses hardcoded API calls to OpenLibrary, Google Books, Norwegian Library - needs migration to shared_tools/api/config_driven_manager.py
+  - **Note:** This is the actual active book processing script after Phase 0.4 cleanup
 
 #### 5.2 Paper Processing Migration
-- [ ] **File:** `process_papers/src/core/metadata_extractor.py`
+- [x] **File:** `process_papers/src/core/metadata_extractor.py` ✅
   - **Action:** Complete integration with config-driven system
-  - **Status:** Partially updated, needs full migration
+  - **Status:** ✅ N/A - Old process_papers/ module deleted. Current paper processing in scripts/paper_processor_daemon.py uses shared_tools/ directly
 
 #### 5.3 Cleanup Phase
-- [ ] **File:** `shared_tools/api/national_libraries.py`
+- [x] **File:** `shared_tools/api/national_libraries.py` ✅
   - **Action:** Delete after migration complete
-  - **Status:** Old hardcoded clients, still exists, **VERIFIED UNUSED**
-- [ ] **File:** `process_papers/` (entire directory)
+  - **Status:** ✅ DELETED in Phase 0.4A - Old hardcoded clients verified unused
+- [x] **File:** `process_papers/` (entire directory) ✅
   - **Action:** Delete unused paper processing module
-  - **Status:** Not used, paper processing planned for Phase 4
-- [ ] **File:** `test_isbn_detection.py`
+  - **Status:** ✅ DELETED in Phase 0.4A - Not used, paper processing now in scripts/paper_processor_daemon.py
+- [x] **File:** `test_isbn_detection.py` ✅
   - **Action:** Delete obsolete test file
-  - **Status:** Temporary debugging file, not used
-- [ ] **Reference:** See `cleaning_the_codebase_after_verification.md` for detailed cleanup analysis
+  - **Status:** ✅ DELETED in Phase 0.4A - Temporary debugging file removed
+- [x] **Reference:** See Phase 0.4 for completed cleanup details
 
 ### **Phase 6: Integration & Testing** 🧪
 *End-to-end testing and core functionality validation*

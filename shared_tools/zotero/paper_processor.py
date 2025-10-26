@@ -220,6 +220,8 @@ class ZoteroPaperProcessor:
             'conference_paper': 'conferencePaper',
             'book_chapter': 'bookSection',
             'preprint': 'preprint',
+            'working_paper': 'preprint',  # Working papers map to preprint in Zotero
+            'manuscript': 'manuscript',    # True manuscripts (no institution)
             'report': 'report',
             'thesis': 'thesis',
             'news_article': 'newspaperArticle',
@@ -364,6 +366,48 @@ class ZoteroPaperProcessor:
             return response.status_code == 200
             
         except Exception:
+            return False
+
+    def attach_pdf_to_existing(self, item_key: str, pdf_path: Path) -> bool:
+        """Attach PDF to existing Zotero item.
+        
+        This is used when user selects an existing Zotero item from local search
+        and wants to attach the scanned PDF to it.
+        
+        Args:
+            item_key: Zotero item key
+            pdf_path: Path to PDF file
+            
+        Returns:
+            True if successful
+        """
+        try:
+            # Create attachment item
+            attachment = {
+                'itemType': 'attachment',
+                'linkMode': 'linked_file',
+                'title': pdf_path.stem,  # Filename without extension
+                'path': str(pdf_path),
+                'parentItem': item_key
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/items",
+                headers=self.headers,
+                json=[attachment],
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                return True
+            else:
+                # Log error for debugging
+                print(f"Zotero API error: {response.status_code}")
+                print(f"Response: {response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"Error attaching PDF: {e}")
             return False
 
 
