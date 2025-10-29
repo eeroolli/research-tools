@@ -27,15 +27,26 @@
 - **Enhanced 3-step UX workflow** - Sophisticated workflow for attaching PDFs to existing Zotero items
 - **Metadata comparison system** - Side-by-side comparison with field-by-field merging
 - **PDF attachment system** - Complete PDF handling with conflict resolution
+  - Publications-first identical reuse (size-then-hash) implemented
+  - Windows path normalization for linked files (WSL → Windows absolute paths)
+  - Attachment title uses filename for clarity in Zotero
+  - Optional skip-attachment flow (create item without attaching PDF)
 - **GROBID Integration** - Advanced academic paper metadata extraction using GROBID
 - **Smart Author Extraction** - Page-limited processing (first 2 pages) to avoid citation pollution
 - **Document Type Detection** - Automatic classification of academic documents (journal articles, books, conferences, etc.)
 - **Enhanced Metadata Extraction** - Keywords, publisher, volume, issue, pages, language, conference info
+- **Author Validation System** - Recognizes all authors in user's Zotero via lastname matching with alternatives
 
 ### 🚧 **In Progress:**
 - Smart preprocessing and evidence-based classification for Ollama optimization
 - Sample testing and validation (20 PDFs per type)
 - Document profiler implementation
+
+### 📌 **Recently Completed (Oct 2025):**
+- Hash-based duplicate detection during copy/name collisions
+- Global publications-first identical reuse before copy
+- Robust attach path handling and messaging
+- Ability to create item without attaching a PDF
 
 ### ❌ **Not Completed:**
 - Detailed migration tasks from `archive/AI_CHAT_DOCUMENTS.md` (Phases 2-4)
@@ -345,7 +356,7 @@ class UnifiedMetadataManager:
 - [x] **Zotero processor designed** - `shared_tools/zotero/paper_processor.py`
 - [x] **Duplicate detection** - By DOI and title similarity
 - [x] **Item type detection** - Journal article, conference paper, book chapter, etc.
-- [x] **PDF linking** - Linked files to `G:\my Drive\publications\`
+- [x] **PDF linking** - Linked files to `G:\my Drive\publications\` with Windows path normalization
 - [x] **Metadata mapping** - Our format → Zotero format
 - [x] **API integration complete** - paper_processor.py implemented (Oct 11, 2025)
 - [x] **Local DB search complete** - local_search.py for fast fuzzy matching (Oct 11, 2025)
@@ -355,7 +366,7 @@ class UnifiedMetadataManager:
 - [x] **PDF processing** - Extract first page for metadata (reuses existing code)
 - [x] **File renaming** - `Author_Year_Title.pdf` format (implemented in process_scanned_papers.py)
 - [x] **Directory organization** - Store in `G:\my Drive\publications\` (single folder for now)
-- [x] **Original preservation** - Move to `done/` folder with scanner filename
+- [x] **Original preservation** - Move to `done/` folder with scanner filename (also after identical reuse or skip-attach)
 - [ ] **Extraction to shared module** - Move common functions to `shared_tools/papers/file_manager.py`
 
 #### 4.5 Workflow Integration 🚧
@@ -394,7 +405,7 @@ class UnifiedMetadataManager:
 - ✅ **3-Step Zotero Workflow**: Enhanced workflow for attaching PDFs to existing Zotero items
 - ✅ **Metadata Comparison**: Side-by-side comparison with 6 user options
 - ✅ **Tags Integration**: Full integration with existing tag system
-- ✅ **PDF Attachment**: Complete PDF handling with conflict resolution
+- ✅ **PDF Attachment**: Complete PDF handling with conflict resolution, publications-first reuse, and optional skip-attach
 
 **Completed Implementation:**
 - ✅ **Task 7**: Complete Zotero match selection with 3-step UX flow

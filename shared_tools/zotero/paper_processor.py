@@ -15,7 +15,8 @@ import sys
 import requests
 import configparser
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
+import ntpath
 from difflib import SequenceMatcher
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -69,7 +70,7 @@ class ZoteroPaperProcessor:
         if not self.api_key or not self.library_id:
             raise ValueError("Missing Zotero API credentials in config")
     
-    def add_paper(self, metadata: Dict, pdf_path: Path) -> Dict:
+    def add_paper(self, metadata: Dict, pdf_path: Union[str, Path, None]) -> Dict:
         """Add paper to Zotero library.
         
         Args:
@@ -116,7 +117,10 @@ class ZoteroPaperProcessor:
                 return result
             
             # Step 3: Attach PDF
-            pdf_attached = self.attach_pdf(item_key, pdf_path, title)
+            pdf_attached = False
+            skipped_attachment = pdf_path is None
+            if not skipped_attachment:
+                pdf_attached = self.attach_pdf(item_key, pdf_path, title)
             
             if pdf_attached:
                 result['success'] = True
@@ -126,7 +130,8 @@ class ZoteroPaperProcessor:
                 result['success'] = True
                 result['item_key'] = item_key
                 result['action'] = 'added_without_pdf'
-                result['error'] = "PDF attachment failed"
+                if not skipped_attachment:
+                    result['error'] = "PDF attachment failed"
             
             return result
             
@@ -335,7 +340,7 @@ class ZoteroPaperProcessor:
         except Exception:
             return None
     
-    def attach_pdf(self, item_key: str, pdf_path: Path, title: str) -> bool:
+    def attach_pdf(self, item_key: str, pdf_path: Union[str, Path], title: str) -> bool:
         """Attach PDF to Zotero item as linked file.
         
         Args:
@@ -347,12 +352,17 @@ class ZoteroPaperProcessor:
             True if successful
         """
         try:
+            # Normalize path and title
+            path_str = str(pdf_path)
+            filename = ntpath.basename(path_str)
+            attach_title = filename or (title or 'PDF')
+
             # Create attachment item
             attachment = {
                 'itemType': 'attachment',
                 'linkMode': 'linked_file',
-                'title': title,
-                'path': str(pdf_path),
+                'title': attach_title,
+                'path': path_str,
                 'parentItem': item_key
             }
             
@@ -368,7 +378,54 @@ class ZoteroPaperProcessor:
         except Exception:
             return False
 
-    def attach_pdf_to_existing(self, item_key: str, pdf_path: Path) -> bool:
+    def update_item_field_if_missing(self, item_key: str, field_name: str, field_value: str) -> bool:
+        """Update a Zotero item field if it's currently empty/missing.
+        
+        Args:
+            item_key: Zotero item key
+            field_name: Name of the field to update (e.g., 'url', 'abstractNote')
+            field_value: Value to set
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Get current item
+            response = requests.get(
+                f"{self.base_url}/items/{item_key}",
+                headers=self.headers,
+                timeout=10
+            )
+            
+            if response.status_code != 200:
+                return False
+            
+            item_data = response.json().get('data', {})
+            
+            # Check if field is empty/missing
+            current_value = item_data.get(field_name, '').strip()
+            if current_value:
+                # Field already has a value, don't update
+                return True
+            
+            # Update field with new value
+            item_data[field_name] = field_value
+            
+            # Write changes back
+            response = requests.patch(
+                f"{self.base_url}/items/{item_key}",
+                headers=self.headers,
+                json=item_data,
+                timeout=10
+            )
+            
+            return response.status_code == 200
+            
+        except Exception as e:
+            print(f"Error updating item field: {e}")
+            return False
+    
+    def attach_pdf_to_existing(self, item_key: str, pdf_path: Union[str, Path]) -> bool:
         """Attach PDF to existing Zotero item.
         
         This is used when user selects an existing Zotero item from local search
@@ -382,12 +439,17 @@ class ZoteroPaperProcessor:
             True if successful
         """
         try:
+            # Normalize path and title from possibly Windows path
+            path_str = str(pdf_path)
+            filename = ntpath.basename(path_str)
+            title = filename.rsplit('.', 1)[0] if '.' in filename else filename
+
             # Create attachment item
             attachment = {
                 'itemType': 'attachment',
                 'linkMode': 'linked_file',
-                'title': pdf_path.stem,  # Filename without extension
-                'path': str(pdf_path),
+                'title': title,
+                'path': path_str,
                 'parentItem': item_key
             }
             

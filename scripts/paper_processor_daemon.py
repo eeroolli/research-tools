@@ -20,9 +20,11 @@ import logging
 import shutil
 import configparser
 import os
+from typing import Optional
 import subprocess
 import socket
 import threading
+import re
 from pathlib import Path
 from watchdog.observers.polling import PollingObserver as Observer
 from watchdog.events import FileSystemEventHandler
@@ -32,6 +34,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared_tools.metadata.paper_processor import PaperMetadataProcessor
 from shared_tools.zotero.paper_processor import ZoteroPaperProcessor
 from shared_tools.zotero.local_search import ZoteroLocalSearch
+from shared_tools.utils.filename_generator import FilenameGenerator
+
+# Import book lookup service for book chapters
+from add_or_remove_books_zotero import DetailedISBNLookupService
 
 
 class PaperProcessorDaemon:
@@ -58,6 +64,9 @@ class PaperProcessorDaemon:
         self.metadata_processor = PaperMetadataProcessor()
         self.zotero_processor = ZoteroPaperProcessor()
         
+        # Initialize book lookup service (for book chapters)
+        self.book_lookup_service = DetailedISBNLookupService()
+        
         # Initialize services
         self.ollama_process = None
         self.ollama_ready = False
@@ -74,6 +83,16 @@ class PaperProcessorDaemon:
             self.logger.error(f"❌ Failed to connect to Zotero database: {e}")
             self.local_zotero = None
         
+        # Initialize author validator for recognizing Zotero authors
+        try:
+            from shared_tools.utils.author_validator import AuthorValidator
+            self.author_validator = AuthorValidator()
+            self.author_validator.refresh_if_needed(max_age_hours=24, silent=True)
+            self.logger.info("✅ Author validator ready")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to initialize author validator: {e}")
+            self.author_validator = None
+        
         # Load tag groups from configuration
         self.tag_groups = self._load_tag_groups()
         self.logger.debug(f"Loaded {len(self.tag_groups)} tag groups")
@@ -87,31 +106,31 @@ class PaperProcessorDaemon:
     
     def load_config(self):
         """Load configuration."""
-        config = configparser.ConfigParser()
+        self.config = configparser.ConfigParser()
         root_dir = Path(__file__).parent.parent
         
-        config.read([
+        self.config.read([
             root_dir / 'config.conf',
             root_dir / 'config.personal.conf'
         ])
         
         # Get publications directory
-        self.publications_dir = Path(config.get('PATHS', 'publications_dir', 
+        self.publications_dir = Path(self.config.get('PATHS', 'publications_dir', 
                                                  fallback='/mnt/g/My Drive/publications'))
         
         # Get Ollama configuration
-        self.ollama_auto_start = config.getboolean('OLLAMA', 'auto_start', fallback=True)
-        self.ollama_auto_stop = config.getboolean('OLLAMA', 'auto_stop', fallback=True)
-        self.ollama_startup_timeout = config.getint('OLLAMA', 'startup_timeout', fallback=30)
-        self.ollama_shutdown_timeout = config.getint('OLLAMA', 'shutdown_timeout', fallback=10)
-        self.ollama_port = config.getint('OLLAMA', 'port', fallback=11434)
+        self.ollama_auto_start = self.config.getboolean('OLLAMA', 'auto_start', fallback=True)
+        self.ollama_auto_stop = self.config.getboolean('OLLAMA', 'auto_stop', fallback=True)
+        self.ollama_startup_timeout = self.config.getint('OLLAMA', 'startup_timeout', fallback=30)
+        self.ollama_shutdown_timeout = self.config.getint('OLLAMA', 'shutdown_timeout', fallback=10)
+        self.ollama_port = self.config.getint('OLLAMA', 'port', fallback=11434)
         
         # Get GROBID configuration
-        self.grobid_auto_start = config.getboolean('GROBID', 'auto_start', fallback=True)
-        self.grobid_auto_stop = config.getboolean('GROBID', 'auto_stop', fallback=True)
-        self.grobid_container_name = config.get('GROBID', 'container_name', fallback='grobid')
-        self.grobid_port = config.getint('GROBID', 'port', fallback=8070)
-        self.grobid_max_pages = config.getint('GROBID', 'max_pages', fallback=2)
+        self.grobid_auto_start = self.config.getboolean('GROBID', 'auto_start', fallback=True)
+        self.grobid_auto_stop = self.config.getboolean('GROBID', 'auto_stop', fallback=True)
+        self.grobid_container_name = self.config.get('GROBID', 'container_name', fallback='grobid')
+        self.grobid_port = self.config.getint('GROBID', 'port', fallback=8070)
+        self.grobid_max_pages = self.config.getint('GROBID', 'max_pages', fallback=2)
         
         # Check if publications directory is accessible
         self._validate_publications_directory()
@@ -235,11 +254,21 @@ class PaperProcessorDaemon:
         """Setup logging configuration."""
         log_level = logging.DEBUG if self.debug else logging.INFO
         
-        logging.basicConfig(
-            level=log_level,
-            format='[%(asctime)s] %(levelname)s: %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
+        # Get the root logger
+        logger = logging.getLogger()
+        logger.setLevel(log_level)
+        
+        # Remove any existing handlers
+        logger.handlers.clear()
+        
+        # Console handler - simple format (no timestamp/level)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(log_level)
+        console_handler.setFormatter(logging.Formatter('%(message)s'))
+        logger.addHandler(console_handler)
+        
+        # File handler - detailed format with timestamp (if file logging is needed later)
+        # For now, we only use console output
         
         self.logger = logging.getLogger(__name__)
     
@@ -332,13 +361,14 @@ class PaperProcessorDaemon:
                     self.logger.error(f"Failed to start existing container: {result.stderr}")
                     return False
             else:
-                # Create new container
+                # Create new container (standard model - lightweight, CPU-only)
+                # Full model is 8GB+ and requires significant resources
                 print(f"    🐳 Creating new GROBID container...")
                 result = subprocess.run([
                     'docker', 'run', '-d', 
                     '--name', self.grobid_container_name,
                     '-p', f'{self.grobid_port}:8070',
-                    'lfoppiano/grobid:0.8.2'
+                    'lfoppiano/grobid:0.8.2'  # Standard model - lightweight
                 ], capture_output=True, text=True)
                 
                 if result.returncode == 0:
@@ -585,6 +615,10 @@ class PaperProcessorDaemon:
         method = metadata.get('method', 'unknown')
         print(f"Data source: {source} ({method})")
         
+        # Show filtering notice if authors were cleaned
+        if metadata.get('_filtered'):
+            print(f"📝 Note: {metadata.get('_filtering_reason', 'Authors filtered')}")
+        
         print("\nEXTRACTED METADATA:")
         print("-" * 40)
         
@@ -592,6 +626,211 @@ class PaperProcessorDaemon:
         self._display_metadata_universal(metadata)
         
         print("-" * 40)
+    
+    def prompt_for_year(self, metadata: dict, allow_back: bool = False) -> dict:
+        """Prompt user for publication year if missing.
+        
+        Args:
+            metadata: Metadata dict
+            allow_back: If True, allows 'z' to go back
+            
+        Returns:
+            Updated metadata with year, or special string 'BACK'/'RESTART'
+        """
+        if metadata.get('year'):
+            return metadata
+        
+        print("\n📅 Publication year not found in scan")
+        hint = "(or press Enter to skip"
+        if allow_back:
+            hint += ", 'z' to back, 'r' to restart"
+        hint += ")"
+        
+        try:
+            year_input = input(f"Enter publication year {hint}: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\n❌ Cancelled")
+            return 'BACK'  # Allow user to go back/cancel
+        
+        if year_input == 'z' and allow_back:
+            return 'BACK'
+        elif year_input == 'r':
+            return 'RESTART'
+        elif year_input and year_input != '':
+            # Validate year format
+            if year_input.isdigit() and len(year_input) == 4:
+                metadata['year'] = year_input
+                self.logger.info(f"User provided year: {year_input}")
+            else:
+                print("⚠️  Invalid year format (expected 4 digits)")
+        
+        return metadata
+    
+    def filter_garbage_authors(self, metadata: dict) -> dict:
+        """Filter out garbage authors, keeping only those found in Zotero.
+        
+        When extraction quality is poor (e.g., regex fallback finds junk like
+        "Working Paper", "Series Working", etc.), this filters to keep only
+        real authors that exist in your Zotero collection.
+        
+        Args:
+            metadata: Metadata dict with 'authors' field
+            
+        Returns:
+            Updated metadata dict with filtered authors
+        """
+        if not metadata.get('authors') or not self.author_validator:
+            return metadata
+        
+        original_authors = metadata['authors']
+        
+        # Skip filtering if extraction method is reliable (GROBID, CrossRef, arXiv)
+        extraction_method = metadata.get('extraction_method', metadata.get('method', ''))
+        reliable_methods = ['grobid', 'crossref', 'arxiv', 'doi']
+        if extraction_method in reliable_methods:
+            return metadata
+        
+        # Validate authors
+        validation = self.author_validator.validate_authors(original_authors)
+        known_authors = validation['known_authors']
+        unknown_authors = validation['unknown_authors']
+        
+        # Decision logic: Filter if we have many unknowns and some known authors
+        total = len(original_authors)
+        known_count = len(known_authors)
+        unknown_count = len(unknown_authors)
+        
+        # If we have 5+ total authors and 70%+ are unknown, but we found some known authors
+        # This indicates garbage extraction (like the regex fallback)
+        should_filter = (
+            total >= 5 and 
+            known_count >= 1 and 
+            (unknown_count / total) >= 0.7
+        )
+        
+        if should_filter:
+            self.logger.info(f"🧹 Filtering authors: {total} extracted, {known_count} known, {unknown_count} unknown")
+            
+            # Keep only known authors
+            filtered_authors = [author['name'] for author in known_authors]
+            
+            # Update metadata
+            metadata['authors'] = filtered_authors
+            metadata['_original_author_count'] = total
+            metadata['_filtered'] = True
+            metadata['_filtering_reason'] = f"Kept {known_count} known authors from {total} extracted"
+            
+            self.logger.info(f"✅ Filtered to {len(filtered_authors)} known authors")
+        
+        return metadata
+    
+    def confirm_document_type_early(self, metadata: dict) -> dict:
+        """Confirm or select document type early in the workflow.
+        
+        This helps guide which APIs to search and which fields are relevant.
+        Happens right after extraction, before manual entry.
+        
+        Args:
+            metadata: Metadata dict (may already have document_type from extraction)
+            
+        Returns:
+            Updated metadata dict with confirmed document_type, or None if cancelled
+        """
+        # Document type mapping (same as handle_failed_extraction for consistency)
+        doc_type_map = {
+            '1': ('journal_article', 'Journal Article'),
+            '2': ('book_chapter', 'Book Chapter'),
+            '3': ('conference_paper', 'Conference Paper'),
+            '4': ('book', 'Book'),
+            '5': ('thesis', 'Thesis'),
+            '6': ('report', 'Report'),
+            '7': ('news_article', 'News Article'),
+            '8': ('working_paper', 'Working Paper'),
+            '9': ('unknown', 'Other')
+        }
+        
+        # Reverse mapping: document_type -> number choice
+        reverse_map = {v[0]: k for k, v in doc_type_map.items()}
+        
+        current_type = metadata.get('document_type', '').lower()
+        
+        print("\n" + "="*60)
+        print("📚 DOCUMENT TYPE")
+        print("="*60)
+        print("Getting the document type right helps guide search strategies.")
+        print("This ensures we search the right APIs and ask for relevant fields.")
+        print()
+        
+        if current_type and current_type in reverse_map:
+            # Show detected type and ask for confirmation
+            current_name = next(name for num, (typ, name) in doc_type_map.items() 
+                              if typ == current_type)
+            print(f"📄 Detected type: {current_name}")
+            print()
+            print("[Enter] = Keep this type")
+            print("[1-9] = Change to a different type")
+            print("[q] = Cancel and skip this document")
+            print()
+            
+            print("Document types:")
+            for num, (typ, name) in doc_type_map.items():
+                marker = " ← detected" if typ == current_type else ""
+                print(f"  [{num}] {name}{marker}")
+            print()
+            
+            try:
+                choice = input("Your choice: ").strip().lower()
+                
+                if choice == 'q' or choice == 'quit':
+                    return None
+                elif choice == '':
+                    # Keep detected type
+                    print(f"✅ Keeping: {current_name}")
+                    return metadata
+                elif choice in doc_type_map:
+                    # Change type
+                    new_type, new_name = doc_type_map[choice]
+                    metadata['document_type'] = new_type
+                    print(f"✅ Changed to: {new_name}")
+                    return metadata
+                else:
+                    print("⚠️  Invalid choice, keeping detected type")
+                    return metadata
+                    
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Cancelled")
+                return None
+        else:
+            # No type detected - ask user to select
+            print("No document type detected. Please select:")
+            print()
+            print("[1] Journal Article")
+            print("[2] Book Chapter")
+            print("[3] Conference Paper")
+            print("[4] Book")
+            print("[5] Thesis/Dissertation")
+            print("[6] Report")
+            print("[7] News Article")
+            print("[8] Working Paper/preprint")
+            print("[9] Other")
+            print()
+            
+            try:
+                while True:
+                    choice = input("Document type: ").strip()
+                    if choice in doc_type_map:
+                        doc_type, doc_type_name = doc_type_map[choice]
+                        metadata['document_type'] = doc_type
+                        print(f"✅ Selected: {doc_type_name}")
+                        return metadata
+                    elif choice.lower() in ['q', 'quit', 'cancel']:
+                        return None
+                    else:
+                        print("⚠️  Invalid choice. Please enter 1-9 or 'q' to cancel.")
+                        
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Cancelled")
+                return None
     
     def _display_metadata_universal(self, metadata: dict):
         """Universal metadata display that handles any document type and source.
@@ -734,11 +973,25 @@ class PaperProcessorDaemon:
         """
         if field_name == 'Authors':
             if isinstance(field_value, list):
-                if len(field_value) > 3:
-                    author_str = ', '.join(field_value[:3]) + f" (+{len(field_value)-3} more)"
+                # Validate authors against Zotero if validator available
+                if self.author_validator:
+                    validation = self.author_validator.validate_authors(field_value)
+                    print(f"  {field_name}:")
+                    for author_info in validation['known_authors']:
+                        author_name = author_info['name']
+                        print(f"    ✅ {author_name} (in Zotero)")
+                        if author_info.get('alternatives'):
+                            alts = ', '.join(author_info['alternatives'][:2])
+                            print(f"       Other options: {alts}")
+                    for author_info in validation['unknown_authors']:
+                        print(f"    🆕 {author_info['name']} (new author)")
                 else:
-                    author_str = ', '.join(field_value)
-                print(f"  {field_name}: {author_str}")
+                    # Fallback if validator not available
+                    if len(field_value) > 3:
+                        author_str = ', '.join(field_value[:3]) + f" (+{len(field_value)-3} more)"
+                    else:
+                        author_str = ', '.join(field_value)
+                    print(f"  {field_name}: {author_str}")
             else:
                 print(f"  {field_name}: {field_value}")
         
@@ -787,15 +1040,15 @@ class PaperProcessorDaemon:
         print("[3] 🔍 Search Zotero again with different info")
         print("[4] 📄 Create new Zotero item (ignore match)")
         print("[5] ❌ Skip document")
-        print("[q] Quit daemon")
+        print("  (q) Quit daemon")
         print()
         
         while True:
-            choice = input("Your choice: ").strip().lower()
+            choice = input("Enter your choice: ").strip().lower()
             if choice in ['1', '2', '3', '4', '5', 'q']:
                 return choice
             else:
-                print("Invalid choice. Please try again.")
+                print("⚠️  Invalid choice. Please enter 1-5 or 'q' to quit.")
     
     def display_interactive_menu(self) -> str:
         """Display interactive menu and get user choice.
@@ -810,73 +1063,337 @@ class PaperProcessorDaemon:
         print("[3] 🔍 Search Zotero with additional info")
         print("[4] ❌ Skip document (not academic)")
         print("[5] 📝 Manual processing later")
-        print("[q] Quit daemon")
+        print("  (q) Quit daemon")
         print()
         
         while True:
-            choice = input("Your choice: ").strip().lower()
+            choice = input("Enter your choice: ").strip().lower()
             if choice in ['1', '2', '3', '4', '5', 'q']:
                 return choice
             else:
-                print("Invalid choice. Please try again.")
+                print("⚠️  Invalid choice. Please enter 1-5 or 'q' to quit.")
     
-    def search_and_display_local_zotero(self, metadata: dict) -> list:
-        """Search local Zotero database and display matches.
+    def search_and_display_local_zotero(self, metadata: dict) -> tuple:
+        """Interactive Zotero search with author selection and item selection.
         
         SAFETY: This method only performs READ operations on the database.
         No write operations are possible.
+        
+        New workflow:
+        1. Prompt for year if missing
+        2. Let user select which authors to search by (and in what order)
+        3. Search Zotero with ordered author search + year filter
+        4. Display matches with letter labels (A-Z)
+        5. Let user select item or take action
         
         Args:
             metadata: Metadata to search with
             
         Returns:
-            List of matching Zotero items
+            Tuple of (action, selected_item, updated_metadata):
+            - action: 'select', 'search', 'edit', 'create', 'skip', 'quit', or 'none'
+            - selected_item: The selected Zotero item dict (if action='select')
+            - updated_metadata: Metadata dict with any edits made during author selection
         """
         if not self.local_zotero:
             print("❌ Zotero database not available")
-            return []
-        
-        print("\n🔍 Searching live Zotero database (read-only)...")
+            return ('none', None, metadata)
         
         try:
-            matches = self.local_zotero.search_by_metadata(metadata, max_matches=5)
+            # Step 1: Ensure we have a year (prompt if missing)
+            year_result = self.prompt_for_year(metadata)
+            # Handle special return values
+            if year_result == 'BACK':
+                return ('back', None, metadata)
+            elif year_result == 'RESTART':
+                return ('quit', None, metadata)
+            else:
+                metadata = year_result  # Year was added/updated in metadata
+            year = metadata.get('year', None)
             
-            if not matches:
-                print("❌ No matches found in local Zotero database")
-                return []
+            # Step 2: Try quick title/DOI search first
+            if metadata.get('title') or metadata.get('doi'):
+                print("\n🔍 Quick search by title/DOI...")
+                matches = self.local_zotero.search_by_metadata(metadata, max_matches=10)
+                
+                if matches:
+                    search_info = "by title/DOI"
+                    if year:
+                        search_info += f" in {year}"
+                    
+                    action, item = self.display_and_select_zotero_matches(matches, search_info)
+                    return (action, item, metadata)
             
-            print(f"\n✅ Found {len(matches)} potential match(es):")
-            print()
+            # Step 3: Author-based search
+            if not metadata.get('authors'):
+                print("❌ No authors found - cannot search")
+                return ('none', None, metadata)
             
-            for i, match in enumerate(matches, 1):
-                print(f"[{i}] {match.get('title', 'Unknown title')}")
-                
-                authors = match.get('authors', [])
-                if authors:
-                    author_str = ', '.join(authors[:2])
-                    if len(authors) > 2:
-                        author_str += f" et al."
-                    print(f"    Authors: {author_str}")
-                
-                print(f"    Year: {match.get('year', 'Unknown')}")
-                print(f"    Similarity: {match.get('similarity', 0):.1f}%")
-                print(f"    Method: {match.get('method', 'Unknown')}")
-                
-                # Check for existing PDF
-                has_pdf = match.get('has_attachment', False)
-                print(f"    PDF: {'✅ Yes' if has_pdf else '❌ No'}")
-                
-                if match.get('DOI'):
-                    print(f"    DOI: {match['DOI']}")
-                
+            # Let user select which authors to search by
+            # Note: This may edit author names
+            selected_authors = self.select_authors_for_search(metadata['authors'].copy())
+            
+            # Check for back/restart commands
+            if selected_authors == 'BACK':
+                return ('back', None, metadata)
+            elif selected_authors == 'RESTART':
+                return ('quit', None, metadata)  # Will cause restart from outer loop
+            
+            if not selected_authors:
+                print("❌ No authors selected")
+                return ('none', None, metadata)
+            
+            # Update metadata with edited/selected authors
+            # This preserves any author edits made in select_authors_for_search()
+            metadata['authors'] = selected_authors
+            
+            # Step 4: Search by selected authors with year filter
+            # Extract last names for search
+            author_lastnames = []
+            for author in selected_authors:
+                # Handle "Lastname, FirstName" or "FirstName Lastname" format
+                if ',' in author:
+                    # "Schultz, P" -> "Schultz"
+                    lastname = author.split(',')[0].strip()
+                elif ' ' in author:
+                    # "P. Wesley Schultz" -> "Schultz"
+                    lastname = author.split()[-1]
+                else:
+                    # "Schultz" -> "Schultz"
+                    lastname = author
+                author_lastnames.append(lastname)
+            
+            # Show search query before executing
+            # Arrow indicates author order: first → second → third, etc.
+            author_display = ' & '.join(author_lastnames)
+            year_str = f" (year: {year})" if year else " (any year)"
+            print(f"\n🔍 Searching Zotero database for authors (in order): {author_display}{year_str}")
+            
+            matches = self.local_zotero.search_by_authors_ordered(
+                author_lastnames, 
+                year=year,
+                limit=10
+            )
+            
+            # Normalize results
+            normalized_matches = []
+            for item in matches:
+                normalized = self._normalize_search_result(item)
+                normalized_matches.append(normalized)
+            
+            if not normalized_matches:
+                # Show what was searched (reuse author_display computed above)
+                year_str = f" in {year}" if year else ""
+                print(f"\n❌ No matches found in Zotero for: {author_display}{year_str}")
                 print()
+                
+                # Offer options to user
+                print("Options:")
+                print("[1] Search again without year filter")
+                if year:
+                    print("[2] Search again with different year")
+                    print("[3] Proceed to create new Zotero item")
+                    print("[4] Move to manual review")
+                    print("  (z) Back to previous step")
+                else:
+                    print("[2] Proceed to create new Zotero item")
+                    print("[3] Move to manual review")
+                    print("  (z) Back to previous step")
+                print()
+                
+                while True:
+                    choice = input("Enter your choice: ").strip().lower()
+                    
+                    if choice == '1':
+                        # Retry without year filter
+                        print("\n🔄 Searching without year filter...")
+                        matches_no_year = self.local_zotero.search_by_authors_ordered(
+                            author_lastnames,
+                            year=None,
+                            limit=10
+                        )
+                        normalized_matches = [self._normalize_search_result(item) for item in matches_no_year]
+                        
+                        if normalized_matches:
+                            search_info = f"by {author_display} (any year)"
+                            action, item = self.display_and_select_zotero_matches(normalized_matches, search_info)
+                            return (action, item, metadata)
+                        else:
+                            print(f"❌ Still no matches found for {author_display}")
+                            # Fall through to other options
+                            break
+                    
+                    elif choice == '2' and year:
+                        # Retry with different year
+                        new_year = input(f"Enter different year (currently {year}): ").strip()
+                        if new_year and new_year.isdigit():
+                            metadata['year'] = new_year  # Update metadata with new year
+                            print(f"\n🔄 Searching with year {new_year}...")
+                            matches_new_year = self.local_zotero.search_by_authors_ordered(
+                                author_lastnames,
+                                year=new_year,
+                                limit=10
+                            )
+                            normalized_matches = [self._normalize_search_result(item) for item in matches_new_year]
+                            
+                            if normalized_matches:
+                                search_info = f"by {author_display} in {new_year}"
+                                action, item = self.display_and_select_zotero_matches(normalized_matches, search_info)
+                                return (action, item, metadata)
+                            else:
+                                print(f"❌ No matches found for {author_display} in {new_year}")
+                                break
+                        else:
+                            print("⚠️  Invalid year, keeping original search")
+                            break
+                    
+                    elif (choice == '2' and not year) or (choice == '3' and year):
+                        # Create new item
+                        return ('create', None, metadata)
+                    
+                    elif (choice == '3' and not year) or (choice == '4' and year):
+                        # Move to manual review
+                        return ('none', None, metadata)
+                    
+                    elif choice == 'z':
+                        # Back/go back
+                        return ('back', None, metadata)
+                    
+                    else:
+                        if year:
+                            print("⚠️  Invalid choice. Please enter 1-4 or 'z' to go back.")
+                        else:
+                            print("⚠️  Invalid choice. Please enter 1-3 or 'z' to go back.")
+                        continue
+                
+                # If we get here, no matches after retry - offer final options
+                print("\nOptions:")
+                print("[1] Proceed to create new Zotero item")
+                print("[2] Move to manual review")
+                print("  (z) Back to previous step")
+                print()
+                
+                final_choice = input("Enter your choice: ").strip().lower()
+                if final_choice == '1':
+                    return ('create', None, metadata)
+                elif final_choice == 'z':
+                    return ('back', None, metadata)
+                else:
+                    # Default to manual review
+                    return ('none', None, metadata)
             
-            return matches
+            # Step 5: Display and let user select
+            author_str = ' → '.join([a.split()[-1] for a in selected_authors])
+            search_info = f"by {author_str}"
+            if year:
+                search_info += f" in {year}"
+            
+            action, item = self.display_and_select_zotero_matches(normalized_matches, search_info)
+            return (action, item, metadata)
             
         except Exception as e:
             self.logger.error(f"Error searching Zotero database: {e}")
-            print("❌ Error searching Zotero database")
-            return []
+            print(f"❌ Error searching Zotero database: {e}")
+            return ('none', None, metadata)
+    
+    def _normalize_search_result(self, item: dict) -> dict:
+        """Normalize search result from search_by_author to expected format.
+        
+        Converts:
+        - 'creators' list to 'authors' list of name strings
+        - 'hasAttachment' to 'has_attachment'
+        
+        Args:
+            item: Item dict from search_by_author
+            
+        Returns:
+            Normalized item dict compatible with display methods
+        """
+        normalized = item.copy()
+        
+        # Convert creators list to authors list
+        if 'creators' in item and 'authors' not in item:
+            authors = []
+            for creator in item['creators']:
+                if creator.get('creatorType') == 'author':
+                    first = creator.get('firstName', '')
+                    last = creator.get('lastName', '')
+                    if first and last:
+                        authors.append(f"{first} {last}")
+                    elif last:
+                        authors.append(last)
+            normalized['authors'] = authors
+        
+        # Convert hasAttachment to has_attachment
+        if 'hasAttachment' in item:
+            normalized['has_attachment'] = item['hasAttachment']
+        
+        return normalized
+    
+    def _copy_to_publications_via_windows(self, pdf_path: Path, target_filename: str) -> tuple:
+        """Copy PDF to publications directory using Windows PowerShell.
+        
+        This avoids WSL→Google Drive sync issues by using native Windows file operations.
+        
+        Args:
+            pdf_path: Path to source PDF (WSL path)
+            target_filename: Target filename (just the name, not full path)
+            
+        Returns:
+            Tuple of (success: bool, target_path: Path or None, error_msg: str)
+        """
+        try:
+            # Convert WSL path to Windows path
+            source_win = subprocess.check_output(
+                ['wslpath', '-w', str(pdf_path)],
+                text=True
+            ).strip()
+            
+            # Build target Windows path
+            target_dir_wsl = self.publications_dir
+            target_dir_win = subprocess.check_output(
+                ['wslpath', '-w', str(target_dir_wsl)],
+                text=True
+            ).strip()
+            target_win = f"{target_dir_win}\\{target_filename}"
+            
+            # Get path to PowerShell script
+            script_dir = Path(__file__).parent
+            ps_script = script_dir / 'copy_to_publications.ps1'
+            ps_script_win = subprocess.check_output(
+                ['wslpath', '-w', str(ps_script)],
+                text=True
+            ).strip()
+            
+            # Call PowerShell script
+            self.logger.info(f"Copying via PowerShell: {source_win} → {target_win}")
+            
+            result = subprocess.run(
+                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-File', ps_script_win, source_win, target_win],
+                capture_output=True,
+                text=True,
+                timeout=60  # 60 second timeout for large files
+            )
+            
+            if result.returncode == 0:
+                # Success - convert target back to WSL path
+                target_path = target_dir_wsl / target_filename
+                self.logger.info(f"Copy successful: {target_path}")
+                return (True, target_path, None)
+            else:
+                # Failed
+                error_msg = result.stdout + result.stderr
+                self.logger.error(f"PowerShell copy failed (code {result.returncode}): {error_msg}")
+                return (False, None, error_msg)
+                
+        except subprocess.TimeoutExpired:
+            error_msg = "Copy timeout (file too large or network issue)"
+            self.logger.error(error_msg)
+            return (False, None, error_msg)
+        except Exception as e:
+            error_msg = f"Copy error: {e}"
+            self.logger.error(error_msg)
+            return (False, None, error_msg)
     
     def handle_failed_extraction(self, pdf_path: Path) -> dict:
         """Handle failed metadata extraction with guided workflow.
@@ -1087,8 +1604,8 @@ class PaperProcessorDaemon:
         
         print(f"\n📄 Proposed filename: {proposed_filename}")
         
-        confirm = input("Use this filename? (y/n): ").strip().lower()
-        if confirm != 'y':
+        confirm = input("Use this filename? [Y/n]: ").strip().lower()
+        if confirm and confirm != 'y':  # Enter or 'y' = use, anything else = custom
             new_name = input("Enter custom filename (without .pdf): ").strip()
             if new_name:
                 proposed_filename = f"{new_name}.pdf"
@@ -1480,7 +1997,7 @@ class PaperProcessorDaemon:
         # Show summary
         print("Updated metadata:")
         print(f"  Title: {edited.get('title', 'Unknown')}")
-        print(f"  Authors: {', '.join(edited.get('authors', ['Unknown']))}")
+        print(f"  Authors: {'; '.join(edited.get('authors', ['Unknown']))}")
         print(f"  Year: {edited.get('year', 'Unknown')}")
         print(f"  Journal: {edited.get('journal', 'Unknown')}")
         print(f"  DOI: {edited.get('doi', 'Unknown')}")
@@ -1833,13 +2350,14 @@ class PaperProcessorDaemon:
             print("  7. Remove specific tag")
             print("  8. Clear all tags")
             print("  9. Show tag group details")
-            print("  (d) Save and add to Zotero")
+            print("  (w) Write (apply) and return")
+            print("  (s) Skip (return without changes)")
             print("=" * 60)
             print(f"📋 FINAL TAGS: {', '.join(working_tags) if working_tags else '(none)'}")
             
             choice = input("\nEnter your choice: ").strip().lower()
             
-            if choice == 'd':
+            if choice == 'w':
                 break
             elif choice == 's':
                 return current_tags  # Return original tags
@@ -1889,7 +2407,9 @@ class PaperProcessorDaemon:
             return working_tags
         
         print(f"\n📋 {group_name.upper()} TAGS: {', '.join(group_tags)}")
-        confirm = input("Add these tags? (y/n): ").strip().lower()
+        confirm = input("Add these tags? [Y/n]: ").strip().lower()
+        if not confirm:  # Enter = default yes
+            confirm = 'y'
         
         if confirm == 'y':
             # Add tags without duplicates
@@ -1909,7 +2429,9 @@ class PaperProcessorDaemon:
             return working_tags
         
         print(f"\n📋 ONLINE TAGS: {', '.join(online_tag_names)}")
-        confirm = input("Add these tags? (y/n): ").strip().lower()
+        confirm = input("Add these tags? [Y/n]: ").strip().lower()
+        if not confirm:  # Enter = default yes
+            confirm = 'y'
         
         if confirm == 'y':
             for tag in online_tag_names:
@@ -1928,7 +2450,9 @@ class PaperProcessorDaemon:
             return working_tags
         
         print(f"\n📋 LOCAL TAGS: {', '.join(local_tag_names)}")
-        confirm = input("Add these tags? (y/n): ").strip().lower()
+        confirm = input("Add these tags? [Y/n]: ").strip().lower()
+        if not confirm:  # Enter = default yes
+            confirm = 'y'
         
         if confirm == 'y':
             for tag in local_tag_names:
@@ -2077,6 +2601,17 @@ class PaperProcessorDaemon:
             # Step 2: Check if extraction succeeded
             if result['success'] and result['metadata']:
                 metadata = result['metadata']
+                
+                # Filter garbage authors (keeps only known authors when extraction is poor)
+                metadata = self.filter_garbage_authors(metadata)
+                
+                # Confirm/select document type early (before display and manual entry)
+                metadata = self.confirm_document_type_early(metadata)
+                if metadata is None:
+                    # User cancelled
+                    self.move_to_failed(pdf_path)
+                    return
+                
                 self.display_metadata(metadata, pdf_path, extraction_time)
             else:
                 # Extraction failed - use guided workflow
@@ -2084,6 +2619,9 @@ class PaperProcessorDaemon:
                 metadata = self.handle_failed_extraction(pdf_path)
                 
                 if metadata:
+                    # Document type was already set during handle_failed_extraction
+                    # (No need to confirm again)
+                    
                     # Display what we gathered
                     self.display_metadata(metadata, pdf_path, extraction_time)
                 else:
@@ -2092,21 +2630,67 @@ class PaperProcessorDaemon:
                     self.logger.info("User cancelled - moved to failed/")
                     return
             
-            # Step 3: Search local Zotero for matches
-            local_matches = []
+            # Step 3: Interactive Zotero search (with author selection and item selection)
+            action = 'none'
+            selected_item = None
+            updated_metadata = metadata.copy()  # Track any edits made during search
+            
             if self.local_zotero:
-                local_matches = self.search_and_display_local_zotero(metadata)
+                while True:
+                    action, selected_item, updated_metadata = self.search_and_display_local_zotero(updated_metadata)
+                    
+                    # Handle back/restart actions - allow user to go back and restart
+                    if action == 'back' or action == 'restart':
+                        if action == 'restart':
+                            print("🔄 Restarting from beginning...")
+                            updated_metadata = metadata.copy()  # Reset to original
+                        else:
+                            print("⬅️  Going back to author selection...")
+                        # Loop will restart and prompt again
+                        continue
+                    
+                    break
             
-            # Step 4: Show context-aware menu based on what we found
-            if local_matches:
-                # Found Zotero matches - show attachment-focused menu
-                choice = self.display_zotero_match_menu()
-            else:
-                # No matches - show standard menu
-                choice = self.display_interactive_menu()
-            
-            # Step 5: Handle user choice based on context
-            self.handle_user_choice(choice, pdf_path, metadata, local_matches, result)
+            # Step 4: Handle action from Zotero search
+            if action == 'select' and selected_item:
+                # User selected an item - offer to attach PDF
+                self.handle_item_selected(pdf_path, updated_metadata, selected_item)
+            elif action == 'search':
+                # User wants to search again - recursive call
+                action2, selected_item2, updated_metadata = self.search_and_display_local_zotero(updated_metadata)
+                if action2 == 'select' and selected_item2:
+                    self.handle_item_selected(pdf_path, updated_metadata, selected_item2)
+                elif action2 == 'back' or action2 == 'restart':
+                    # User went back during search - restart
+                    print("⬅️  Going back to manual processing...")
+                    self.move_to_manual_review(pdf_path)
+                elif action2 == 'quit':
+                    self.stop()
+                    return
+                # Handle other actions from second search if needed
+            elif action == 'edit':
+                # Edit metadata then search again
+                # TODO: Implement metadata editing
+                print("⚠️  Metadata editing not yet implemented")
+                self.move_to_manual_review(pdf_path)
+            elif action == 'create':
+                # Create new Zotero item with online library check
+                # Use updated_metadata which includes any edited authors
+                success = self.handle_create_new_item(pdf_path, updated_metadata)
+                if not success:
+                    # User cancelled or error occurred
+                    self.logger.info("Item creation cancelled or failed")
+            elif action == 'skip':
+                # User wants to skip this document
+                self.move_to_skipped(pdf_path)
+            elif action == 'quit':
+                # User wants to quit daemon
+                self.stop()
+                return
+            else:  # action == 'none' or unknown
+                # No matches found - move to manual
+                print("📝 Moving to manual review...")
+                self.move_to_manual_review(pdf_path)
             
         except Exception as e:
             self.logger.error(f"Processing error: {e}", exc_info=self.debug)
@@ -2283,6 +2867,66 @@ class PaperProcessorDaemon:
         from scripts.process_scanned_papers import ScannedPaperProcessor
         processor = ScannedPaperProcessor(self.watch_dir)
         return processor._generate_filename(metadata, original_filename)
+
+    def _to_windows_path(self, path: Path) -> str:
+        """Convert WSL /mnt/<drive>/... path to Windows-style X:\\... for linked files.
+        If path is already a Windows path, return as-is.
+        """
+        path_str = str(path)
+        # Already Windows style
+        if ":\\" in path_str or ":/" in path_str:
+            return path_str
+        # WSL mount conversion
+        if path_str.startswith('/mnt/') and len(path_str) > 6:
+            drive_letter = path_str[5].upper()
+            rest = path_str[7:]  # skip '/mnt/<d>/'
+            return f"{drive_letter}:\\" + rest.replace('/', '\\')
+        return path_str
+
+    def _sha256_file(self, file_path: Path, chunk_size: int = 1024 * 1024) -> str:
+        """Compute SHA-256 hash of a file efficiently in chunks."""
+        import hashlib
+        h = hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _are_files_identical(self, path_a: Path, path_b: Path) -> bool:
+        """Quick identical check: size first, then SHA-256 if sizes match."""
+        try:
+            if not path_a.exists() or not path_b.exists():
+                return False
+            if path_a.stat().st_size != path_b.stat().st_size:
+                return False
+            # Sizes match; verify by hash
+            return self._sha256_file(path_a) == self._sha256_file(path_b)
+        except Exception:
+            return False
+
+    def _find_identical_in_publications(self, incoming_pdf: Path) -> Optional[Path]:
+        """Search publications directory for an existing file identical to incoming_pdf.
+        Compares by size first, then SHA-256 if sizes match. Returns the first identical path or None.
+        """
+        try:
+            target_size = incoming_pdf.stat().st_size
+        except Exception:
+            return None
+        try:
+            for candidate in self.publications_dir.glob('*.pdf'):
+                try:
+                    if candidate.stat().st_size != target_size:
+                        continue
+                    if self._are_files_identical(candidate, incoming_pdf):
+                        return candidate
+                except Exception:
+                    continue
+        except Exception:
+            return None
+        return None
     
     def copy_to_publications(self, source: Path, new_filename: str) -> Path:
         """Copy PDF to final publications directory.
@@ -2644,6 +3288,18 @@ class PaperProcessorDaemon:
         item_key = zotero_item.get('key')
         
         print(f"\n📎 Attaching to: {item_title}")
+
+        # Offer to skip attaching entirely
+        try:
+            attach_now = input("Attach this PDF now? [Y/n]: ").strip().lower()
+            if attach_now == 'n':
+                self.move_to_done(pdf_path)
+                print("✅ Skipped attachment and finished")
+                return True
+        except (KeyboardInterrupt, EOFError):
+            self.move_to_done(pdf_path)
+            print("✅ Skipped attachment and finished")
+            return True
         
         # Check if item already has PDF
         has_pdf = zotero_item.get('hasAttachment', False)
@@ -2653,26 +3309,52 @@ class PaperProcessorDaemon:
             print("\nWhat would you like to do?")
             print("[1] Keep both (add scanned version)")
             print("[2] Replace existing PDF with scan")
-            print("[3] Cancel (keep original)")
+            print("[3] Skip attaching and finish")
+            print("  (z) Cancel (keep original)")
+            print()
             
-            pdf_choice = input("\nChoice: ").strip()
+            pdf_choice = input("Enter your choice: ").strip().lower()
             
-            if pdf_choice == '3':
+            if pdf_choice == 'z':
                 self.move_to_done(pdf_path)
                 print("✅ Cancelled - kept original PDF in Zotero")
+                return True
+            if pdf_choice == '3':
+                self.move_to_done(pdf_path)
+                print("✅ Skipped attachment and finished")
                 return True
             
             # For options 1 and 2, we'll proceed with attachment
             attach_type = "additional" if pdf_choice == '1' else "replacement"
             print(f"📎 Adding as {attach_type} attachment...")
         
+        # Before anything: try to reuse an identical file already in publications
+        reuse_path = self._find_identical_in_publications(pdf_path)
+        if reuse_path:
+            print(f"✅ Existing identical file found: {reuse_path.name} — skipping copy/attachment of new scan")
+            print("📎 Attaching existing file to Zotero item...")
+            try:
+                attach_target = self._to_windows_path(reuse_path)
+                attach_result = self.zotero_processor.attach_pdf_to_existing(item_key, attach_target)
+                if attach_result:
+                    print("✅ PDF attached to Zotero item")
+                else:
+                    print("⚠️  Could not attach PDF to Zotero")
+                self.move_to_done(pdf_path)
+                print("✅ Processing complete!")
+                return True
+            except Exception as e:
+                self.logger.error(f"Error attaching identical file: {e}")
+                print(f"❌ Error attaching identical file: {e}")
+                return False
+
         # Generate filename for publications directory using final metadata
         # (which includes user's choices from metadata comparison step)
         proposed_filename = self.generate_filename(metadata)
         
         print(f"\n📄 Proposed filename: {proposed_filename}")
-        confirm = input("Use this filename? (y/n): ").strip().lower()
-        if confirm != 'y':
+        confirm = input("Use this filename? [Y/n]: ").strip().lower()
+        if confirm and confirm != 'y':  # Enter or 'y' = use, anything else = custom
             new_name = input("Enter custom filename (without .pdf): ").strip()
             if new_name:
                 proposed_filename = f"{new_name}.pdf"
@@ -2680,34 +3362,91 @@ class PaperProcessorDaemon:
                 print("❌ Cancelled")
                 return False
         
-        # Copy to publications directory
-        final_path = self.publications_dir / proposed_filename
+        # Copy to publications directory with _scanned logic and conflict handling
+        base_path = self.publications_dir / proposed_filename
+        stem = base_path.stem
+        suffix = base_path.suffix
+        scanned_path = self.publications_dir / f"{stem}_scanned{suffix}"
+        final_path = base_path
         
-        # Handle duplicates
-        if final_path.exists():
-            print(f"\n⚠️  File already exists: {proposed_filename}")
-            stem = final_path.stem
-            final_path = self.publications_dir / f"{stem}_scanned{final_path.suffix}"
-            print(f"Using: {final_path.name}")
+        if base_path.exists():
+            # If same size as incoming file, hash-compare and skip if identical
+            try:
+                if base_path.stat().st_size == pdf_path.stat().st_size and self._are_files_identical(base_path, pdf_path):
+                    print(f"✅ Existing base file is identical: {base_path.name} — skipping copy/attachment")
+                    self.move_to_done(pdf_path)
+                    return True
+            except Exception:
+                pass
+            if not scanned_path.exists():
+                print(f"\n⚠️  File already exists: {base_path.name}")
+                final_path = scanned_path
+                print(f"Using scanned copy name: {final_path.name}")
+            else:
+                import os, time
+                base_stat = os.stat(base_path)
+                scanned_stat = os.stat(scanned_path)
+                def fmt(stat):
+                    return f"{stat.st_size} bytes, {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_ctime))}"
+                print(f"\n⚠️  Both base and scanned files exist:")
+                # If scanned also same size, check for identical content too
+                try:
+                    if scanned_path.stat().st_size == pdf_path.stat().st_size and self._are_files_identical(scanned_path, pdf_path):
+                        print(f"✅ Existing scanned file is identical: {scanned_path.name} — skipping copy/attachment")
+                        self.move_to_done(pdf_path)
+                        return True
+                except Exception:
+                    pass
+                print(f"  [1] Base   : {base_path.name} ({fmt(base_stat)})")
+                print(f"  [2] Scanned: {scanned_path.name} ({fmt(scanned_stat)})")
+                print("  [1] Keep both → save as scanned2")
+                print("  [2] Replace base with new scanned")
+                print("  [3] Replace existing scanned with new scanned")
+                print("  (z) Cancel")
+                while True:
+                    opt = input("Enter your choice: ").strip().lower()
+                    if opt == '1':
+                        final_path = self.publications_dir / f"{stem}_scanned2{suffix}"
+                        break
+                    elif opt == '2':
+                        final_path = base_path
+                        break
+                    elif opt == '3':
+                        final_path = scanned_path
+                        break
+                    elif opt == 'z':
+                        print("❌ Cancelled - kept originals")
+                        return False
+                    else:
+                        print("⚠️  Invalid choice. Please enter 1-3 or 'z'.")
         
+        copied_ok = False
         try:
             shutil.copy2(str(pdf_path), str(final_path))
             print(f"✅ Copied to: {final_path}")
-            
-            # Attach to Zotero
+            copied_ok = True
+        except Exception as e:
+            print(f"❌ File copy failed: {e}")
+            print("Proceeding to attach without copying...")
+        
+        # Attach to Zotero (linked file if possible)
+        try:
             print("📖 Attaching to Zotero item...")
-            attach_result = self.zotero_processor.attach_pdf_to_existing(item_key, final_path)
+            attach_target = self._to_windows_path(final_path) if copied_ok else None
+            attach_result = self.zotero_processor.attach_pdf_to_existing(item_key, attach_target)
             
             if attach_result:
                 print("✅ PDF attached to Zotero item")
             else:
-                print("⚠️  Could not attach PDF to Zotero (but file copied)")
+                if copied_ok:
+                    print("⚠️  Could not attach PDF to Zotero (but file copied)")
+                else:
+                    print("⚠️  Attachment skipped (file copy failed). You can attach manually from:", str(final_path))
             
             # Move original to done/
             self.move_to_done(pdf_path)
             print("✅ Processing complete!")
             return True
-            
         except Exception as e:
             self.logger.error(f"Error: {e}")
             print(f"❌ Error: {e}")
@@ -2722,7 +3461,1283 @@ class PaperProcessorDaemon:
         shutil.move(str(pdf_path), str(dest))
         self.logger.info(f"Moved to manual review: {dest}")
         print(f"📝 Moved to manual review: {dest}")
+    
+    def select_authors_for_search(self, authors: list) -> list:
+        """Let user select which authors to search by and in what order.
+        
+        Args:
+            authors: List of author name strings
+            
+        Returns:
+            List of selected author names in user-specified order
+        """
+        if not authors:
+            return []
+        
+        # Get author info (paper counts) if validator available
+        author_info = []
+        for author in authors:
+            info = {'name': author, 'paper_count': 0}
+            if self.author_validator:
+                author_data = self.author_validator.get_author_info(author)
+                if author_data:
+                    info['paper_count'] = author_data.get('paper_count', 0)
+            author_info.append(info)
+        
+        # Display authors with letter labels
+        letters = 'abcdefghijklmnopqrstuvwxyz'
+        author_map = {}
+        
+        while True:
+            # Clear screen output area (reprint the header each time)
+            print("\n🔍 Search for item in Zotero by selecting authors:")
+            
+            # Rebuild author_map each iteration (in case authors were edited)
+            author_map = {}
+            for i, info in enumerate(author_info[:26]):  # Limit to 26 authors
+                letter = letters[i]
+                author_map[letter] = info['name']
+                if info['paper_count'] > 0:
+                    papers_str = f"({info['paper_count']} papers in Zotero)"
+                else:
+                    papers_str = "(not in Zotero)"
+                print(f"  [{letter}] {info['name']} {papers_str}")
+            
+            print("\nSelection options:")
+            print("  'a'   = Search by first author only")
+            print("  'ab'  = Search where 1st=a, 2nd=b")
+            print("  'ba'  = Search where 1st=b, 2nd=a")
+            print("  'all' = Search by any author (no order)")
+            print("  ''    = Use all authors as extracted")
+            print("  'e'   = Edit an author name")
+            print("  'n'   = Add new author manually")
+            print("  'z'   = Back to previous step")
+            print("  'r'   = Restart from beginning")
+            
+            selection = input("\nYour selection: ").strip().lower()
+            
+            if selection == 'z':
+                return 'BACK'
+            elif selection == 'r':
+                return 'RESTART'
+            elif selection == 'e':
+                # Edit an author
+                if not author_info:
+                    print("⚠️  No authors to edit")
+                    continue
+                print("\nWhich author to edit?")
+                edit_choice = input(f"Enter letter (a-{letters[len(author_info)-1]}): ").strip().lower()
+                if edit_choice in author_map:
+                    old_name = author_map[edit_choice]
+                    new_name = input(f"Edit '{old_name}' to: ").strip()
+                    if new_name:
+                        # Update the author in author_info
+                        for info in author_info:
+                            if info['name'] == old_name:
+                                info['name'] = new_name
+                                # Re-validate author info
+                                if self.author_validator:
+                                    author_data = self.author_validator.get_author_info(new_name)
+                                    if author_data:
+                                        info['paper_count'] = author_data.get('paper_count', 0)
+                                print(f"✅ Updated: {old_name} → {new_name}")
+                        
+                        # Also update the original authors list for consistency
+                        for i, orig_author in enumerate(authors):
+                            if orig_author == old_name:
+                                authors[i] = new_name
+                                break
+                    else:
+                        print("⚠️  No change made")
+                else:
+                    print(f"⚠️  Invalid selection")
+                print()  # Blank line before showing list again
+                continue
+            elif selection == 'n':
+                # Add new author
+                new_author = input("\nEnter new author name: ").strip()
+                if new_author:
+                    info = {'name': new_author, 'paper_count': 0}
+                    if self.author_validator:
+                        author_data = self.author_validator.get_author_info(new_author)
+                        if author_data:
+                            info['paper_count'] = author_data.get('paper_count', 0)
+                    author_info.append(info)
+                    authors.append(new_author)  # Also add to original list for consistency
+                    print(f"✅ Added: {new_author}")
+                else:
+                    print("⚠️  No author name entered")
+                print()  # Blank line before showing list again
+                continue
+            elif not selection or selection == '':
+                # Use all authors - return the updated list from author_info
+                all_authors = [info['name'] for info in author_info]
+                return all_authors
+            elif selection == 'all':
+                # Return all for unordered search - return updated list
+                all_authors = [info['name'] for info in author_info]
+                return all_authors
+            else:
+                # Parse selection (e.g., "ab" or "bac")
+                selected_authors = []
+                for char in selection:
+                    if char in author_map:
+                        selected_authors.append(author_map[char])
+                    else:
+                        print(f"⚠️  Ignoring invalid selection: '{char}'")
+                
+                if selected_authors:
+                    author_str = ', '.join(selected_authors)
+                    self.logger.info(f"User selected authors in order: {author_str}")
+                    return selected_authors
+                else:
+                    print("⚠️  No valid selection, please try again")
+                    print()  # Blank line before showing list again
+                    continue
+    
+    def display_and_select_zotero_matches(self, matches: list, search_info: str = "") -> tuple:
+        """Display Zotero matches and let user select one or take action.
+        
+        Args:
+            matches: List of Zotero item dicts
+            search_info: String describing the search (e.g., "by Kahan in 2012")
+            
+        Returns:
+            Tuple of (action, selected_item):
+            - action: 'select', 'search', 'edit', 'create', 'skip', or 'quit'
+            - selected_item: The selected item dict (only if action='select')
+        """
+        if not matches:
+            return ('none', None)
+        
+        print(f"\n✅ Found {len(matches)} potential match(es) {search_info}:")
+        print()
+        
+        # Display items with letter labels
+        letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        item_map = {}
+        
+        for i, match in enumerate(matches[:26]):  # Limit to 26 items
+            letter = letters[i]
+            item_map[letter] = match
+            
+            title = match.get('title', 'Unknown title')
+            # Truncate long titles
+            if len(title) > 70:
+                title = title[:67] + "..."
+            
+            print(f"  [{letter}] {title}")
+            
+            # Show authors
+            authors = match.get('authors', [])
+            if authors:
+                author_str = ', '.join(authors[:2])
+                if len(authors) > 2:
+                    author_str += " et al."
+                print(f"      Authors: {author_str}")
+            
+            # Show year and PDF status
+            year = match.get('year', '?')
+            has_pdf = match.get('has_attachment', match.get('hasAttachment', False))
+            pdf_icon = '✅' if has_pdf else '❌'
+            print(f"      Year: {year}  |  PDF: {pdf_icon}")
+            
+            # Show match quality if available
+            if 'order_score' in match and match['order_score'] > 0:
+                if match['order_score'] >= 100:
+                    print(f"      Match: Perfect order")
+                elif match['order_score'] >= 50:
+                    print(f"      Match: Good order")
+            
+            print()
+        
+        # Show action menu
+        print("ACTIONS:")
+        print("  [A-Z] Select item from list above")
+        print("[1]   🔍 Search again (different authors/year)")
+        print("[2]   ✏️  Edit metadata")
+        print("[3]   📄 Create new Zotero item")
+        print("[4]   ❌ Skip document")
+        print("  (z) ⬅️  Back to author selection")
+        print("  (r) 🔄 Restart from beginning")
+        print("  (q) Quit daemon")
+        print()
+        
+        while True:
+            choice = input("Enter your choice: ").strip().upper()
+            
+            if choice in item_map:
+                # User selected an item
+                selected_item = item_map[choice]
+                self.logger.info(f"User selected item: {selected_item.get('title', 'Unknown')}")
+                return ('select', selected_item)
+            elif choice == '1':
+                return ('search', None)
+            elif choice == '2':
+                return ('edit', None)
+            elif choice == '3':
+                return ('create', None)
+            elif choice == '4':
+                return ('skip', None)
+            elif choice == 'Z':
+                return ('back', None)
+            elif choice == 'R':
+                return ('restart', None)
+            elif choice == 'Q':
+                return ('quit', None)
+            else:
+                print("⚠️  Invalid choice. Please select a letter A-Z, number 1-4, or 'z', 'r', 'q'.")
+    
+    def quick_manual_entry(self, extracted_metadata: dict) -> dict:
+        """Allow user to quickly enter missing key fields manually.
+        
+        User has physical paper in front of them, so can quickly fill gaps.
+        
+        Args:
+            extracted_metadata: Current extracted metadata
+            
+        Returns:
+            Metadata dict with manual entries added/merged
+        """
+        print("\n" + "="*60)
+        print("✏️  QUICK MANUAL ENTRY")
+        print("="*60)
+        print("Fill in missing fields from the physical paper:")
+        print()
+        
+        # Show current extracted metadata
+        print("Current extracted metadata:")
+        print("-" * 40)
+        print(f"Title: {extracted_metadata.get('title', '(not found)')}")
+        authors = extracted_metadata.get('authors', [])
+        if authors:
+            # Use semicolons to separate author names (since names may contain commas)
+            print(f"Authors: {'; '.join(authors)}")
+        else:
+            print("Authors: (not found)")
+        print(f"Year: {extracted_metadata.get('year', '(not found)')}")
+        print(f"Journal: {extracted_metadata.get('journal', '(not found)')}")
+        print(f"DOI: {extracted_metadata.get('doi', '(not found)')}")
+        print()
+        
+        # Create working copy
+        enhanced_metadata = extracted_metadata.copy()
+        
+        # Prompt for fields (allow override if already present)
+        print("Enter or correct information (press Enter to keep existing or skip):")
+        print()
+        
+        # Title
+        current_title = enhanced_metadata.get('title', '')
+        try:
+            if current_title:
+                title = input(f"Title [{current_title}]: ").strip()
+            else:
+                title = input("Title: ").strip()
+            if title:
+                enhanced_metadata['title'] = title
+        except (KeyboardInterrupt, EOFError):
+            print("\n❌ Cancelled")
+            return None
+        
+        # Authors
+        current_authors = enhanced_metadata.get('authors', [])
+        try:
+            if current_authors:
+                # Use semicolons to separate author names (since names may contain commas)
+                print(f"\nCurrent authors: {'; '.join(current_authors)}")
+                print("Enter authors (one per line, empty line to keep current):")
+            else:
+                print("\nEnter authors (one per line, empty line to finish):")
+            authors = []
+            while True:
+                try:
+                    author = input("  Author: ").strip()
+                    if not author:
+                        break
+                    authors.append(author)
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Cancelled")
+                    return None
+            if authors:
+                enhanced_metadata['authors'] = authors
+            # If user skipped and no current authors, leave empty
+        except (KeyboardInterrupt, EOFError):
+            print("\n❌ Cancelled")
+            return None
+        
+        # Year
+        current_year = enhanced_metadata.get('year', '')
+        try:
+            if current_year:
+                year = input(f"\nYear [{current_year}]: ").strip()
+            else:
+                year = input("\nYear: ").strip()
+            if year:
+                enhanced_metadata['year'] = year
+        except (KeyboardInterrupt, EOFError):
+            print("\n❌ Cancelled")
+            return None
+        
+        # Journal/Conference/Book Title (context-dependent based on document type)
+        doc_type = enhanced_metadata.get('document_type', '').lower()
+        
+        if doc_type == 'conference_paper':
+            # For conference papers, ask for conference name
+            current_conference = enhanced_metadata.get('conference', enhanced_metadata.get('journal', ''))
+            try:
+                if current_conference:
+                    conference = input(f"\nConference/Proceedings name [{current_conference}]: ").strip()
+                else:
+                    conference = input("\nConference/Proceedings name: ").strip()
+                if conference:
+                    enhanced_metadata['conference'] = conference
+                    # Also store in journal field for compatibility (some systems use journal for conference)
+                    if not enhanced_metadata.get('journal'):
+                        enhanced_metadata['journal'] = conference
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Cancelled")
+                return None
+        elif doc_type == 'book_chapter':
+            # For book chapters, ask for book title (not journal)
+            current_book_title = enhanced_metadata.get('book_title', '')
+            try:
+                if current_book_title:
+                    book_title = input(f"\nBook title [{current_book_title}]: ").strip()
+                else:
+                    book_title = input("\nBook title: ").strip()
+                if book_title:
+                    enhanced_metadata['book_title'] = book_title
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Cancelled")
+                return None
+        elif doc_type == 'report':
+            # For reports, ask for organization/publisher or report series
+            current_org = enhanced_metadata.get('publisher', enhanced_metadata.get('organization', enhanced_metadata.get('journal', '')))
+            try:
+                if current_org:
+                    organization = input(f"\nOrganization/Publisher/Report Series [{current_org}]: ").strip()
+                else:
+                    organization = input("\nOrganization/Publisher/Report Series: ").strip()
+                if organization:
+                    enhanced_metadata['publisher'] = organization
+                    # Also store in journal field for compatibility
+                    if not enhanced_metadata.get('journal'):
+                        enhanced_metadata['journal'] = organization
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Cancelled")
+                return None
+        else:
+            # For journal articles and other types, ask for journal
+            current_journal = enhanced_metadata.get('journal', '')
+            try:
+                if current_journal:
+                    journal = input(f"\nJournal [{current_journal}]: ").strip()
+                else:
+                    journal = input("\nJournal: ").strip()
+                if journal:
+                    enhanced_metadata['journal'] = journal
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Cancelled")
+                return None
+        
+        print("\n✅ Manual entry complete")
+        print()
+        
+        return enhanced_metadata
+    
+    def search_online_libraries(self, metadata: dict) -> dict:
+        """Search online libraries (CrossRef, arXiv) with metadata.
+        
+        Shows all results and lets user select one or choose "none".
+        
+        Args:
+            metadata: Combined metadata (extracted + manual)
+            
+        Returns:
+            Online metadata dict if user selected one, None if no results or user chose "none"
+        """
+        title = metadata.get('title')
+        authors = metadata.get('authors', [])
+        year = metadata.get('year')
+        journal = metadata.get('journal')
+        
+        if not title and not authors:
+            print("⚠️  Need at least title or authors to search online")
+            return None
+        
+        print("\n🌐 Searching online libraries...")
+        print(f"   Title: {title or '(none)'}")
+        print(f"   Authors: {'; '.join(authors) if authors else '(none)'}")
+        print(f"   Year: {year or '(none)'}")
+        print(f"   Journal: {journal or '(none)'}")
+        print()
+        
+        all_results = []
+        source_name = None
+        
+        # Use document type to guide API selection
+        doc_type = metadata.get('document_type', '').lower()
+        
+        # Try CrossRef for published academic papers (journal articles, conference papers, reports)
+        # Skip for books/chapters, preprints, theses, news articles
+        should_try_crossref = (
+            title or authors
+        ) and doc_type in ['journal_article', 'conference_paper', 'report', 'academic_paper', '']
+        
+        if should_try_crossref:
+            try:
+                # Access crossref client from metadata processor
+                crossref = self.metadata_processor.crossref
+                results = crossref.search_by_metadata(
+                    title=title,
+                    authors=authors,
+                    year=year,
+                    journal=journal,
+                    max_results=5
+                )
+                
+                if results:
+                    all_results = results
+                    source_name = "CrossRef"
+                    
+            except Exception as e:
+                self.logger.error(f"CrossRef search error: {e}")
+                print(f"⚠️  CrossRef search failed: {e}")
+        
+        # Try arXiv for preprints and working papers (also try if no CrossRef result and no journal)
+        should_try_arxiv = (
+            doc_type in ['preprint', 'working_paper'] or
+            (not all_results and (not journal or journal == 'arXiv'))
+        )
+        
+        if should_try_arxiv:
+            try:
+                arxiv = self.metadata_processor.arxiv
+                results = arxiv.search_by_metadata(
+                    title=title,
+                    authors=authors,
+                    max_results=5
+                )
+                
+                if results:
+                    all_results = results
+                    source_name = "arXiv"
+                    
+            except Exception as e:
+                self.logger.error(f"arXiv search error: {e}")
+                print(f"⚠️  arXiv search failed: {e}")
+        
+        # Try book lookup for book chapters (title + editor)
+        should_try_book_lookup = doc_type == 'book_chapter'
+        
+        if should_try_book_lookup:
+            # Get or prompt for book title and editor
+            book_title = metadata.get('book_title', '')
+            editor = metadata.get('editor', '')
+            
+            # Use chapter authors as editor candidates if editor not provided
+            editor_candidates = metadata.get('authors', [])
+            
+            # Prompt for missing information
+            if not book_title:
+                try:
+                    print("\n📚 Book Chapter Search - Need book information:")
+                    book_title = input("Book title (required): ").strip()
+                    if not book_title:
+                        print("⚠️  Book title required for search, skipping...")
+                        book_title = None
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Cancelled")
+                    return None
+            
+            if book_title and not editor:
+                try:
+                    print("\nEditor name (often one of the chapter authors):")
+                    if editor_candidates:
+                        print(f"Chapter authors found: {'; '.join(editor_candidates)}")
+                        print("[Enter] = Use first chapter author as editor")
+                        print("[Enter name] = Enter editor name manually")
+                        editor_input = input("Editor: ").strip()
+                        if not editor_input and editor_candidates:
+                            editor = editor_candidates[0]
+                            print(f"✅ Using first chapter author as editor: {editor}")
+                        elif editor_input:
+                            editor = editor_input
+                    else:
+                        editor = input("Editor (press Enter to skip): ").strip() or None
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Cancelled")
+                    return None
+            
+            # Perform book lookup if we have book title
+            if book_title:
+                try:
+                    print(f"\n🔍 Searching for book: '{book_title}'" + (f" (editor: {editor})" if editor else " (no editor)"))
+                    book_result = self.book_lookup_service.lookup_by_title_and_editor(book_title, editor)
+                    
+                    if book_result:
+                        # Convert book metadata to our format (similar to CrossRef/arXiv results)
+                        normalized_book = self._normalize_book_metadata_for_chapter(book_result, metadata)
+                        
+                        # Store as single result (books don't return multiple like CrossRef)
+                        all_results = [normalized_book]
+                        source_name = "Google Books/OpenLibrary"
+                        print("✅ Found book metadata")
+                    else:
+                        print("❌ No book metadata found")
+                except Exception as e:
+                    self.logger.error(f"Book lookup error: {e}")
+                    print(f"⚠️  Book search failed: {e}")
+        
+        if not all_results:
+            print("❌ No matches found in online libraries")
+            print()
+            return None
+        
+        # Display all results and let user choose
+        print(f"✅ Found {len(all_results)} result(s) in {source_name}")
+        print()
+        
+        # Show all results
+        for idx, result in enumerate(all_results, start=1):
+            print(f"[{idx}] {result.get('title', result.get('book_title', 'N/A'))}")
+            
+            # Show authors (book authors or chapter authors)
+            if result.get('authors'):
+                print(f"    Authors: {'; '.join(result['authors'][:3])}")
+            elif result.get('chapter_authors'):
+                print(f"    Chapter Authors: {'; '.join(result['chapter_authors'][:3])}")
+            
+            # Show editors for books
+            if result.get('editors'):
+                print(f"    Editors: {'; '.join(result['editors'][:3])}")
+            
+            if result.get('year'):
+                print(f"    Year: {result.get('year')}")
+            if result.get('journal'):
+                print(f"    Journal: {result.get('journal')}")
+            elif result.get('book_title') and result.get('title') != result.get('book_title'):
+                # Show book title if different from result title
+                print(f"    Book: {result.get('book_title')}")
+            if result.get('publisher'):
+                print(f"    Publisher: {result.get('publisher')}")
+            if result.get('doi'):
+                print(f"    DOI: {result.get('doi')}")
+            elif result.get('arxiv_id'):
+                print(f"    arXiv ID: {result.get('arxiv_id')}")
+            elif result.get('isbn'):
+                print(f"    ISBN: {result.get('isbn')}")
+            print()
+        
+        # Let user select
+        while True:
+            try:
+                print(f"Select a result (1-{len(all_results)}) or 'n' for none:")
+                choice = input("Enter your choice: ").strip().lower()
+                
+                if choice == 'n' or choice == 'none':
+                    print("⏭️  Skipping online library results, will use manual/extracted metadata")
+                    return None
+                
+                try:
+                    idx = int(choice)
+                    if 1 <= idx <= len(all_results):
+                        selected = all_results[idx - 1]
+                        print(f"✅ Selected result {idx}")
+                        return selected
+                    else:
+                        print(f"⚠️  Please enter a number between 1 and {len(all_results)}")
+                except ValueError:
+                    print("⚠️  Please enter a number or 'n' for none")
+                    
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Cancelled")
+                return None
+    
+    def _normalize_book_metadata_for_chapter(self, book_result: dict, chapter_metadata: dict) -> dict:
+        """Convert book metadata from lookup service format to our standard format.
+        
+        Converts from Zotero format (creators list) to our format (authors list).
+        Preserves chapter-specific metadata and adds book information.
+        
+        Args:
+            book_result: Book metadata from DetailedISBNLookupService (Zotero format)
+            chapter_metadata: Original chapter metadata to preserve
+            
+        Returns:
+            Normalized metadata dict compatible with CrossRef/arXiv result format
+        """
+        normalized = {}
+        
+        # Convert creators to authors list (same format as CrossRef/arXiv)
+        authors = []
+        editors = []
+        
+        for creator in book_result.get('creators', []):
+            first = creator.get('firstName', '')
+            last = creator.get('lastName', '')
+            creator_type = creator.get('creatorType', 'author')
+            
+            # Format as "LastName, FirstName" or just "LastName"
+            if first and last:
+                name = f"{last}, {first}"
+            elif last:
+                name = last
+            else:
+                continue  # Skip empty creators
+            
+            if creator_type == 'editor':
+                editors.append(name)
+            else:
+                authors.append(name)
+        
+        # Build normalized metadata (similar to CrossRef/arXiv format)
+        normalized['title'] = book_result.get('title', '')
+        normalized['authors'] = authors
+        normalized['editors'] = editors  # Keep editors separate
+        
+        # Extract year from date
+        date = book_result.get('date', '')
+        if date:
+            year_match = re.search(r'\d{4}', str(date))
+            if year_match:
+                normalized['year'] = year_match.group()
+        
+        # Book-specific fields
+        normalized['book_title'] = book_result.get('title', '')
+        normalized['publisher'] = book_result.get('publisher', '')
+        normalized['isbn'] = book_result.get('ISBN', '')
+        normalized['document_type'] = 'book_chapter'
+        
+        # Preserve chapter title and authors from original metadata
+        if chapter_metadata.get('title'):
+            normalized['chapter_title'] = chapter_metadata['title']
+        if chapter_metadata.get('authors'):
+            normalized['chapter_authors'] = chapter_metadata['authors']
+        
+        # Add tags if available
+        tags = book_result.get('tags', [])
+        if tags:
+            normalized['tags'] = [t.get('tag', '') if isinstance(t, dict) else str(t) for t in tags if t]
+        
+        # Metadata source
+        normalized['source'] = 'book_lookup'
+        normalized['data_source'] = book_result.get('extra', 'Google Books/OpenLibrary')
+        
+        return normalized
+    
+    def handle_create_new_item(self, pdf_path: Path, extracted_metadata: dict) -> bool:
+        """Handle creating a new Zotero item with online library check.
+        
+        Workflow:
+        1. Quick manual entry (fill gaps from physical paper)
+        2. Search online libraries (CrossRef, arXiv)
+        3. Metadata selection (use online, use manual, merge, or edit)
+        4. Tag selection
+        5. Create item and attach PDF
+        
+        Args:
+            pdf_path: Path to scanned PDF
+            extracted_metadata: Extracted metadata from PDF
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        print("\n" + "="*60)
+        print("📄 CREATE NEW ZOTERO ITEM")
+        print("="*60)
+        
+        # Step 1: Quick manual entry
+        print("\n📝 Step 1: Quick Manual Entry")
+        combined_metadata = self.quick_manual_entry(extracted_metadata)
+        if combined_metadata is None:
+            # User cancelled during manual entry
+            print("❌ Manual entry cancelled")
+            return False
+        
+        # Step 2: Search online libraries (optional)
+        print("\n🌐 Step 2: Online Library Search (Optional)")
+        print("This step searches CrossRef and arXiv to enrich metadata from online sources.")
+        print("You can skip this if your manual entry is complete.")
+        print()
+        
+        while True:
+            try:
+                proceed = input("Search online libraries? [Y/n]: ").strip().lower()
+                if not proceed:  # Enter = default yes
+                    proceed = 'y'
+                if proceed == 'y':
+                    online_metadata = self.search_online_libraries(combined_metadata)
+                    break
+                elif proceed == 'n':
+                    online_metadata = None
+                    print("⏭️  Skipping online library search")
+                    break
+                else:
+                    print("⚠️  Please enter 'y' or 'n'")
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Cancelled")
+                return False
+        
+        # Step 3: Metadata selection
+        print("\n📋 Step 3: Metadata Selection")
+        final_metadata = combined_metadata
+        
+        if online_metadata:
+            # Show comparison and let user choose
+            print("\nComparing metadata:")
+            print("-" * 40)
+            print("Manual + Extracted:")
+            self._display_metadata_universal(combined_metadata)
+            print("\nOnline Library:")
+            self._display_metadata_universal(online_metadata)
+            print()
+            
+            print("Which metadata to use?")
+            print("[1] Use manual/extracted metadata")
+            print("[2] Use online library metadata")
+            print("[3] Merge both (field-by-field)")
+            print("[4] Edit manually")
+            print()
+            
+            choice = input("Enter your choice: ").strip()
+            
+            if choice == '1':
+                final_metadata = combined_metadata
+            elif choice == '2':
+                final_metadata = online_metadata
+            elif choice == '3':
+                final_metadata = self._merge_metadata_sources(combined_metadata, online_metadata)
+            elif choice == '4':
+                final_metadata = self.edit_metadata_interactively(combined_metadata, online_metadata, 
+                                                                 online_source='online_library')
+            else:
+                print("Using manual/extracted metadata")
+        else:
+            # No online results - either none found or user skipped all
+            print("\nUsing manual/extracted metadata (no online library metadata selected)")
+            confirm = input("Proceed with creation? [Y/n]: ").strip().lower()
+            if confirm and confirm != 'y':  # Enter or 'y' = proceed, anything else = cancel
+                print("❌ Cancelled")
+                return False
+        
+        # Step 4: Tag selection
+        print("\n🏷️  Step 4: Tag Selection")
+        
+        # Get tags from online metadata if available
+        online_tags = []
+        if online_metadata and online_metadata.get('tags'):
+            online_tags = online_metadata['tags'] if isinstance(online_metadata['tags'], list) else []
+        
+        final_tags = self.edit_tags_interactively(
+            current_tags=final_metadata.get('tags', []),
+            online_tags=online_tags
+        )
+        
+        # Add selected tags to metadata
+        final_metadata['tags'] = final_tags
+        
+        # Step 5: Create item and attach PDF
+        print("\n📖 Step 5: Creating Zotero Item")
 
+        # Allow skipping attachment entirely
+        try:
+            attach_now = input("Attach this PDF now? [Y/n]: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            attach_now = 'n'
+
+        if attach_now == 'n':
+            try:
+                print("📖 Creating Zotero item without attachment...")
+                zotero_result = self.zotero_processor.add_paper(final_metadata, None)
+                if zotero_result['success']:
+                    print(f"✅ Created Zotero item (key: {zotero_result.get('item_key', 'N/A')})")
+                    print("⚠️  Item created without attachment (skipped by user)")
+                    self.move_to_done(pdf_path)
+                    print("✅ Processing complete!")
+                    return True
+                else:
+                    error = zotero_result.get('error', 'Unknown error')
+                    print(f"❌ Failed to create Zotero item: {error}")
+                    return False
+            except Exception as e:
+                self.logger.error(f"Error creating item: {e}")
+                print(f"❌ Error: {e}")
+                return False
+
+        # First: try to reuse an identical file already in publications
+        reuse_path = self._find_identical_in_publications(pdf_path)
+        if reuse_path:
+            print(f"✅ Existing identical file found: {reuse_path.name} — skipping copy")
+            try:
+                windows_path = self._to_windows_path(reuse_path)
+                print("📖 Creating Zotero item...")
+                zotero_result = self.zotero_processor.add_paper(final_metadata, windows_path)
+                if zotero_result['success']:
+                    print(f"✅ Created Zotero item (key: {zotero_result.get('item_key', 'N/A')})")
+                    action = zotero_result.get('action', 'unknown')
+                    if action == 'duplicate_skipped':
+                        print("⚠️  Item already exists in Zotero - skipped duplicate")
+                    elif action == 'added_with_pdf':
+                        print("✅ PDF attached to new Zotero item")
+                    elif action == 'added_without_pdf':
+                        print("⚠️  Item created without attachment")
+                    self.move_to_done(pdf_path)
+                    print("✅ Processing complete!")
+                    return True
+                else:
+                    error = zotero_result.get('error', 'Unknown error')
+                    print(f"❌ Failed to create Zotero item: {error}")
+                    return False
+            except Exception as e:
+                self.logger.error(f"Error creating item with existing file: {e}")
+                print(f"❌ Error: {e}")
+                return False
+
+        # Generate filename
+        proposed_filename = self.generate_filename(final_metadata)
+        if not proposed_filename.endswith('.pdf'):
+            proposed_filename += '.pdf'
+        
+        print(f"\n📄 Proposed filename: {proposed_filename}")
+        confirm = input("Use this filename? [Y/n]: ").strip().lower()
+        if confirm and confirm != 'y':  # Enter or 'y' = use, anything else = custom
+            new_name = input("Enter custom filename (without .pdf): ").strip()
+            if new_name:
+                proposed_filename = f"{new_name}.pdf"
+            else:
+                print("❌ Cancelled")
+                return False
+        
+        # Copy to publications directory with _scanned logic and proceed even if copy fails
+        base_path = self.publications_dir / proposed_filename
+        stem = base_path.stem
+        suffix = base_path.suffix
+        scanned_path = self.publications_dir / f"{stem}_scanned{suffix}"
+        final_path = base_path
+        
+        if base_path.exists():
+            # If same size as incoming file, hash-compare and skip if identical
+            try:
+                if base_path.stat().st_size == pdf_path.stat().st_size and self._are_files_identical(base_path, pdf_path):
+                    print(f"✅ Existing base file is identical: {base_path.name} — skipping copy/creation")
+                    self.move_to_done(pdf_path)
+                    return True
+            except Exception:
+                pass
+            if not scanned_path.exists():
+                print(f"\n⚠️  File already exists: {base_path.name}")
+                final_path = scanned_path
+                print(f"Using scanned copy name: {final_path.name}")
+            else:
+                import os, time
+                base_stat = os.stat(base_path)
+                scanned_stat = os.stat(scanned_path)
+                def fmt(stat):
+                    return f"{stat.st_size} bytes, {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_ctime))}"
+                print(f"\n⚠️  Both base and scanned files exist:")
+                # If scanned also same size, check for identical content too
+                try:
+                    if scanned_path.stat().st_size == pdf_path.stat().st_size and self._are_files_identical(scanned_path, pdf_path):
+                        print(f"✅ Existing scanned file is identical: {scanned_path.name} — skipping copy/creation")
+                        self.move_to_done(pdf_path)
+                        return True
+                except Exception:
+                    pass
+                print(f"  [1] Base   : {base_path.name} ({fmt(base_stat)})")
+                print(f"  [2] Scanned: {scanned_path.name} ({fmt(scanned_stat)})")
+                print("  [1] Keep both → save as scanned2")
+                print("  [2] Replace base with new scanned")
+                print("  [3] Replace existing scanned with new scanned")
+                print("  (z) Cancel")
+                while True:
+                    opt = input("Enter your choice: ").strip().lower()
+                    if opt == '1':
+                        final_path = self.publications_dir / f"{stem}_scanned2{suffix}"
+                        break
+                    elif opt == '2':
+                        final_path = base_path
+                        break
+                    elif opt == '3':
+                        final_path = scanned_path
+                        break
+                    elif opt == 'z':
+                        print("❌ Cancelled - kept originals")
+                        return False
+                    else:
+                        print("⚠️  Invalid choice. Please enter 1-3 or 'z'.")
+        
+        copied_ok = False
+        try:
+            shutil.copy2(str(pdf_path), str(final_path))
+            print(f"✅ Copied to: {final_path}")
+            copied_ok = True
+        except Exception as e:
+            print(f"❌ File copy failed: {e}")
+            print("Proceeding to create item without attachment...")
+        
+        # Create Zotero item (linked file if copy succeeded)
+        try:
+            print("📖 Creating Zotero item...")
+            attach_target = self._to_windows_path(final_path) if copied_ok else None
+            zotero_result = self.zotero_processor.add_paper(final_metadata, attach_target)
+            
+            if zotero_result['success']:
+                print(f"✅ Created Zotero item (key: {zotero_result.get('item_key', 'N/A')})")
+                action = zotero_result.get('action', 'unknown')
+                if action == 'duplicate_skipped':
+                    print("⚠️  Item already exists in Zotero - skipped duplicate")
+                elif action == 'added_with_pdf':
+                    print("✅ PDF attached to new Zotero item")
+                elif action == 'added_without_pdf':
+                    if copied_ok:
+                        print("⚠️  Item created but PDF attachment failed")
+                    else:
+                        print("⚠️  Item created without attachment (file copy failed)")
+                
+                # Move original to done/
+                self.move_to_done(pdf_path)
+                print("✅ Processing complete!")
+                return True
+            else:
+                error = zotero_result.get('error', 'Unknown error')
+                print(f"❌ Failed to create Zotero item: {error}")
+                return False
+            
+        except Exception as e:
+            self.logger.error(f"Error creating item: {e}")
+            print(f"❌ Error: {e}")
+            return False
+    
+    def handle_item_selected(self, pdf_path: Path, metadata: dict, selected_item: dict):
+        """Handle user selecting a Zotero item.
+        
+        Shows PDF comparison (if existing), proposed actions, and asks for confirmation.
+        
+        Args:
+            pdf_path: Path to scanned PDF
+            metadata: Extracted metadata
+            selected_item: The Zotero item dict that was selected
+        """
+        title = selected_item.get('title', 'Unknown')
+        has_pdf = selected_item.get('has_attachment', selected_item.get('hasAttachment', False))
+        
+        print(f"\n✅ Selected: {title}")
+        
+        # Extract authors from Zotero item (may be in 'authors' or 'creators' field)
+        zotero_authors = selected_item.get('authors', [])
+        if not zotero_authors and 'creators' in selected_item:
+            # Extract authors from creators list
+            zotero_authors = []
+            for creator in selected_item['creators']:
+                if creator.get('creatorType') == 'author':
+                    first = creator.get('firstName', '')
+                    last = creator.get('lastName', '')
+                    if first and last:
+                        zotero_authors.append(f"{first} {last}")
+                    elif last:
+                        zotero_authors.append(last)
+        
+        # Display authors
+        if zotero_authors:
+            author_str = '; '.join(zotero_authors)
+            print(f"Authors: {author_str}")
+        print()
+        
+        # Get scan file info
+        scan_size_mb = pdf_path.stat().st_size / 1024 / 1024
+        
+        # CRITICAL: Use ONLY Zotero metadata for filename generation
+        # When attaching to existing Zotero item, Zotero metadata is canonical
+        # Fallback to scan metadata only causes incorrect filenames like "P_et_al_Unknown_..."
+        
+        # Extract metadata from Zotero item
+        zotero_title = selected_item.get('title', '')
+        zotero_year = selected_item.get('year', selected_item.get('date', ''))
+        zotero_item_type = selected_item.get('itemType', 'journalArticle')
+        
+        # Validate critical fields
+        missing_fields = []
+        if not zotero_title:
+            missing_fields.append('title')
+        if not zotero_authors:
+            missing_fields.append('authors')
+        
+        # Show warning if critical fields missing
+        if missing_fields:
+            print(f"⚠️  WARNING: Zotero item missing: {', '.join(missing_fields)}")
+            print("   Cannot generate proper filename without this information.")
+            print("   Please edit Zotero item metadata or choose manual processing.")
+            confirm_anyway = input("Proceed anyway with placeholder values? [y/n]: ").strip().lower()
+            if confirm_anyway != 'y':
+                self.move_to_manual_review(pdf_path)
+                return
+            # Set placeholders
+            if 'title' in missing_fields:
+                zotero_title = 'Unknown_Title'
+            if 'authors' in missing_fields:
+                zotero_authors = ['Unknown_Author']
+        
+        # Build metadata using ONLY Zotero data
+        merged_metadata = {
+            'title': zotero_title,
+            'authors': zotero_authors,
+            'year': zotero_year if zotero_year else 'Unknown',
+            'document_type': zotero_item_type
+        }
+        
+        # Generate target filename with _scan suffix
+        filename_gen = FilenameGenerator()
+        target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
+        
+        # Show what authors will be used in filename
+        if zotero_authors:
+            author_display = '_'.join([a.split()[-1] if ' ' in a else a for a in zotero_authors[:2]])
+            print(f"📝 Filename will use authors: {author_display}")
+            print()
+        
+        # Show filename preview before confirmation
+        print(f"📄 Generated filename: {target_filename}")
+        print()
+        
+        # Show PDF comparison if item already has PDF
+        if has_pdf:
+            existing_pdf_info = self._get_existing_pdf_info(selected_item)
+            self._display_pdf_comparison(pdf_path, scan_size_mb, existing_pdf_info)
+        
+        # Show proposed actions
+        print("="*70)
+        print("PROPOSED ACTIONS:")
+        print("="*70)
+        print(f"Scan: {pdf_path.name} ({scan_size_mb:.1f} MB)")
+        print()
+        print("Will perform:")
+        print(f"  1. Generate filename: {target_filename}")
+        print(f"  2. Copy to publications: {self.publications_dir.name}/")
+        print(f"  3. Attach as linked file in Zotero")
+        print(f"  4. Move scan to: done/")
+        print("="*70)
+        print()
+        
+        # Ask for confirmation
+        confirm = input("Proceed with these actions? [y/n/skip]: ").strip().lower()
+        
+        if confirm == 'y' or confirm == 'yes':
+            # Execute the actions
+            self._process_selected_item(pdf_path, selected_item, target_filename, metadata)
+        elif confirm == 'skip' or confirm == 's':
+            print("📝 Moving to manual review")
+            self.move_to_manual_review(pdf_path)
+        else:
+            print("❌ Cancelled - moving to manual review")
+            self.move_to_manual_review(pdf_path)
+    
+    def _process_selected_item(self, pdf_path: Path, zotero_item: dict, target_filename: str, metadata: dict = None):
+        """Process selected Zotero item: copy PDF and attach.
+        
+        Steps:
+        1. Copy PDF to publications directory (via PowerShell)
+        2. Attach as linked file in Zotero
+        3. Update URL field if missing and available
+        4. Move scan to done/
+        
+        Args:
+            pdf_path: Path to scanned PDF
+            zotero_item: Selected Zotero item dict
+            target_filename: Generated filename for publications dir
+            metadata: Extracted metadata (optional, may contain URL to add)
+        """
+        item_key = zotero_item.get('key')
+        if not item_key:
+            print("❌ No item key found")
+            self.move_to_failed(pdf_path)
+            return
+        
+        print("\n📋 Executing actions...")
+        
+        # Step 1: Copy to publications directory via PowerShell
+        print(f"1/3 Copying to publications directory...")
+        success, target_path, error = self._copy_to_publications_via_windows(pdf_path, target_filename)
+        
+        if not success:
+            print(f"❌ Copy failed: {error}")
+            print("📝 Moving to manual review")
+            self.move_to_manual_review(pdf_path)
+            return
+        
+        print(f"✅ Copied to: {target_path.name}")
+        
+        # Step 2: Attach to Zotero as linked file
+        print(f"2/3 Attaching to Zotero item...")
+        self.logger.info(f"Attaching {target_path.name} to Zotero item {item_key}")
+        
+        try:
+            result = self.zotero_processor.attach_pdf_to_existing(item_key, target_path)
+            
+            if not result:
+                print("❌ Zotero attachment failed")
+                print(f"⚠️  PDF copied but not attached: {target_path}")
+                print("📝 Moving scan to manual review")
+                self.move_to_manual_review(pdf_path)
+                return
+            
+            print("✅ Attached to Zotero")
+            
+            # Update URL field if metadata has URL and item doesn't have it yet
+            if metadata and metadata.get('url'):
+                url = metadata['url']
+                print(f"2b/3 Updating URL field if missing...")
+                url_updated = self.zotero_processor.update_item_field_if_missing(item_key, 'url', url)
+                if url_updated:
+                    print(f"✅ URL updated: {url}")
+                else:
+                    print("ℹ️  URL already exists or update failed")
+            
+        except Exception as e:
+            print(f"❌ Zotero attachment error: {e}")
+            print(f"⚠️  PDF copied but not attached: {target_path}")
+            print("📝 Moving scan to manual review")
+            self.logger.error(f"Zotero attachment error: {e}")
+            self.move_to_manual_review(pdf_path)
+            return
+        
+        # Step 3: Move scan to done/
+        print(f"3/3 Moving scan to done/...")
+        try:
+            done_dir = pdf_path.parent / 'done'
+            done_dir.mkdir(exist_ok=True)
+            dest = done_dir / pdf_path.name
+            
+            pdf_path.rename(dest)
+            self.logger.info(f"Moved to done: {dest}")
+            print(f"✅ Moved to: done/{pdf_path.name}")
+            
+        except Exception as e:
+            print(f"⚠️  Failed to move to done/: {e}")
+            self.logger.error(f"Failed to move to done: {e}")
+        
+        print("\n🎉 Processing complete!")
+        print(f"   📁 Publications: {target_path.name}")
+        print(f"   📚 Zotero: Linked file attached")
+        print(f"   ✅ Scan: Moved to done/")
+    
+    def _get_existing_pdf_info(self, zotero_item: dict) -> dict:
+        """Get information about existing PDF attachment in Zotero item.
+        
+        Args:
+            zotero_item: Zotero item dict
+            
+        Returns:
+            Dict with existing PDF info (path, size, date) or empty dict if not accessible
+        """
+        # Try to find existing PDF in publications directory
+        # We can infer the filename from metadata
+        try:
+            # Generate what the non-scan filename would be
+            filename_gen = FilenameGenerator()
+            # Build metadata from Zotero item
+            item_metadata = {
+                'title': zotero_item.get('title', ''),
+                'authors': zotero_item.get('authors', []),
+                'year': zotero_item.get('year', '')
+            }
+            
+            # Generate filename without _scan suffix
+            expected_filename = filename_gen.generate(item_metadata, is_scan=False) + '.pdf'
+            expected_path = self.publications_dir / expected_filename
+            
+            if expected_path.exists():
+                stat = expected_path.stat()
+                return {
+                    'path': expected_path,
+                    'size_mb': stat.st_size / 1024 / 1024,
+                    'modified': stat.st_mtime,
+                    'filename': expected_filename
+                }
+            
+            # Fuzzy match: Look for similar filenames
+            # Extract author and year as search keys
+            author = item_metadata.get('authors', [''])
+            author_lastname = author[0].split(',')[0] if author else ''
+            year = item_metadata.get('year', '')
+            
+            if author_lastname and year:
+                # Look for files starting with Author_Year
+                search_pattern = f"{author_lastname}_{year}"
+                matching_files = list(self.publications_dir.glob(f"{search_pattern}*.pdf"))
+                
+                if matching_files:
+                    # Return the first match (most likely the same file)
+                    found_path = matching_files[0]
+                    stat = found_path.stat()
+                    return {
+                        'path': found_path,
+                        'size_mb': stat.st_size / 1024 / 1024,
+                        'modified': stat.st_mtime,
+                        'filename': found_path.name,
+                        'fuzzy_match': True  # Flag this as fuzzy match
+                    }
+        except Exception as e:
+            self.logger.debug(f"Could not locate existing PDF: {e}")
+        
+        return {}
+    
+    def _display_pdf_comparison(self, scan_path: Path, scan_size_mb: float, existing_pdf_info: dict):
+        """Display comparison between scan and existing PDF.
+        
+        Args:
+            scan_path: Path to scanned PDF
+            scan_size_mb: Size of scan in MB
+            existing_pdf_info: Dict with existing PDF info (from _get_existing_pdf_info)
+        """
+        print()
+        print("="*70)
+        print("📊 PDF COMPARISON:")
+        print("="*70)
+        
+        if existing_pdf_info:
+            existing_size_mb = existing_pdf_info['size_mb']
+            existing_filename = existing_pdf_info['filename']
+            is_fuzzy_match = existing_pdf_info.get('fuzzy_match', False)
+            
+            match_type = "🔍 Found (similar name)" if is_fuzzy_match else "✅ Found (exact match)"
+            print(f"{match_type}: {existing_filename}")
+            print(f"  Size: {existing_size_mb:.1f} MB")
+            if is_fuzzy_match:
+                print(f"  Note: Using closest match by author/year")
+            print()
+            print(f"Your Scan: {scan_path.name}")
+            print(f"  Size: {scan_size_mb:.1f} MB")
+            print()
+            
+            # Analyze and recommend
+            size_diff = scan_size_mb - existing_size_mb
+            size_diff_pct = (size_diff / existing_size_mb * 100) if existing_size_mb > 0 else 0
+            
+            if scan_size_mb > existing_size_mb * 1.5:
+                print("💡 RECOMMENDATION: Keep BOTH files")
+                print(f"   Scan is {size_diff:.1f} MB larger (+{size_diff_pct:.0f}%)")
+                print("   → Likely contains your handwritten notes!")
+                print("   → Original may be cleaner OCR text")
+            elif scan_size_mb > existing_size_mb:
+                print("💡 RECOMMENDATION: Keep BOTH files")
+                print(f"   Scan is {size_diff:.1f} MB larger (+{size_diff_pct:.0f}%)")
+                print("   → May contain your notes")
+            elif scan_size_mb < existing_size_mb:
+                print("ℹ️  Note: Existing PDF is larger")
+                print(f"   Original is {-size_diff:.1f} MB larger")
+                print("   → You may already have the better version")
+            else:
+                print("ℹ️  Files are similar size")
+                print("   → May be duplicates")
+        else:
+            print("⚠️  Zotero item has PDF but file not found in publications directory")
+            print(f"   No PDF found matching author/year pattern")
+            print(f"Your Scan: {scan_path.name} ({scan_size_mb:.1f} MB)")
+        
+        print("="*70)
+        print()
 
 class PaperFileHandler(FileSystemEventHandler):
     """File system event handler for watchdog."""
