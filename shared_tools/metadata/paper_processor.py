@@ -20,9 +20,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from shared_tools.utils.identifier_extractor import IdentifierExtractor
 from shared_tools.utils.identifier_validator import IdentifierValidator
+from shared_tools.utils.api_priority_manager import APIPriorityManager
 from shared_tools.api.crossref_client import CrossRefClient
 from shared_tools.api.arxiv_client import ArxivClient
 from shared_tools.api.openalex_client import OpenAlexClient
+from shared_tools.api.pubmed_client import PubMedClient
 from shared_tools.ai.ollama_client import OllamaClient
 
 
@@ -42,10 +44,22 @@ class PaperMetadataProcessor:
         
         self.extractor = IdentifierExtractor()
         self.validator = IdentifierValidator()
+        self.priority_manager = APIPriorityManager()
+        
+        # Initialize API clients
         self.crossref = CrossRefClient(email=email)
         self.arxiv = ArxivClient()
         self.openalex = OpenAlexClient(email=email)
+        self.pubmed = PubMedClient(email=email)
         self.ollama = OllamaClient()
+        
+        # Map API names to clients
+        self.api_clients = {
+            'crossref': self.crossref,
+            'arxiv': self.arxiv,
+            'openalex': self.openalex,
+            'pubmed': self.pubmed
+        }
         
         # Regex patterns for author extraction
         self.author_patterns = [
@@ -367,29 +381,23 @@ class PaperMetadataProcessor:
         
         # Step 3: Try API lookup if we have valid identifiers
         if valid_dois:
-            print(f"\n🌐 Step 3: Fetching metadata from CrossRef API...")
+            print(f"\n🌐 Step 3: Fetching metadata from APIs (priority order)...")
             doi = valid_dois[0]  # Use first valid DOI
-            metadata = self.crossref.get_metadata(doi)
+            
+            # Try APIs in priority order
+            doi_apis = ['crossref', 'openalex', 'pubmed']
+            metadata = self._try_apis_for_doi(doi, doi_apis)
+            
             if metadata:
-                result['method'] = 'crossref_api'
+                source = metadata.get('source', 'unknown')
+                result['method'] = f'{source}_api'
                 result['metadata'] = metadata
                 result['success'] = True
                 result['processing_time_seconds'] = time.time() - start_time
-                print(f"  ✅ Got metadata from CrossRef in {result['processing_time_seconds']:.1f}s")
+                print(f"  ✅ Got metadata from {source} in {result['processing_time_seconds']:.1f}s")
                 return result
             else:
-                print(f"  ❌ CrossRef API returned no data for DOI: {doi}")
-                print(f"  🔄 Trying OpenAlex API as fallback...")
-                metadata = self.openalex.get_metadata_by_doi(doi)
-                if metadata:
-                    result['method'] = 'openalex_api'
-                    result['metadata'] = metadata
-                    result['success'] = True
-                    result['processing_time_seconds'] = time.time() - start_time
-                    print(f"  ✅ Got metadata from OpenAlex in {result['processing_time_seconds']:.1f}s")
-                    return result
-                else:
-                    print(f"  ❌ OpenAlex also returned no data for DOI: {doi}")
+                print(f"  ❌ All APIs returned no data for DOI: {doi}")
         
         elif valid_arxiv_ids:
             print(f"\n📄 Step 3: Fetching metadata from arXiv API...")
@@ -569,10 +577,42 @@ class PaperMetadataProcessor:
             result['processing_time_seconds'] = time.time() - start_time
             return result
     
+    def _try_apis_for_doi(self, doi: str, api_list: List[str]) -> Optional[Dict]:
+        """Try multiple APIs in priority order for a DOI.
+        
+        Args:
+            doi: DOI to search for
+            api_list: List of API names to try
+            
+        Returns:
+            Metadata dict if found, None otherwise
+        """
+        ordered_apis = self.priority_manager.get_ordered_apis(api_list)
+        
+        for api_name in ordered_apis:
+            if not self.priority_manager.is_api_enabled(api_name):
+                continue
+                
+            client = self.api_clients.get(api_name)
+            if not client:
+                continue
+            
+            try:
+                print(f"  🔄 Trying {api_name}...")
+                metadata = client.get_metadata_by_doi(doi)
+                if metadata:
+                    print(f"  ✅ Found metadata in {api_name}")
+                    return metadata
+            except Exception as e:
+                print(f"  ⚠️  {api_name} error: {e}")
+                continue
+        
+        return None
+    
     def search_by_doi(self, doi: str) -> Dict:
         """Search for metadata using a DOI.
         
-        Tries CrossRef first (fastest, most reliable for DOIs), then OpenAlex as fallback.
+        Uses priority-based API selection from config.
         
         Args:
             doi: DOI to search for
@@ -581,22 +621,15 @@ class PaperMetadataProcessor:
             Dictionary with success status and metadata
         """
         try:
-            # Try CrossRef first (official DOI registry)
-            metadata = self.crossref.get_metadata(doi)
-            if metadata:
-                return {
-                    'success': True,
-                    'metadata': metadata,
-                    'method': 'crossref_api'
-                }
+            # APIs that support DOI lookup
+            doi_apis = ['crossref', 'openalex', 'pubmed']
+            metadata = self._try_apis_for_doi(doi, doi_apis)
             
-            # Fallback to OpenAlex if CrossRef fails
-            metadata = self.openalex.get_metadata_by_doi(doi)
             if metadata:
                 return {
                     'success': True,
                     'metadata': metadata,
-                    'method': 'openalex_api'
+                    'method': metadata.get('source', 'unknown') + '_api'
                 }
             
             return {

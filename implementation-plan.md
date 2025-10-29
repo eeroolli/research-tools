@@ -77,7 +77,6 @@ At a glance:
 - Document profiler implementation
 
 ### ▶️ **Next:**
-- PubMed API integration for biomedical domain
 - Unified metadata manager scaffolding and tests
 - End-to-end sampling harness (20 PDFs per type)
 - Curated journals/publishers normalization from local Zotero (dictionary + alias + fuzzy suggest)
@@ -98,11 +97,12 @@ At a glance:
 - Config path normalization - supports both WSL (/mnt/g/...) and Windows (G:\...) path formats
 - File copy functions handle both WSL and Windows path formats seamlessly
 - OpenAlex API integration - DOI lookup and metadata search with CrossRef fallback
+- PubMed API integration - Complete with DOI lookup and metadata search
+- Config-driven API priority system - Users can customize API order in config.personal.conf
 
 ### ❌ **Not Completed:**
 - Detailed migration tasks from `archive/AI_CHAT_DOCUMENTS.md` (Phases 2-4)
 - Unified metadata system with smart routing
-- PubMed API integration
 - Smart preprocessing Phase C-E implementation
 
 ## Primary Use Case: Paper Scanning Workflow
@@ -310,8 +310,9 @@ shared_tools/
 #### 1.1 Add Academic Paper APIs
 - [x] **OpenAlex API** (200M+ papers, comprehensive academic metadata) - ✅ Implemented (Oct 29, 2025) with DOI lookup and search
 - [x] **CrossRef API** (130M+ scholarly works, DOI-based) - ✅ Implemented with full Zotero fields
-- [ ] **PubMed API** (35M+ biomedical papers)
+- [x] **PubMed API** (35M+ biomedical papers) - ✅ Implemented (Oct 29, 2025) with DOI lookup and search
 - [x] **arXiv API** (2M+ preprints, physics/math) - ✅ Implemented with categories and abstracts
+- [x] **Config-driven API priority system** - ✅ Implemented (Oct 29, 2025) - Users can set API priorities in config
 
 #### 1.2 Enhanced Configuration
 - [ ] Split config into `books_metadata_config.yaml` and `papers_metadata_config.yaml`
