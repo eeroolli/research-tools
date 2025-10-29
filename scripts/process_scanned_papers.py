@@ -24,6 +24,42 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared_tools.metadata.paper_processor import PaperMetadataProcessor
 
 
+def normalize_path_for_wsl(path_str: str) -> str:
+    """Normalize a path string to WSL format.
+    
+    Handles both WSL paths (/mnt/c/...) and Windows paths (C:\...)
+    - Windows paths like "G:\My Drive\publications" -> "/mnt/g/My Drive/publications"
+    - WSL paths already in correct format are returned as-is
+    
+    Args:
+        path_str: Path string that may be in WSL or Windows format
+        
+    Returns:
+        Normalized WSL path string
+    """
+    # If already a WSL path (starts with /), return as-is
+    if path_str.startswith('/'):
+        return path_str
+    
+    # If Windows path (contains : or starts with letter), convert to WSL
+    if ':' in path_str or (len(path_str) > 1 and path_str[1].isalpha() and path_str[1] != ':'):
+        # Handle Windows paths like "G:\My Drive\publications" or "G:/My Drive/publications"
+        # Convert backslashes to forward slashes
+        path_str = path_str.replace('\\', '/')
+        
+        # Extract drive letter (first character before :)
+        if ':' in path_str:
+            drive_letter = path_str[0].lower()
+            # Remove drive letter and colon: "G:/My Drive/publications" -> "/My Drive/publications"
+            remainder = path_str.split(':', 1)[1].lstrip('/')
+            # Convert to WSL format: /mnt/g/My Drive/publications
+            wsl_path = f'/mnt/{drive_letter}/{remainder}'
+            return wsl_path
+    
+    # If no clear format, return as-is
+    return path_str
+
+
 class ScannedPaperProcessor:
     """Process scanned papers with smart metadata extraction."""
     
@@ -451,8 +487,10 @@ def main():
         root_dir / 'config.personal.conf'
     ])
     
-    scanner_dir = Path(config.get('PATHS', 'scanner_papers_dir', 
-                                   fallback='/mnt/i/FraScanner/papers'))
+    # Normalize scanner_papers_dir path (handle both WSL and Windows formats)
+    scanner_path = config.get('PATHS', 'scanner_papers_dir', 
+                               fallback='/mnt/i/FraScanner/papers')
+    scanner_dir = Path(normalize_path_for_wsl(scanner_path))
     
     if not scanner_dir.exists():
         print(f"Error: Scanner directory not found: {scanner_dir}")

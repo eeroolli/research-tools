@@ -1,5 +1,39 @@
 # Research-Tools Implementation Plan
 
+Last updated: 2025-10-29
+Related spec: `IMPLEMENT_ATTACH_TO_EXISTING.md` (feature behavior)
+
+At a glance:
+- Completed: Paper daemon end-to-end, attach workflows, publications-first reuse, linked-path normalization, skip-attach, metadata editing workflow, config path normalization (Oct 29, 2025)
+- In Progress: Smart preprocessing/classification, sampling/validation, document profiler
+- Next: OpenAlex/PubMed integration, unified metadata manager, test harness expansion
+- Backlog: Local Zotero DB integration, advanced caching, hybrid photo pipeline, auto document-type detection (low priority)
+
+## User-Centric Processing Stages (Single Flow View)
+
+1) Intake & Identification — DONE
+- Extract identifiers (DOI/URL/arXiv) via regex; quick local Zotero search by authors/year/title.
+
+2) User Confirmation — DONE
+- User confirms document type (manual); selects/edits authors/title/year as needed.
+
+3) Metadata Enrichment — DONE
+- Online search (CrossRef, arXiv; ISBN lookup for book chapters when applicable) with Ollama fallback when needed; show all results, allow selection/merge/edit.
+  - Book chapter UX flow: confirm document type → prompt for book title/editor (allow using chapter authors as possible editors) → run ISBN/title+editor lookup via DetailedISBNLookupService → normalize to Zotero fields.
+
+4) Normalization — PARTIAL / NEXT
+- Authors: semicolon-separated display, interactive edits (DONE)
+- Journals/Publishers: curated lists derived from local Zotero, alias normalization, fuzzy-suggest in prompts (NEW – planned)
+
+5) Filenaming & Placement — DONE
+- Filenames from final metadata; publications-first identical reuse; conflict menu (`_scanned`, `_scanned2`).
+
+6) Zotero Write — DONE
+- Create or attach; linked-file paths normalized (WSL→Windows); optional skip-attach.
+
+7) Optional AI Assist — LOW PRIORITY / BACKLOG
+- First-page AI classification/OCR correction; only if needed in the future.
+
 **Date:** September 2025  
 **Purpose:** Comprehensive plan for completing research-tools system  
 **Status:** 🚧 IN PROGRESS - Configuration-driven system implemented, migration and AI integration pending
@@ -42,11 +76,28 @@
 - Sample testing and validation (20 PDFs per type)
 - Document profiler implementation
 
+### ▶️ **Next:**
+- OpenAlex API integration for papers
+- PubMed API integration for biomedical domain
+- Unified metadata manager scaffolding and tests
+- End-to-end sampling harness (20 PDFs per type)
+- Curated journals/publishers normalization from local Zotero (dictionary + alias + fuzzy suggest)
+
+### 🗂️ **Backlog (Ideas/Future):**
+- Local Zotero SQLite performance integration with schema guardrails
+- Persistent file hash cache for re-hash avoidance
+- Batch local lookups for speed and prefetching
+- CI test data fixtures and baseline performance metrics
+- Automatic document type detection (low priority; manual selection in UX suffices)
+
 ### 📌 **Recently Completed (Oct 2025):**
 - Hash-based duplicate detection during copy/name collisions
 - Global publications-first identical reuse before copy
 - Robust attach path handling and messaging
 - Ability to create item without attaching a PDF
+- Metadata editing workflow fully wired to menu actions
+- Config path normalization - supports both WSL (/mnt/g/...) and Windows (G:\...) path formats
+- File copy functions handle both WSL and Windows path formats seamlessly
 
 ### ❌ **Not Completed:**
 - Detailed migration tasks from `archive/AI_CHAT_DOCUMENTS.md` (Phases 2-4)
@@ -99,7 +150,7 @@
 - [x] **Identifier Validation** - ISSN/ISBN checksum validation, DOI/arXiv/URL format validation, hallucination detection
 - [x] **CrossRef API Client** - Full Zotero fields: title, authors, journal, volume, issue, pages, abstract, tags
 - [x] **arXiv API Client** - Preprint metadata with categories, abstracts, DOI of published versions
-- [x] **Ollama Integration** - Fallback AI for papers without identifiers (with validation and hallucination detection)
+- [x] **Ollama Integration** - Fallback AI for papers without identifiers (available; low priority to use — GROBID sufficient for now)
 - [x] **Smart Workflow** - Priority: DOI → arXiv → ISBN → URL/Ollama → Nothing/Ollama
 - [x] **Testing Framework** - pytest with 25 unit tests for validation
 - [x] **Performance** - 60-100x faster for papers with DOIs/arXiv IDs (1s vs 120-180s)
@@ -200,7 +251,7 @@
 
 **Impact:** ~30 files deleted, ~3000+ lines of code removed, cleaner repository structure
 
-**Phase 0.4B: Module Refactoring** ✅ COMPLETED (January 2025)
+**Phase 0.4B: Module Refactoring** ✅ COMPLETED (october 2025)
 - [x] **Created shared_tools/extractors/** - Moved ISBN extraction from process_books
 - [x] **Created shared_tools/processors/** - Moved image processing from process_books
 - [x] **Consolidated utilities** - Moved file_manager, thread_pool_manager, cpu_monitor to shared_tools/utils
@@ -283,10 +334,11 @@ def search_metadata(identifier):
         return unified_manager.search_all_sources(identifier)
 ```
 
-#### 2.2 Auto Zotero Type Detection
+#### 2.2 Auto Zotero Type Detection (Low Priority)
 - [ ] Map metadata source to appropriate Zotero item type
 - [ ] Handle edge cases (reports with ISBN+ISSN, conference proceedings)
 - [ ] Implement confidence scoring for metadata quality
+Note: Functionally covered by Stage 2 (manual confirmation). Keep as backlog optimization.
 
 #### 2.3 Unified Manager Interface
 ```python
@@ -299,35 +351,37 @@ class UnifiedMetadataManager:
         """Search all sources and rank results"""
         pass
 ```
+Note: Manager work should support Stage 3 (metadata enrichment) and Stage 4 (normalization) without duplicating UI flow logic.
 
-### **Phase 3: AI-Driven Paper Processing** 🆕
+### **Phase 3: AI-Driven Paper Processing** 🆕 (Low Priority components consolidated)
 *Enhance paper processing with AI capabilities*
 
-#### 3.1 First Page Processing (Paper Scanning Workflow)
-- [ ] OCR/AI processing of first page for paper identification
-- [ ] Extract DOI, title, authors, abstract from first page
+#### 3.1 First Page Processing (Paper Scanning Workflow) (Low Priority)
+Note: Largely covered by GROBID already (title/authors/venue/year from first pages). Additional AI here is optional.
+- [x] OCR/AI processing of first page for paper identification
+- [x] Extract DOI, title, authors, abstract from first page
 - [ ] Smart identification strategy (DOI → Title+Authors → Abstract keywords)
 - [ ] Handle multiple identification methods with confidence scoring
 - [ ] **Hybrid AI approach** - Claude for complex reasoning, Ollama for privacy-sensitive data
 - [ ] **Fallback strategy** - Use both AI systems for redundancy and accuracy
 
-#### 3.2 AI-Enhanced OCR
+#### 3.2 AI-Enhanced OCR (Low Priority)
 - [ ] LLM-based text correction for OCR errors
 - [ ] Context-aware metadata extraction
 - [ ] Language detection and processing
-- [ ] **Ollama integration** - Local AI for OCR text correction and metadata parsing
-- [ ] **Claude integration** - Cloud AI for complex reasoning and high-accuracy extraction
+  - [x] **Ollama integration (optional)** - Local AI for OCR text correction and metadata parsing (low priority)
+- [ ] **GROBID integration** 
 
-#### 3.3 Smart Annotation Processing
+#### 3.3 Smart Annotation Processing (Low Priority)
 - [ ] AI-powered annotation separation (handwritten notes, highlights)
 - [ ] Keyword extraction from annotations
 - [ ] Question and note identification
 
-#### 3.4 AI Metadata Enhancement
+#### 3.4 AI Metadata Enhancement (Low Priority)
 - [ ] Fill missing metadata fields using AI
 - [ ] Validate and correct extracted metadata
 - [ ] Suggest tags and categories based on content
-- [ ] **Dual AI validation** - Cross-check results between Claude and Ollama
+- [ ] **Dual AI validation** - Cross-check results between GROBID and Ollama
 - [ ] **Confidence scoring** - Rate metadata quality from each AI system
 
 
@@ -373,9 +427,9 @@ class UnifiedMetadataManager:
 - [x] **Separate workflows** - Books and papers use same underlying systems but different entry points
 - [x] **Configuration sharing** - Reuse existing config system (config.personal.conf)
 - [x] **Logging consistency** - Extend CSV logging with Zotero fields
-- [ ] **Scanner integration** - Epson buttons to be configured for NO/EN/DE languages
+- [x] **Scanner integration** - Epson buttons to be configured for NO/EN/DE languages
 - [x] **Conference detection** - conference_detector.py for presentations (Oct 11, 2025)
-- [ ] **Interactive menu** - PENDING: Add to process_scanned_papers.py (NEXT SESSION)
+- [x] **Interactive menu** - PENDING: Add to process_scanned_papers.py (NEXT SESSION)
 - [ ] **Testing** - End-to-end testing with real scanner
 
 #### 4.6 User Workflow (Target) ✅
@@ -392,7 +446,7 @@ class UnifiedMetadataManager:
 **Target timing:** 5-10 seconds for papers with DOI/arXiv, 65-130 seconds for papers needing Ollama
 
 #### 4.7 Interactive Menu System ✅ COMPLETE
-**Status:** ✅ **COMPLETE** - Full interactive workflow implemented (Oct 14, 2025)
+**Status:** ✅ **COMPLETE** - Full interactive workflow implemented (Oct 29, 2025)
 
 - ✅ **Universal Metadata Display**: Smart field grouping and intelligent formatting for any document type
 - ✅ **Document Type Awareness**: Shows relevant fields for journal articles, book chapters, conference papers, books, legal docs, etc.
@@ -401,7 +455,7 @@ class UnifiedMetadataManager:
 - ✅ **Enhanced User Experience**: Grouped, formatted, intelligent display with proper field labeling
 - ✅ **Interactive Menu**: Complete menu system with user choices (use as-is, edit, search Zotero, skip, manual processing)
 - ✅ **Failed Extraction Workflow**: Guided manual metadata entry for failed extractions
-- ✅ **Metadata Editing**: Interactive field editing with current value display
+- ✅ **Metadata Editing**: ✅ **COMPLETE** (Oct 29, 2025) - Fully wired to edit menu action with re-search capability
 - ✅ **3-Step Zotero Workflow**: Enhanced workflow for attaching PDFs to existing Zotero items
 - ✅ **Metadata Comparison**: Side-by-side comparison with 6 user options
 - ✅ **Tags Integration**: Full integration with existing tag system
@@ -412,6 +466,7 @@ class UnifiedMetadataManager:
 - ✅ **Task 8**: API methods for PDF attachment and author search
 - ✅ **Enhanced UX**: 6 options for metadata handling including manual processing
 - ✅ **Production Ready**: Full error handling and file management
+- ✅ **Oct 29, 2025**: Connected edit metadata action to edit_metadata_interactively method
 
 #### 4.8 Enhanced 3-Step Zotero Workflow ✅ COMPLETE
 **Status:** ✅ **COMPLETE** - Full 3-step UX workflow implemented (Oct 14, 2025)

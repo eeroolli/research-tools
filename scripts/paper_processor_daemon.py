@@ -114,9 +114,10 @@ class PaperProcessorDaemon:
             root_dir / 'config.personal.conf'
         ])
         
-        # Get publications directory
-        self.publications_dir = Path(self.config.get('PATHS', 'publications_dir', 
-                                                 fallback='/mnt/g/My Drive/publications'))
+        # Get publications directory - normalize to WSL path
+        publications_path = self.config.get('PATHS', 'publications_dir', 
+                                           fallback='/mnt/g/My Drive/publications')
+        self.publications_dir = Path(self._normalize_path(publications_path))
         
         # Get Ollama configuration
         self.ollama_auto_start = self.config.getboolean('OLLAMA', 'auto_start', fallback=True)
@@ -134,6 +135,41 @@ class PaperProcessorDaemon:
         
         # Check if publications directory is accessible
         self._validate_publications_directory()
+    
+    def _normalize_path(self, path_str: str) -> str:
+        """Normalize a path string to WSL format.
+        
+        Handles both WSL paths (/mnt/c/...) and Windows paths (C:\...)
+        - Windows paths like "G:\My Drive\publications" -> "/mnt/g/My Drive/publications"
+        - WSL paths already in correct format are returned as-is
+        
+        Args:
+            path_str: Path string that may be in WSL or Windows format
+            
+        Returns:
+            Normalized WSL path string
+        """
+        # If already a WSL path (starts with /), return as-is
+        if path_str.startswith('/'):
+            return path_str
+        
+        # If Windows path (contains : or starts with letter), convert to WSL
+        if ':' in path_str or (len(path_str) > 1 and path_str[1].isalpha() and path_str[1] != ':'):
+            # Handle Windows paths like "G:\My Drive\publications" or "G:/My Drive/publications"
+            # Convert backslashes to forward slashes
+            path_str = path_str.replace('\\', '/')
+            
+            # Extract drive letter (first character before :)
+            if ':' in path_str:
+                drive_letter = path_str[0].lower()
+                # Remove drive letter and colon: "G:/My Drive/publications" -> "/My Drive/publications"
+                remainder = path_str.split(':', 1)[1].lstrip('/')
+                # Convert to WSL format: /mnt/g/My Drive/publications
+                wsl_path = f'/mnt/{drive_letter}/{remainder}'
+                return wsl_path
+        
+        # If no clear format, return as-is
+        return path_str
     
     def _validate_publications_directory(self):
         """Validate that publications directory is accessible and handle setup."""
@@ -1336,25 +1372,34 @@ class PaperProcessorDaemon:
         This avoids WSL→Google Drive sync issues by using native Windows file operations.
         
         Args:
-            pdf_path: Path to source PDF (WSL path)
+            pdf_path: Path to source PDF (WSL or Windows path)
             target_filename: Target filename (just the name, not full path)
             
         Returns:
             Tuple of (success: bool, target_path: Path or None, error_msg: str)
         """
         try:
-            # Convert WSL path to Windows path
+            # Normalize source path to WSL format first, then convert to Windows for PowerShell
+            source_str = str(pdf_path)
+            if ':' in source_str and not source_str.startswith('/'):
+                # Convert Windows path to WSL format first
+                source_str = self._normalize_path(source_str)
+            
+            # Convert source WSL path to Windows path for PowerShell
             source_win = subprocess.check_output(
-                ['wslpath', '-w', str(pdf_path)],
+                ['wslpath', '-w', source_str],
                 text=True
             ).strip()
             
-            # Build target Windows path
-            target_dir_wsl = self.publications_dir
+            # Get target directory - already normalized in load_config
+            target_dir_str = str(self.publications_dir)
+            
+            # Convert target WSL path to Windows path
             target_dir_win = subprocess.check_output(
-                ['wslpath', '-w', str(target_dir_wsl)],
+                ['wslpath', '-w', target_dir_str],
                 text=True
             ).strip()
+            
             target_win = f"{target_dir_win}\\{target_filename}"
             
             # Get path to PowerShell script
@@ -1376,8 +1421,8 @@ class PaperProcessorDaemon:
             )
             
             if result.returncode == 0:
-                # Success - convert target back to WSL path
-                target_path = target_dir_wsl / target_filename
+                # Success - target is in publications directory
+                target_path = self.publications_dir / target_filename
                 self.logger.info(f"Copy successful: {target_path}")
                 return (True, target_path, None)
             else:
@@ -2670,9 +2715,34 @@ class PaperProcessorDaemon:
                 # Handle other actions from second search if needed
             elif action == 'edit':
                 # Edit metadata then search again
-                # TODO: Implement metadata editing
-                print("⚠️  Metadata editing not yet implemented")
-                self.move_to_manual_review(pdf_path)
+                print("\n✏️  Editing metadata...")
+                edited_metadata = self.edit_metadata_interactively(updated_metadata)
+                
+                if edited_metadata:
+                    # Re-run Zotero search with edited metadata
+                    print("\n🔍 Searching Zotero with edited metadata...")
+                    action2, selected_item2, final_metadata = self.search_and_display_local_zotero(edited_metadata)
+                    
+                    if action2 == 'select' and selected_item2:
+                        self.handle_item_selected(pdf_path, final_metadata, selected_item2)
+                    elif action2 == 'create':
+                        # User wants to create new item after editing
+                        success = self.handle_create_new_item(pdf_path, final_metadata)
+                        if not success:
+                            self.logger.info("Item creation cancelled or failed")
+                    elif action2 == 'back' or action2 == 'restart':
+                        print("⬅️  Going back...")
+                        self.move_to_manual_review(pdf_path)
+                    elif action2 == 'quit':
+                        self.stop()
+                        return
+                    else:
+                        # No action or skip
+                        self.move_to_manual_review(pdf_path)
+                else:
+                    # User cancelled editing
+                    print("❌ Metadata editing cancelled")
+                    self.move_to_manual_review(pdf_path)
             elif action == 'create':
                 # Create new Zotero item with online library check
                 # Use updated_metadata which includes any edited authors
@@ -4782,6 +4852,42 @@ class PaperFileHandler(FileSystemEventHandler):
         self.daemon.logger.info("Ready for next scan")
 
 
+def normalize_path_for_wsl(path_str: str) -> str:
+    """Normalize a path string to WSL format (standalone function for main).
+    
+    Handles both WSL paths (/mnt/c/...) and Windows paths (C:\...)
+    - Windows paths like "G:\My Drive\publications" -> "/mnt/g/My Drive/publications"
+    - WSL paths already in correct format are returned as-is
+    
+    Args:
+        path_str: Path string that may be in WSL or Windows format
+        
+    Returns:
+        Normalized WSL path string
+    """
+    # If already a WSL path (starts with /), return as-is
+    if path_str.startswith('/'):
+        return path_str
+    
+    # If Windows path (contains : or starts with letter), convert to WSL
+    if ':' in path_str or (len(path_str) > 1 and path_str[1].isalpha() and path_str[1] != ':'):
+        # Handle Windows paths like "G:\My Drive\publications" or "G:/My Drive/publications"
+        # Convert backslashes to forward slashes
+        path_str = path_str.replace('\\', '/')
+        
+        # Extract drive letter (first character before :)
+        if ':' in path_str:
+            drive_letter = path_str[0].lower()
+            # Remove drive letter and colon: "G:/My Drive/publications" -> "/My Drive/publications"
+            remainder = path_str.split(':', 1)[1].lstrip('/')
+            # Convert to WSL format: /mnt/g/My Drive/publications
+            wsl_path = f'/mnt/{drive_letter}/{remainder}'
+            return wsl_path
+    
+    # If no clear format, return as-is
+    return path_str
+
+
 def main():
     """Main entry point."""
     import argparse
@@ -4798,8 +4904,10 @@ def main():
         root_dir / 'config.personal.conf'
     ])
     
-    watch_dir = Path(config.get('PATHS', 'scanner_papers_dir', 
-                                 fallback='/mnt/i/FraScanner/papers'))
+    # Normalize scanner_papers_dir path (handle both WSL and Windows formats)
+    scanner_path = config.get('PATHS', 'scanner_papers_dir', 
+                              fallback='/mnt/i/FraScanner/papers')
+    watch_dir = Path(normalize_path_for_wsl(scanner_path))
     
     if not watch_dir.exists():
         print(f"Error: Watch directory not found: {watch_dir}")
