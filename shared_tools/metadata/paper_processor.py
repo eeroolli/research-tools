@@ -22,6 +22,7 @@ from shared_tools.utils.identifier_extractor import IdentifierExtractor
 from shared_tools.utils.identifier_validator import IdentifierValidator
 from shared_tools.api.crossref_client import CrossRefClient
 from shared_tools.api.arxiv_client import ArxivClient
+from shared_tools.api.openalex_client import OpenAlexClient
 from shared_tools.ai.ollama_client import OllamaClient
 
 
@@ -43,6 +44,7 @@ class PaperMetadataProcessor:
         self.validator = IdentifierValidator()
         self.crossref = CrossRefClient(email=email)
         self.arxiv = ArxivClient()
+        self.openalex = OpenAlexClient(email=email)
         self.ollama = OllamaClient()
         
         # Regex patterns for author extraction
@@ -135,6 +137,115 @@ class PaperMetadataProcessor:
         
         return unique_authors
 
+    def _extract_structured_repository_metadata(self, text: str) -> Optional[Dict]:
+        """Extract structured metadata from repository pages using labeled fields.
+        
+        Handles patterns like:
+        Title
+        [title text]
+        
+        Author
+        [author name]
+        
+        Publication Date
+        1995-07-01
+        
+        Args:
+            text: First page text from PDF
+            
+        Returns:
+            Metadata dictionary if found, None otherwise
+        """
+        import re
+        
+        metadata = {}
+        found_any = False
+        
+        # Extract title (case-insensitive, flexible spacing)
+        title_pattern = r'(?:^|\n)title\s*\n(.+?)(?=\n(?:author|publication|journal|date|url)|$)'
+        match = re.search(title_pattern, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        if match:
+            title = match.group(1).strip()
+            # Clean up title (remove extra whitespace, newlines)
+            title = ' '.join(title.split())
+            if len(title) > 5:  # Valid titles are usually >5 chars
+                metadata['title'] = title
+                found_any = True
+        
+        # Extract author (case-insensitive)
+        author_pattern = r'(?:^|\n)author\s*\n(.+?)(?=\n(?:title|publication|journal|date|url)|$)'
+        match = re.search(author_pattern, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        if match:
+            author = match.group(1).strip()
+            # Clean up author
+            author = ' '.join(author.split())
+            if len(author) > 2 and ',' in author:  # Author format "Last, First"
+                metadata['authors'] = [author]
+                found_any = True
+        
+        # Extract publication date (multiple formats: YYYY-MM-DD, DD.MM.YYYY, July 1994, etc.)
+        date_pattern = r'(?:publication\s+date|date)\s*\n([^\n]+)'
+        match = re.search(date_pattern, text, re.IGNORECASE | re.MULTILINE)
+        if match:
+            date_str = match.group(1).strip()
+            
+            # Try various date formats to extract year
+            year = None
+            
+            # Format 1: ISO format (1995-07-01)
+            iso_match = re.search(r'(\d{4})-\d{2}-\d{2}', date_str)
+            if iso_match:
+                year = iso_match.group(1)
+            
+            # Format 2: European format (01.07.1994)
+            if not year:
+                euro_match = re.search(r'\d{2}\.\d{2}\.(\d{4})', date_str)
+                if euro_match:
+                    year = euro_match.group(1)
+            
+            # Format 3: Month name + year (July 1994, Jul 1994)
+            if not year:
+                month_year_match = re.search(r'[A-Za-z]+\s+(\d{4})', date_str)
+                if month_year_match:
+                    year = month_year_match.group(1)
+            
+            # Format 4: YYYY format (1994)
+            if not year:
+                year_match = re.search(r'(\d{4})', date_str)
+                if year_match:
+                    year = year_match.group(1)
+            
+            # Validate year
+            if year and 1900 <= int(year) <= 2100:
+                metadata['year'] = year
+                found_any = True
+        
+        # Extract journal (case-insensitive)
+        journal_pattern = r'(?:^|\n)journal\s*\n(.+?)(?=\n(?:author|title|publication|date|url)|$)'
+        match = re.search(journal_pattern, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        if match:
+            journal = match.group(1).strip()
+            journal = ' '.join(journal.split())
+            if len(journal) > 3:
+                metadata['journal'] = journal
+                found_any = True
+        
+        # Extract URL (http:// or https://)
+        url_pattern = r'(?:^|\n)(?:url|permanent\s+link|doi)\s*\n(https?://[^\s\n]+)'
+        match = re.search(url_pattern, text, re.IGNORECASE | re.MULTILINE)
+        if match:
+            url = match.group(1).strip()
+            # Validate URL
+            if url.startswith('http://') or url.startswith('https://'):
+                metadata['url'] = url
+                found_any = True
+        
+        if found_any:
+            metadata['extraction_method'] = 'structured_repository_metadata'
+            return metadata
+        
+        return None
+    
     def _extract_authors_with_regex_simple(self, text: str) -> List[str]:
         """Simple regex extraction focusing on common academic patterns.
         
@@ -268,6 +379,17 @@ class PaperMetadataProcessor:
                 return result
             else:
                 print(f"  ❌ CrossRef API returned no data for DOI: {doi}")
+                print(f"  🔄 Trying OpenAlex API as fallback...")
+                metadata = self.openalex.get_metadata_by_doi(doi)
+                if metadata:
+                    result['method'] = 'openalex_api'
+                    result['metadata'] = metadata
+                    result['success'] = True
+                    result['processing_time_seconds'] = time.time() - start_time
+                    print(f"  ✅ Got metadata from OpenAlex in {result['processing_time_seconds']:.1f}s")
+                    return result
+                else:
+                    print(f"  ❌ OpenAlex also returned no data for DOI: {doi}")
         
         elif valid_arxiv_ids:
             print(f"\n📄 Step 3: Fetching metadata from arXiv API...")
@@ -450,6 +572,8 @@ class PaperMetadataProcessor:
     def search_by_doi(self, doi: str) -> Dict:
         """Search for metadata using a DOI.
         
+        Tries CrossRef first (fastest, most reliable for DOIs), then OpenAlex as fallback.
+        
         Args:
             doi: DOI to search for
             
@@ -457,6 +581,7 @@ class PaperMetadataProcessor:
             Dictionary with success status and metadata
         """
         try:
+            # Try CrossRef first (official DOI registry)
             metadata = self.crossref.get_metadata(doi)
             if metadata:
                 return {
@@ -464,11 +589,20 @@ class PaperMetadataProcessor:
                     'metadata': metadata,
                     'method': 'crossref_api'
                 }
-            else:
+            
+            # Fallback to OpenAlex if CrossRef fails
+            metadata = self.openalex.get_metadata_by_doi(doi)
+            if metadata:
                 return {
-                    'success': False,
-                    'error': f'No metadata found for DOI: {doi}'
+                    'success': True,
+                    'metadata': metadata,
+                    'method': 'openalex_api'
                 }
+            
+            return {
+                'success': False,
+                'error': f'No metadata found for DOI: {doi}'
+            }
         except Exception as e:
             return {
                 'success': False,

@@ -77,7 +77,6 @@ At a glance:
 - Document profiler implementation
 
 ### ▶️ **Next:**
-- OpenAlex API integration for papers
 - PubMed API integration for biomedical domain
 - Unified metadata manager scaffolding and tests
 - End-to-end sampling harness (20 PDFs per type)
@@ -98,11 +97,12 @@ At a glance:
 - Metadata editing workflow fully wired to menu actions
 - Config path normalization - supports both WSL (/mnt/g/...) and Windows (G:\...) path formats
 - File copy functions handle both WSL and Windows path formats seamlessly
+- OpenAlex API integration - DOI lookup and metadata search with CrossRef fallback
 
 ### ❌ **Not Completed:**
 - Detailed migration tasks from `archive/AI_CHAT_DOCUMENTS.md` (Phases 2-4)
 - Unified metadata system with smart routing
-- Academic paper APIs (OpenAlex, PubMed) - CrossRef and arXiv completed ✅
+- PubMed API integration
 - Smart preprocessing Phase C-E implementation
 
 ## Primary Use Case: Paper Scanning Workflow
@@ -308,7 +308,7 @@ shared_tools/
 - [x] **Environment cleanup** - Removed unused dependencies for leaner setup
 
 #### 1.1 Add Academic Paper APIs
-- [ ] **OpenAlex API** (200M+ papers, comprehensive academic metadata)
+- [x] **OpenAlex API** (200M+ papers, comprehensive academic metadata) - ✅ Implemented (Oct 29, 2025) with DOI lookup and search
 - [x] **CrossRef API** (130M+ scholarly works, DOI-based) - ✅ Implemented with full Zotero fields
 - [ ] **PubMed API** (35M+ biomedical papers)
 - [x] **arXiv API** (2M+ preprints, physics/math) - ✅ Implemented with categories and abstracts
