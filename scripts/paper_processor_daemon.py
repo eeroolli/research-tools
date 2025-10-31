@@ -149,8 +149,16 @@ class PaperProcessorDaemon:
         Returns:
             Normalized WSL path string
         """
-        # If already a WSL path (starts with /), return as-is
+        # Sanitize quotes and whitespace
+        if path_str is None:
+            return path_str
+        path_str = path_str.strip().strip('"\'')
+        path_str = path_str.replace('"', '').replace("'", '')
+        
+        # If already a WSL path (starts with /), normalize duplicate slashes and return
         if path_str.startswith('/'):
+            while '//' in path_str:
+                path_str = path_str.replace('//', '/')
             return path_str
         
         # If Windows path (contains : or starts with letter), convert to WSL
@@ -166,6 +174,8 @@ class PaperProcessorDaemon:
                 remainder = path_str.split(':', 1)[1].lstrip('/')
                 # Convert to WSL format: /mnt/g/My Drive/publications
                 wsl_path = f'/mnt/{drive_letter}/{remainder}'
+                while '//' in wsl_path:
+                    wsl_path = wsl_path.replace('//', '/')
                 return wsl_path
         
         # If no clear format, return as-is
@@ -673,7 +683,11 @@ class PaperProcessorDaemon:
         Returns:
             Updated metadata with year, or special string 'BACK'/'RESTART'
         """
+        # Skip if already confirmed earlier in this session
+        if metadata.get('_year_confirmed'):
+            return metadata
         if metadata.get('year'):
+            metadata['_year_confirmed'] = True
             return metadata
         
         print("\n📅 Publication year not found in scan")
@@ -696,6 +710,8 @@ class PaperProcessorDaemon:
             # Validate year format
             if year_input.isdigit() and len(year_input) == 4:
                 metadata['year'] = year_input
+                metadata['_year_confirmed'] = True
+                print(f"User provided year: {year_input}")
                 self.logger.info(f"User provided year: {year_input}")
             else:
                 print("⚠️  Invalid year format (expected 4 digits)")
@@ -822,12 +838,14 @@ class PaperProcessorDaemon:
                 elif choice == '':
                     # Keep detected type
                     print(f"✅ Keeping: {current_name}")
+                    metadata['_type_confirmed'] = True
                     return metadata
                 elif choice in doc_type_map:
                     # Change type
                     new_type, new_name = doc_type_map[choice]
                     metadata['document_type'] = new_type
                     print(f"✅ Changed to: {new_name}")
+                    metadata['_type_confirmed'] = True
                     return metadata
                 else:
                     print("⚠️  Invalid choice, keeping detected type")
@@ -858,6 +876,7 @@ class PaperProcessorDaemon:
                         doc_type, doc_type_name = doc_type_map[choice]
                         metadata['document_type'] = doc_type
                         print(f"✅ Selected: {doc_type_name}")
+                        metadata['_type_confirmed'] = True
                         return metadata
                     elif choice.lower() in ['q', 'quit', 'cancel']:
                         return None
@@ -1136,7 +1155,7 @@ class PaperProcessorDaemon:
             return ('none', None, metadata)
         
         try:
-            # Step 1: Ensure we have a year (prompt if missing)
+            # Step 1: Ensure we have a year (prompt if missing, only once per session)
             year_result = self.prompt_for_year(metadata)
             # Handle special return values
             if year_result == 'BACK':
@@ -1160,6 +1179,10 @@ class PaperProcessorDaemon:
                     action, item = self.display_and_select_zotero_matches(matches, search_info)
                     return (action, item, metadata)
             
+            # Preserve full author list for future re-search cycles
+            if metadata.get('authors') and not metadata.get('_all_authors'):
+                metadata['_all_authors'] = metadata['authors'].copy()
+
             # Step 3: Author-based search
             if not metadata.get('authors'):
                 print("❌ No authors found - cannot search")
@@ -1171,6 +1194,9 @@ class PaperProcessorDaemon:
             
             # Check for back/restart commands
             if selected_authors == 'BACK':
+                # Restore full filtered author list if available
+                if metadata.get('_all_authors'):
+                    metadata['authors'] = metadata['_all_authors'].copy()
                 return ('back', None, metadata)
             elif selected_authors == 'RESTART':
                 return ('quit', None, metadata)  # Will cause restart from outer loop
@@ -1224,7 +1250,7 @@ class PaperProcessorDaemon:
                 print()
                 
                 # Offer options to user
-                print("Options:")
+                print("Options (enter a number):")
                 print("[1] Search again without year filter")
                 if year:
                     print("[2] Search again with different year")
@@ -1238,7 +1264,7 @@ class PaperProcessorDaemon:
                 print()
                 
                 while True:
-                    choice = input("Enter your choice: ").strip().lower()
+                    choice = input("Enter your choice (1-4 or 'z' to go back): ").strip().lower()
                     
                     if choice == '1':
                         # Retry without year filter
@@ -1346,6 +1372,9 @@ class PaperProcessorDaemon:
             Normalized item dict compatible with display methods
         """
         normalized = item.copy()
+        # Ensure a standard 'key' field exists (map from item_key if needed)
+        if 'key' not in normalized and 'item_key' in normalized:
+            normalized['key'] = normalized['item_key']
         
         # Convert creators list to authors list
         if 'creators' in item and 'authors' not in item:
@@ -1360,9 +1389,45 @@ class PaperProcessorDaemon:
                         authors.append(last)
             normalized['authors'] = authors
         
-        # Convert hasAttachment to has_attachment
-        if 'hasAttachment' in item:
+        # Normalize attachment flag
+        if 'hasAttachment' in item and 'has_attachment' not in normalized:
             normalized['has_attachment'] = item['hasAttachment']
+        
+        # Ensure container_info, journal, doi, and abstract are passed through
+        # Handle container_info (type-aware: journal/book/conference)
+        if 'container_info' in item:
+            normalized['container_info'] = item['container_info']
+        
+        # Handle both 'publicationTitle' and 'journal' field names (backward compat)
+        if 'journal' not in normalized:
+            if 'container_info' in item and item['container_info']:
+                normalized['journal'] = item['container_info'].get('value')
+            elif 'publicationTitle' in item:
+                normalized['journal'] = item['publicationTitle']
+            elif 'journal' in item:
+                normalized['journal'] = item['journal']
+        
+        # Ensure item_type is passed through
+        if 'item_type' in item:
+            normalized['item_type'] = item['item_type']
+        elif 'itemType' in item:
+            normalized['item_type'] = item['itemType']
+        
+        # Ensure DOI and abstract are passed through
+        if 'doi' not in normalized and 'DOI' in item:
+            normalized['doi'] = item['DOI']
+        elif 'doi' not in normalized and 'doi' in item:
+            normalized['doi'] = item['doi']
+        
+        if 'abstract' not in normalized:
+            if 'abstractNote' in item:
+                normalized['abstract'] = item['abstractNote']
+            elif 'abstract' in item:
+                normalized['abstract'] = item['abstract']
+        
+        # Ensure tags are passed through
+        if 'tags' in item:
+            normalized['tags'] = item['tags']
         
         return normalized
     
@@ -1820,13 +1885,10 @@ class PaperProcessorDaemon:
                     print("❌ Invalid choice. Please try again.")
         
         else:
-            # No online metadata AND no local metadata
-            print("\n❌ NO METADATA SOURCES AVAILABLE")
-            print("There is no matching zotero item, nor can any metadata match be found online.")
-            print("Please process this file manually. It can be a case of seldom document type or bad scan.")
+            # No online metadata AND no local metadata - but still allow manual editing
+            print("\n⚠️  NO AUTOMATIC METADATA SOURCES AVAILABLE")
+            print("You can still manually edit fields below.")
             print()
-            # Return unchanged metadata - caller should move to manual processing
-            return metadata
         
         # Helper function to display field with multiple sources
         def display_field_with_sources(field_name: str, current_value, online_value=None, local_value=None):
@@ -1922,16 +1984,69 @@ class PaperProcessorDaemon:
             edited['journal'] = local_metadata['journal']
             print(f"✅ Auto-filled from local: {local_metadata['journal']}")
         
-        # DOI
+        # DOI - Always allow manual entry, even without Zotero items
         display_field_with_sources(
             "DOI",
             edited.get('doi', ''),
             online_metadata.get('doi') if online_metadata else None,
             local_metadata.get('doi') if local_metadata else None
         )
+        print("You can enter DOI manually (supports: 10.1234/example, https://doi.org/10.1234/example, doi:10.1234/example)")
         new_value = input("New DOI (or Enter to keep current): ").strip()
+        
         if new_value:
-            edited['doi'] = new_value
+            # Validate and normalize the entered DOI
+            validator = self.metadata_processor.validator
+            is_valid, cleaned_doi, reason = validator.validate_doi(new_value)
+            
+            if is_valid and cleaned_doi:
+                edited['doi'] = cleaned_doi
+                print(f"✅ Valid DOI: {cleaned_doi}")
+                
+                # If no metadata was found yet, offer to fetch it using the DOI
+                if not has_online and not has_local:
+                    fetch_choice = input(f"Fetch metadata for this DOI? [y/n]: ").strip().lower()
+                    if fetch_choice == 'y':
+                        print(f"🔍 Fetching metadata for DOI: {cleaned_doi}...")
+                        # Try to fetch metadata using the DOI (using private method - it's the right interface)
+                        fetched_metadata = self.metadata_processor._try_apis_for_doi(cleaned_doi, ['crossref', 'openalex', 'pubmed'])
+                        if fetched_metadata:
+                            source = fetched_metadata.get('source', 'unknown')
+                            print(f"✅ Found metadata from {source}")
+                            # Ask if user wants to merge fetched metadata
+                            merge_choice = input("Merge fetched metadata with current? [y/n]: ").strip().lower()
+                            if merge_choice == 'y':
+                                # Fill gaps with fetched metadata (don't overwrite existing values)
+                                for key, value in fetched_metadata.items():
+                                    if value and not edited.get(key) and key not in ['source', 'raw_type']:
+                                        edited[key] = value
+                                        # Show brief summary for key fields
+                                        if key in ['title', 'authors', 'year', 'journal', 'abstract']:
+                                            display_val = str(value)
+                                            if key == 'authors' and isinstance(value, list):
+                                                display_val = ', '.join(value[:3])
+                                            elif key == 'abstract' and len(str(value)) > 50:
+                                                display_val = str(value)[:50] + "..."
+                                            print(f"  ✅ Added {key}: {display_val}")
+                                has_online = True  # Now we have online metadata
+                                online_metadata = fetched_metadata
+                                online_source = source
+                        else:
+                            print("❌ No metadata found for this DOI in any API")
+            else:
+                print(f"❌ {reason}")
+                retry = input("Retry with different DOI? [y/n]: ").strip().lower()
+                if retry == 'y':
+                    # Re-prompt for DOI (don't recurse through entire function)
+                    retry_value = input("Enter DOI again: ").strip()
+                    if retry_value:
+                        is_valid, cleaned_doi, reason = validator.validate_doi(retry_value)
+                        if is_valid and cleaned_doi:
+                            edited['doi'] = cleaned_doi
+                            print(f"✅ Valid DOI: {cleaned_doi}")
+                        else:
+                            print(f"❌ {reason} - skipping DOI")
+                # Otherwise keep original or empty
         elif online_metadata and online_metadata.get('doi') and not edited.get('doi'):
             edited['doi'] = online_metadata['doi']
             print(f"✅ Auto-filled from online: {online_metadata['doi']}")
@@ -2572,6 +2687,41 @@ class PaperProcessorDaemon:
             f.write(str(os.getpid()))
         self.logger.debug(f"PID file written: {self.pid_file}")
     
+    def _check_existing_instance(self) -> bool:
+        """Return True and exit gracefully if a running instance is detected.
+        
+        Behavior:
+        - If PID file exists and PID is alive, print message and exit(0)
+        - If PID file exists but PID is stale, remove PID file and continue
+        - If no PID file, continue
+        """
+        try:
+            if self.pid_file.exists():
+                try:
+                    existing_pid_str = self.pid_file.read_text().strip()
+                    existing_pid = int(existing_pid_str)
+                except Exception:
+                    # Corrupt PID file; remove and continue
+                    self.pid_file.unlink(missing_ok=True)
+                    return False
+                
+                # Check if process is alive
+                try:
+                    os.kill(existing_pid, 0)
+                    # Quiet: no console output; log at debug only
+                    if self.debug:
+                        self.logger.debug(f"Daemon already running (PID {existing_pid}). Exiting launcher.")
+                    sys.exit(0)
+                except Exception:
+                    # Stale PID; remove and continue
+                    self.logger.warning("Stale PID file found. Removing and starting new instance.")
+                    self.pid_file.unlink(missing_ok=True)
+                    return False
+        except Exception:
+            # On any unexpected error, continue without blocking startup
+            return False
+        return False
+
     def remove_pid_file(self):
         """Remove PID file on shutdown."""
         if self.pid_file.exists():
@@ -2589,6 +2739,10 @@ class PaperProcessorDaemon:
         """
         # Only process files with academic paper prefixes
         prefixes = ['NO_', 'EN_', 'DE_']
+        name_lower = filename.lower()
+        # Ignore our own generated split artifacts to prevent double-processing
+        if name_lower.endswith('_split.pdf'):
+            return False
         return any(filename.startswith(p) for p in prefixes)
     
     def process_paper(self, pdf_path: Path):
@@ -2598,14 +2752,33 @@ class PaperProcessorDaemon:
             pdf_path: Path to PDF file
         """
         self.logger.info(f"New scan: {pdf_path.name}")
+        # Remember the original scan path for final move operations
+        self._original_scan_path = Path(pdf_path)
         
         try:
             # Step 1: Extract metadata
             self.logger.info("Extracting metadata...")
             
-            # Try GROBID first (fast and accurate)
-            if self.grobid_ready:
-                self.logger.info("Using GROBID for metadata extraction...")
+            # Step 1a: Try GREP first (fast identifier extraction + API lookup)
+            # This is much faster (2-4 seconds) when identifiers are found
+            self.logger.info("Step 1: Trying fast GREP identifier extraction + API lookup...")
+            result = self.metadata_processor.process_pdf(pdf_path, use_ollama_fallback=False)
+            
+            # Check if we got metadata with authors from GREP + API
+            has_metadata = result.get('success') and result.get('metadata')
+            has_authors = has_metadata and result['metadata'].get('authors')
+            
+            # Step 1b: If GREP + API succeeded, we're done (fast path)
+            if has_authors:
+                method = result.get('method', 'unknown')
+                self.logger.info(f"✅ Fast path succeeded via {method}: {len(result['metadata'].get('authors', []))} authors")
+            
+            # Step 2: Fallback to GROBID if:
+            # - No metadata found, OR
+            # - No authors found, OR
+            # - API lookup returned no results
+            elif not has_authors and self.grobid_ready:
+                self.logger.info("Step 2: No identifiers found or API lookup failed - trying GROBID...")
                 metadata = self.grobid_client.extract_metadata(pdf_path)
                 
                 if metadata and metadata.get('authors'):
@@ -2614,21 +2787,15 @@ class PaperProcessorDaemon:
                         'success': True,
                         'metadata': metadata,
                         'method': 'grobid',
-                        'processing_time_seconds': 0  # GROBID is fast
+                        'processing_time_seconds': 0  # GROBID timing not tracked here
                     }
                     self.logger.info(f"✅ GROBID extracted: {len(metadata.get('authors', []))} authors")
                 else:
-                    # GROBID failed - try other methods
-                    self.logger.info("GROBID failed - trying other extraction methods...")
-                    result = self.metadata_processor.process_pdf(pdf_path, use_ollama_fallback=False)
-            else:
-                # GROBID not available - use other methods
-                self.logger.info("GROBID not available - using other extraction methods...")
-                result = self.metadata_processor.process_pdf(pdf_path, use_ollama_fallback=False)
+                    self.logger.info("GROBID did not find authors")
             
-            # If still no authors found, try Ollama as last resort
-            if not result['success'] or not result.get('metadata', {}).get('authors'):
-                self.logger.info("No authors found - trying Ollama as last resort...")
+            # Step 3: Last resort - try Ollama if still no authors
+            if not result.get('success') or not result.get('metadata', {}).get('authors'):
+                self.logger.info("Step 3: No authors found from GREP/API/GROBID - trying Ollama as last resort...")
                 if self._ensure_ollama_ready():
                     # Try with Ollama fallback
                     ollama_result = self.metadata_processor.process_pdf(pdf_path, use_ollama_fallback=True, 
@@ -2649,8 +2816,18 @@ class PaperProcessorDaemon:
                 
                 # Filter garbage authors (keeps only known authors when extraction is poor)
                 metadata = self.filter_garbage_authors(metadata)
+
+                # Prompt for year BEFORE document type, so numeric input isn't misrouted
+                metadata = self.prompt_for_year(metadata)
                 
-                # Confirm/select document type early (before display and manual entry)
+                # Check if JSTOR ID was found - automatically set as journal article
+                identifiers = result.get('identifiers_found', {})
+                if identifiers.get('jstor_ids') and not metadata.get('document_type'):
+                    metadata['document_type'] = 'journal_article'
+                    self.logger.info("JSTOR ID detected - automatically set as journal article")
+                    print("ℹ️  JSTOR ID detected - treating as journal article")
+                
+                # Confirm/select document type early (after year entry)
                 metadata = self.confirm_document_type_early(metadata)
                 if metadata is None:
                     # User cancelled
@@ -2679,6 +2856,7 @@ class PaperProcessorDaemon:
             action = 'none'
             selected_item = None
             updated_metadata = metadata.copy()  # Track any edits made during search
+            should_restart_search = False
             
             if self.local_zotero:
                 while True:
@@ -2701,16 +2879,19 @@ class PaperProcessorDaemon:
                 # User selected an item - offer to attach PDF
                 self.handle_item_selected(pdf_path, updated_metadata, selected_item)
             elif action == 'search':
-                # User wants to search again - recursive call
+                # User wants to search again - reset authors to full set if available, then recursive call
+                if updated_metadata.get('_all_authors'):
+                    updated_metadata['authors'] = updated_metadata['_all_authors'].copy()
                 action2, selected_item2, updated_metadata = self.search_and_display_local_zotero(updated_metadata)
                 if action2 == 'select' and selected_item2:
-                    self.handle_item_selected(pdf_path, updated_metadata, selected_item2)
+                    result = self.handle_item_selected(pdf_path, updated_metadata, selected_item2)
+                    # Note: if user wants to go back, handle_item_selected already moved the file appropriately
                 elif action2 == 'back' or action2 == 'restart':
                     # User went back during search - restart
                     print("⬅️  Going back to manual processing...")
                     self.move_to_manual_review(pdf_path)
                 elif action2 == 'quit':
-                    self.stop()
+                    print("🔚 Exiting current processing per user request")
                     return
                 # Handle other actions from second search if needed
             elif action == 'edit':
@@ -2724,7 +2905,8 @@ class PaperProcessorDaemon:
                     action2, selected_item2, final_metadata = self.search_and_display_local_zotero(edited_metadata)
                     
                     if action2 == 'select' and selected_item2:
-                        self.handle_item_selected(pdf_path, final_metadata, selected_item2)
+                        result = self.handle_item_selected(pdf_path, final_metadata, selected_item2)
+                        # Note: if user wants to go back, handle_item_selected already moved the file appropriately
                     elif action2 == 'create':
                         # User wants to create new item after editing
                         success = self.handle_create_new_item(pdf_path, final_metadata)
@@ -2734,7 +2916,7 @@ class PaperProcessorDaemon:
                         print("⬅️  Going back...")
                         self.move_to_manual_review(pdf_path)
                     elif action2 == 'quit':
-                        self.stop()
+                        print("🔚 Exiting current processing per user request")
                         return
                     else:
                         # No action or skip
@@ -2754,8 +2936,8 @@ class PaperProcessorDaemon:
                 # User wants to skip this document
                 self.move_to_skipped(pdf_path)
             elif action == 'quit':
-                # User wants to quit daemon
-                self.stop()
+                # User wants to quit current processing
+                print("🔚 Exiting current processing per user request")
                 return
             else:  # action == 'none' or unknown
                 # No matches found - move to manual
@@ -3033,11 +3215,15 @@ class PaperProcessorDaemon:
         Args:
             pdf_path: PDF to move
         """
+        # Prefer moving the original scan if available
+        src = getattr(self, '_original_scan_path', None)
+        if src is None or not Path(src).exists():
+            src = pdf_path
         done_dir = self.watch_dir / "done"
         done_dir.mkdir(exist_ok=True)
         
-        dest = done_dir / pdf_path.name
-        shutil.move(str(pdf_path), str(dest))
+        dest = done_dir / Path(src).name
+        shutil.move(str(src), str(dest))
         self.logger.debug(f"Moved to done/")
     
     def move_to_failed(self, pdf_path: Path):
@@ -3046,11 +3232,15 @@ class PaperProcessorDaemon:
         Args:
             pdf_path: PDF to move
         """
+        # Prefer moving the original scan if available
+        src = getattr(self, '_original_scan_path', None)
+        if src is None or not Path(src).exists():
+            src = pdf_path
         failed_dir = self.watch_dir / "failed"
         failed_dir.mkdir(exist_ok=True)
         
-        dest = failed_dir / pdf_path.name
-        shutil.move(str(pdf_path), str(dest))
+        dest = failed_dir / Path(src).name
+        shutil.move(str(src), str(dest))
         self.logger.info(f"Moved to failed/")
     
     def move_to_skipped(self, pdf_path: Path):
@@ -3059,15 +3249,175 @@ class PaperProcessorDaemon:
         Args:
             pdf_path: PDF to move
         """
+        # Prefer moving the original scan if available
+        src = getattr(self, '_original_scan_path', None)
+        if src is None or not Path(src).exists():
+            src = pdf_path
         skipped_dir = self.watch_dir / "skipped"
         skipped_dir.mkdir(exist_ok=True)
         
-        dest = skipped_dir / pdf_path.name
-        shutil.move(str(pdf_path), str(dest))
+        dest = skipped_dir / Path(src).name
+        shutil.move(str(src), str(dest))
         self.logger.info(f"Moved to skipped/")
+    
+    # ------------------------
+    # Two-up split pre-processing
+    # ------------------------
+    def _preprocess_split_if_needed(self, pdf_path: Path) -> Optional[Path]:
+        """Detect and split two-up pages when appropriate.
+        
+        Rules:
+        - If filename ends with _double.pdf: split unconditionally and return new path
+        - Else if page is wide (AR > 1.3): run gutter/spine detector on page 1
+          - If likely two-up: prompt user to split; if yes, split and return new path
+        - Otherwise: return None
+        """
+        name = pdf_path.name.lower()
+        try:
+            import pdfplumber
+        except Exception:
+            # If pdfplumber not available, only honor _double.pdf
+            if name.endswith('_double.pdf'):
+                return self._split_with_mutool(pdf_path)
+            return None
+        
+        # Obtain first page size to evaluate aspect ratio
+        try:
+            with pdfplumber.open(str(pdf_path)) as pdf:
+                if len(pdf.pages) == 0:
+                    return None
+                first = pdf.pages[0]
+                width, height = first.width, first.height
+        except Exception:
+            width = height = 0
+        
+        # Unconditional split by filename suffix
+        if name.endswith('_double.pdf'):
+            self.logger.info("Auto-splitting due to filename suffix _double.pdf")
+            return self._split_with_mutool(pdf_path, width=width, height=height)
+        
+        # Aspect ratio pre-filter
+        if width and height and width / max(1.0, height) > 1.3:
+            # Run lightweight two-up detection
+            try:
+                is_two_up, score, mode = self._detect_two_up_page(pdf_path)
+            except Exception as e:
+                self.logger.debug(f"Two-up detection failed: {e}")
+                is_two_up, score, mode = (False, 0.0, 'none')
+            
+            if is_two_up:
+                print("\nTwo-up candidate detected:")
+                print(f"  Aspect ratio: {width/height:.2f}")
+                print(f"  Center structure: {mode} score={score:.2f}")
+                choice = input("Split this file into single pages? [y/n]: ").strip().lower()
+                if choice == 'y':
+                    return self._split_with_mutool(pdf_path, width=width, height=height)
+        
+        return None
+    
+    def _detect_two_up_page(self, pdf_path: Path) -> tuple[bool, float, str]:
+        """Heuristic detection of two-up layout on page 1.
+        Returns (is_two_up, score, mode) where mode is 'gutter' or 'spine'.
+        Uses pdfplumber to sample text density across vertical columns.
+        """
+        import pdfplumber
+        import math
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            page = pdf.pages[0]
+            W, H = page.width, page.height
+            # sample N columns across width, count characters per column
+            N = 48
+            column_counts = [0] * N
+            for char in page.chars or []:
+                x = char.get('x0', 0)
+                idx = min(N - 1, max(0, int((x / max(1.0, W)) * N)))
+                column_counts[idx] += 1
+            # if no chars detected, fall back to not splitting
+            total = sum(column_counts)
+            if total < 20:
+                return (False, 0.0, 'none')
+            
+            # smooth with small window
+            smoothed = []
+            win = 3
+            for i in range(N):
+                s = 0
+                c = 0
+                for j in range(i - win, i + win + 1):
+                    if 0 <= j < N:
+                        s += column_counts[j]
+                        c += 1
+                smoothed.append(s / max(1, c))
+            
+            # left/right averages and center band stats
+            L = smoothed[: int(N * 0.3)]
+            R = smoothed[int(N * 0.7) :]
+            C = smoothed[int(N * 0.45) : int(N * 0.55)]
+            Lavg = sum(L) / max(1, len(L))
+            Ravg = sum(R) / max(1, len(R))
+            Cavg = sum(C) / max(1, len(C))
+            
+            # balance check
+            lr_ratio = (Lavg + 1e-6) / (Ravg + 1e-6)
+            if lr_ratio < 0.5 or lr_ratio > 2.0:
+                return (False, 0.0, 'none')
+            
+            # gutter (valley) criterion
+            gutter = Cavg < 0.4 * min(Lavg, Ravg)
+            # spine (peak) criterion: we approximate by peak-to-side ratio using raw center max
+            Cmax = max(C) if C else 0.0
+            spine = Cmax > 1.6 * max(Lavg, Ravg)
+            
+            if gutter:
+                score = (min(Lavg, Ravg) - Cavg) / (min(Lavg, Ravg) + 1e-6)
+                return (True, max(0.0, score), 'gutter')
+            if spine:
+                score = (Cmax - max(Lavg, Ravg)) / (max(Lavg, Ravg) + 1e-6)
+                return (True, max(0.0, score), 'spine')
+            return (False, 0.0, 'none')
+    
+    def _split_with_mutool(self, pdf_path: Path, width: Optional[float] = None, height: Optional[float] = None) -> Optional[Path]:
+        """Split a two-up PDF using mutool poster and return path to the split file.
+        Creates split in temp directory to avoid cluttering watch directory.
+        """
+        try:
+            if width is None or height is None:
+                try:
+                    import pdfplumber
+                    with pdfplumber.open(str(pdf_path)) as pdf:
+                        if len(pdf.pages) > 0:
+                            width, height = pdf.pages[0].width, pdf.pages[0].height
+                except Exception:
+                    width = height = 0
+            x, y = (2, 1) if (width and height and width > height) else (1, 2)
+            # Create split in temp directory to avoid cluttering watch directory
+            import tempfile
+            temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            out_path = temp_dir / f"{pdf_path.stem}_split.pdf"
+            cmd = [
+                'mutool', 'poster', '-x', str(x), '-y', str(y),
+                str(pdf_path), str(out_path)
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                self.logger.error(f"mutool poster failed: {result.stderr.strip()}")
+                return None
+            # Use split file for downstream processing
+            self.logger.info(f"Split PDF created: {out_path.name}")
+            return out_path
+        except FileNotFoundError:
+            self.logger.warning("mutool not found; skipping two-up split")
+            return None
+        except Exception as e:
+            self.logger.error(f"Split failed: {e}")
+            return None
     
     def start(self):
         """Start the daemon."""
+        # Single-instance guard
+        self._check_existing_instance()
+        
         # Write PID file
         self.write_pid_file()
         
@@ -3524,11 +3874,15 @@ class PaperProcessorDaemon:
     
     def move_to_manual_review(self, pdf_path: Path):
         """Move PDF to manual review directory."""
+        # Prefer moving the original scan if available
+        src = getattr(self, '_original_scan_path', None)
+        if src is None or not Path(src).exists():
+            src = pdf_path
         manual_dir = self.watch_dir / "manual_review"
         manual_dir.mkdir(exist_ok=True)
         
-        dest = manual_dir / pdf_path.name
-        shutil.move(str(pdf_path), str(dest))
+        dest = manual_dir / Path(src).name
+        shutil.move(str(src), str(dest))
         self.logger.info(f"Moved to manual review: {dest}")
         print(f"📝 Moved to manual review: {dest}")
     
@@ -3547,11 +3901,23 @@ class PaperProcessorDaemon:
         # Get author info (paper counts) if validator available
         author_info = []
         for author in authors:
-            info = {'name': author, 'paper_count': 0}
+            info = {'name': author, 'paper_count': 0, 'recognized': False, 'recognized_as': None}
             if self.author_validator:
                 author_data = self.author_validator.get_author_info(author)
                 if author_data:
                     info['paper_count'] = author_data.get('paper_count', 0)
+                    info['recognized'] = True
+                    info['recognized_as'] = author_data.get('name')
+                else:
+                    # Try OCR correction / alternatives match
+                    try:
+                        suggestion = self.author_validator.suggest_ocr_correction(author)
+                        if suggestion:
+                            info['recognized'] = True
+                            info['recognized_as'] = suggestion.get('corrected_name')
+                            info['paper_count'] = suggestion.get('paper_count', 0)
+                    except Exception:
+                        pass
             author_info.append(info)
         
         # Display authors with letter labels
@@ -3568,7 +3934,12 @@ class PaperProcessorDaemon:
                 letter = letters[i]
                 author_map[letter] = info['name']
                 if info['paper_count'] > 0:
-                    papers_str = f"({info['paper_count']} papers in Zotero)"
+                    papers_str = f"(in Zotero: {info['paper_count']} publications)"
+                elif info['recognized']:
+                    if info['recognized_as'] and info['recognized_as'] != info['name']:
+                        papers_str = f"(in Zotero as '{info['recognized_as']}', 0 publications found)"
+                    else:
+                        papers_str = "(in Zotero, 0 publications found)"
                 else:
                     papers_str = "(not in Zotero)"
                 print(f"  [{letter}] {info['name']} {papers_str}")
@@ -3584,13 +3955,14 @@ class PaperProcessorDaemon:
             print("  'z'   = Back to previous step")
             print("  'r'   = Restart from beginning")
             
-            selection = input("\nYour selection: ").strip().lower()
+            selection = input("\nYour selection (letters like 'a', 'ab', 'all', or commands e/n/z/r): ").strip()
+            selection_lower = selection.lower()
             
-            if selection == 'z':
+            if selection_lower == 'z':
                 return 'BACK'
-            elif selection == 'r':
+            elif selection_lower == 'r':
                 return 'RESTART'
-            elif selection == 'e':
+            elif selection_lower == 'e':
                 # Edit an author
                 if not author_info:
                     print("⚠️  No authors to edit")
@@ -3623,7 +3995,7 @@ class PaperProcessorDaemon:
                     print(f"⚠️  Invalid selection")
                 print()  # Blank line before showing list again
                 continue
-            elif selection == 'n':
+            elif selection_lower == 'n':
                 # Add new author
                 new_author = input("\nEnter new author name: ").strip()
                 if new_author:
@@ -3639,20 +4011,32 @@ class PaperProcessorDaemon:
                     print("⚠️  No author name entered")
                 print()  # Blank line before showing list again
                 continue
-            elif not selection or selection == '':
+            elif not selection or selection_lower == '':
                 # Use all authors - return the updated list from author_info
                 all_authors = [info['name'] for info in author_info]
                 return all_authors
-            elif selection == 'all':
+            elif selection_lower == 'all':
                 # Return all for unordered search - return updated list
                 all_authors = [info['name'] for info in author_info]
                 return all_authors
             else:
                 # Parse selection (e.g., "ab" or "bac")
                 selected_authors = []
+                # If user typed option digits here by mistake, guide them
+                if selection_lower.isdigit():
+                    print("⚠️  This menu uses letters (e.g., 'a' or 'ab'). For numeric options (1-4), respond in the previous options prompt.")
+                # Support typing a last name directly (e.g., "Hochschild"): only for length >= 3
+                else:
+                    # Try to resolve direct text to an author by last name match
+                    direct = selection_lower.strip()
+                    if direct and len(direct) >= 3:
+                        for info in author_info:
+                            last = info['name'].split(',')[0].split()[-1].lower()
+                            if last == direct or direct in last:
+                                return [info['name']]
                 for char in selection:
-                    if char in author_map:
-                        selected_authors.append(author_map[char])
+                    if char.lower() in author_map:
+                        selected_authors.append(author_map[char.lower()])
                     else:
                         print(f"⚠️  Ignoring invalid selection: '{char}'")
                 
@@ -3681,6 +4065,8 @@ class PaperProcessorDaemon:
             return ('none', None)
         
         print(f"\n✅ Found {len(matches)} potential match(es) {search_info}:")
+        print()
+        print("NOTE: All items shown below already exist in your Zotero library.")
         print()
         
         # Display items with letter labels
@@ -3711,6 +4097,31 @@ class PaperProcessorDaemon:
             has_pdf = match.get('has_attachment', match.get('hasAttachment', False))
             pdf_icon = '✅' if has_pdf else '❌'
             print(f"      Year: {year}  |  PDF: {pdf_icon}")
+            
+            # Show container info (journal/book/conference) based on document type
+            container_info = match.get('container_info')
+            if container_info and container_info.get('value'):
+                label = container_info.get('label', 'Publication')
+                value = container_info['value']
+                print(f"      {label}: {value}")
+            else:
+                # Fallback to journal field for backward compatibility
+                journal = match.get('journal')
+                if journal:
+                    print(f"      Journal: {journal}")
+            
+            # Show DOI if available
+            doi = match.get('doi')
+            if doi:
+                print(f"      DOI: {doi}")
+            
+            # Show abstract preview if available (first 150 chars)
+            abstract = match.get('abstract')
+            if abstract:
+                abstract_preview = abstract[:150] if len(abstract) > 150 else abstract
+                if len(abstract) > 150:
+                    abstract_preview += "..."
+                print(f"      Abstract: {abstract_preview}")
             
             # Show match quality if available
             if 'order_score' in match and match['order_score'] > 0:
@@ -4483,7 +4894,7 @@ class PaperProcessorDaemon:
     def handle_item_selected(self, pdf_path: Path, metadata: dict, selected_item: dict):
         """Handle user selecting a Zotero item.
         
-        Shows PDF comparison (if existing), proposed actions, and asks for confirmation.
+        Shows metadata review, then PDF comparison (if existing), proposed actions, and asks for confirmation.
         
         Args:
             pdf_path: Path to scanned PDF
@@ -4493,26 +4904,37 @@ class PaperProcessorDaemon:
         title = selected_item.get('title', 'Unknown')
         has_pdf = selected_item.get('has_attachment', selected_item.get('hasAttachment', False))
         
-        print(f"\n✅ Selected: {title}")
+        print(f"\n✅ Selected: {title}\n")
         
-        # Extract authors from Zotero item (may be in 'authors' or 'creators' field)
-        zotero_authors = selected_item.get('authors', [])
-        if not zotero_authors and 'creators' in selected_item:
-            # Extract authors from creators list
-            zotero_authors = []
-            for creator in selected_item['creators']:
-                if creator.get('creatorType') == 'author':
-                    first = creator.get('firstName', '')
-                    last = creator.get('lastName', '')
-                    if first and last:
-                        zotero_authors.append(f"{first} {last}")
-                    elif last:
-                        zotero_authors.append(last)
+        # Show detailed metadata and give option to review/edit before proceeding
+        self._display_zotero_item_details(selected_item)
         
-        # Display authors
-        if zotero_authors:
-            author_str = '; '.join(zotero_authors)
-            print(f"Authors: {author_str}")
+        # Ask if user wants to review/approve or go back
+        print("\n" + "="*70)
+        print("REVIEW & PROCEED")
+        print("="*70)
+        print("  (y/Enter) Proceed with attaching PDF to this item")
+        print("  (e) Edit metadata in Zotero first")
+        print("  (z) Go back to item selection")
+        print("="*70)
+        
+        while True:
+            choice = input("\nProceed or edit? [y/e/z]: ").strip().lower()
+            
+            if choice == 'z':
+                print("⬅️  Going back to item selection")
+                return
+            elif choice == 'e':
+                # User wants to edit - notify and exit
+                print("ℹ️  Please edit this item in Zotero, then process the scan again")
+                self.move_to_manual_review(pdf_path)
+                return
+            elif choice == 'y' or choice == '':
+                # Continue with attachment
+                break
+            else:
+                print("⚠️  Invalid choice. Please enter 'y' to proceed, 'e' to edit, or 'z' to go back.")
+        
         print()
         
         # Get scan file info
@@ -4522,7 +4944,8 @@ class PaperProcessorDaemon:
         # When attaching to existing Zotero item, Zotero metadata is canonical
         # Fallback to scan metadata only causes incorrect filenames like "P_et_al_Unknown_..."
         
-        # Extract metadata from Zotero item
+        # Extract metadata from Zotero item (authors already extracted in _display_zotero_item_details)
+        zotero_authors = selected_item.get('authors', [])
         zotero_title = selected_item.get('title', '')
         zotero_year = selected_item.get('year', selected_item.get('date', ''))
         zotero_item_type = selected_item.get('itemType', 'journalArticle')
@@ -4589,15 +5012,23 @@ class PaperProcessorDaemon:
         print(f"  4. Move scan to: done/")
         print("="*70)
         print()
+        print("  (y) Proceed with all actions")
+        print("  (n) Cancel - move to manual review")
+        print("  (skip) Move to manual review")
+        print("  (z) Go back to item selection")
+        print()
         
         # Ask for confirmation
-        confirm = input("Proceed with these actions? [y/n/skip]: ").strip().lower()
+        confirm = input("Proceed with these actions? [y/n/skip/z]: ").strip().lower()
         
         if confirm == 'y' or confirm == 'yes':
             # Execute the actions
             self._process_selected_item(pdf_path, selected_item, target_filename, metadata)
         elif confirm == 'skip' or confirm == 's':
             print("📝 Moving to manual review")
+            self.move_to_manual_review(pdf_path)
+        elif confirm == 'z':
+            print("⬅️  Going back to item selection")
             self.move_to_manual_review(pdf_path)
         else:
             print("❌ Cancelled - moving to manual review")
@@ -4607,10 +5038,11 @@ class PaperProcessorDaemon:
         """Process selected Zotero item: copy PDF and attach.
         
         Steps:
-        1. Copy PDF to publications directory (via PowerShell)
-        2. Attach as linked file in Zotero
-        3. Update URL field if missing and available
-        4. Move scan to done/
+        1. Check if PDF should be split for Zotero attachment
+        2. Copy PDF to publications directory (via PowerShell)
+        3. Attach as linked file in Zotero
+        4. Update URL field if missing and available
+        5. Move scan to done/
         
         Args:
             pdf_path: Path to scanned PDF
@@ -4618,7 +5050,7 @@ class PaperProcessorDaemon:
             target_filename: Generated filename for publications dir
             metadata: Extracted metadata (optional, may contain URL to add)
         """
-        item_key = zotero_item.get('key')
+        item_key = zotero_item.get('key') or zotero_item.get('item_key')
         if not item_key:
             print("❌ No item key found")
             self.move_to_failed(pdf_path)
@@ -4626,9 +5058,48 @@ class PaperProcessorDaemon:
         
         print("\n📋 Executing actions...")
         
-        # Step 1: Copy to publications directory via PowerShell
-        print(f"1/3 Copying to publications directory...")
-        success, target_path, error = self._copy_to_publications_via_windows(pdf_path, target_filename)
+        # Step 1: Determine which PDF to use (original or split)
+        pdf_to_copy = pdf_path
+        name_lower = pdf_path.name.lower()
+        
+        if name_lower.endswith('_double.pdf'):
+            # Always split on _double.pdf
+            print(f"1/4 Preparing split for two-up file...")
+            split_result = self._split_with_mutool(pdf_path)
+            if split_result:
+                pdf_to_copy = split_result
+                self.logger.info(f"Using split version for Zotero: {split_result.name}")
+            else:
+                print("⚠️  Splitting the PDF did fail. Using the original in landscape format.")
+        else:
+            # Check if we should prompt for split on wide pages
+            try:
+                import pdfplumber
+                with pdfplumber.open(str(pdf_path)) as pdf:
+                    if len(pdf.pages) > 0:
+                        first = pdf.pages[0]
+                        width, height = first.width, first.height
+                        if width and height and width / max(1.0, height) > 1.3:
+                            is_two_up, score, mode = self._detect_two_up_page(pdf_path)
+                            if is_two_up:
+                                print("\nTwo-up candidate detected:")
+                                print(f"  Aspect ratio: {width/height:.2f}")
+                                print(f"  Center structure: {mode} score={score:.2f}")
+                                choice = input("Split this file into single pages before attaching to Zotero? [y/N]: ").strip().lower()
+                                if choice == 'y':
+                                    split_result = self._split_with_mutool(pdf_path, width=width, height=height)
+                                    if split_result:
+                                        pdf_to_copy = split_result
+                                        self.logger.info(f"Using split version for Zotero: {split_result.name}")
+                                    else:
+                                        print("⚠️  Splitting the PDF did fail. Using the original in landscape format.")
+            except Exception as e:
+                self.logger.debug(f"Two-up detection skipped: {e}")
+                pass
+        
+        # Step 2: Copy to publications directory via PowerShell
+        print(f"2/4 Copying to publications directory...")
+        success, target_path, error = self._copy_to_publications_via_windows(pdf_to_copy, target_filename)
         
         if not success:
             print(f"❌ Copy failed: {error}")
@@ -4638,8 +5109,8 @@ class PaperProcessorDaemon:
         
         print(f"✅ Copied to: {target_path.name}")
         
-        # Step 2: Attach to Zotero as linked file
-        print(f"2/3 Attaching to Zotero item...")
+        # Step 3: Attach to Zotero as linked file
+        print(f"3/4 Attaching to Zotero item...")
         self.logger.info(f"Attaching {target_path.name} to Zotero item {item_key}")
         
         try:
@@ -4657,7 +5128,7 @@ class PaperProcessorDaemon:
             # Update URL field if metadata has URL and item doesn't have it yet
             if metadata and metadata.get('url'):
                 url = metadata['url']
-                print(f"2b/3 Updating URL field if missing...")
+                print(f"3b/4 Updating URL field if missing...")
                 url_updated = self.zotero_processor.update_item_field_if_missing(item_key, 'url', url)
                 if url_updated:
                     print(f"✅ URL updated: {url}")
@@ -4672,8 +5143,8 @@ class PaperProcessorDaemon:
             self.move_to_manual_review(pdf_path)
             return
         
-        # Step 3: Move scan to done/
-        print(f"3/3 Moving scan to done/...")
+        # Step 4: Move scan to done/
+        print(f"4/4 Moving scan to done/...")
         try:
             done_dir = pdf_path.parent / 'done'
             done_dir.mkdir(exist_ok=True)
@@ -4691,6 +5162,81 @@ class PaperProcessorDaemon:
         print(f"   📁 Publications: {target_path.name}")
         print(f"   📚 Zotero: Linked file attached")
         print(f"   ✅ Scan: Moved to done/")
+    
+    def _display_zotero_item_details(self, zotero_item: dict):
+        """Display detailed information about a Zotero item for review.
+        
+        Also ensures 'authors' field is populated for later use.
+        
+        Args:
+            zotero_item: Zotero item dict
+        """
+        # Extract authors if not already in 'authors' field
+        authors = zotero_item.get('authors', [])
+        if not authors and 'creators' in zotero_item:
+            authors = []
+            for creator in zotero_item['creators']:
+                if creator.get('creatorType') == 'author':
+                    first = creator.get('firstName', '')
+                    last = creator.get('lastName', '')
+                    if first and last:
+                        authors.append(f"{first} {last}")
+                    elif last:
+                        authors.append(last)
+            # Store in zotero_item for later use
+            zotero_item['authors'] = authors
+        
+        print("\n" + "="*70)
+        print("📚 ZOTERO ITEM DETAILS:")
+        print("="*70)
+        
+        # Title
+        title = zotero_item.get('title', 'Unknown')
+        print(f"Title: {title}")
+        
+        # Journal/Publication
+        container_info = zotero_item.get('container_info')
+        if container_info and container_info.get('value'):
+            print(f"Journal: {container_info['value']}")
+        elif zotero_item.get('journal'):
+            print(f"Journal: {zotero_item['journal']}")
+        
+        # Authors
+        if authors:
+            author_str = '; '.join(authors)
+            print(f"Authors: {author_str}")
+        
+        # Year
+        year = zotero_item.get('year', zotero_item.get('date', 'Unknown'))
+        print(f"Year: {year}")
+        
+        # DOI
+        doi = zotero_item.get('doi')
+        if doi:
+            print(f"DOI: {doi}")
+        
+        # Abstract
+        abstract = zotero_item.get('abstract')
+        if abstract:
+            abstract_preview = abstract[:150] if len(abstract) > 150 else abstract
+            if len(abstract) > 150:
+                abstract_preview += "..."
+            print(f"Abstract: {abstract_preview}")
+        
+        # Tags (detailed display)
+        tags = zotero_item.get('tags', [])
+        if tags:
+            print(f"\nTags ({len(tags)}):")
+            # Show tags in multiple columns if many
+            tag_lines = []
+            for i in range(0, len(tags), 3):
+                chunk = tags[i:i+3]
+                tag_lines.append("  " + " | ".join(chunk))
+            print("\n".join(tag_lines))
+        else:
+            print("\nTags: (none)")
+        
+        print("="*70)
     
     def _get_existing_pdf_info(self, zotero_item: dict) -> dict:
         """Get information about existing PDF attachment in Zotero item.
@@ -4891,9 +5437,16 @@ def normalize_path_for_wsl(path_str: str) -> str:
 def main():
     """Main entry point."""
     import argparse
+    import signal
+    import time
+    import subprocess
     
     parser = argparse.ArgumentParser(description="Paper processor daemon")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--status", action="store_true", help="Show daemon status and exit")
+    parser.add_argument("--stop", action="store_true", help="Stop daemon and exit")
+    parser.add_argument("--force-stop", action="store_true", help="Force stop daemon and exit")
+    parser.add_argument("--restart", action="store_true", help="Restart daemon")
     args = parser.parse_args()
     
     # Get watch directory from config
@@ -4912,6 +5465,105 @@ def main():
     if not watch_dir.exists():
         print(f"Error: Watch directory not found: {watch_dir}")
         sys.exit(1)
+
+    pid_file = watch_dir / ".daemon.pid"
+
+    def _read_pid() -> Optional[int]:
+        try:
+            if pid_file.exists():
+                return int(pid_file.read_text().strip())
+        except Exception:
+            return None
+        return None
+
+    def _is_alive(pid: Optional[int]) -> bool:
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return False
+
+    def _stop_graceful(timeout_seconds: int = 8) -> bool:
+        pid = _read_pid()
+        if not _is_alive(pid):
+            # Try pkill fallback if no pid file but process may exist
+            try:
+                # Find matching PIDs and avoid killing ourselves
+                out = subprocess.check_output(["pgrep", "-f", "scripts/paper_processor_daemon.py"], text=True)
+                current_pid = os.getpid()
+                for line in out.strip().splitlines():
+                    try:
+                        target = int(line.strip())
+                        if target != current_pid:
+                            try:
+                                os.kill(target, signal.SIGTERM)
+                            except Exception:
+                                pass
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            if pid_file.exists():
+                pid_file.unlink(missing_ok=True)
+            return True
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+        # wait
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            if not _is_alive(pid):
+                if pid_file.exists():
+                    pid_file.unlink(missing_ok=True)
+                return True
+            time.sleep(0.3)
+        # force
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+        time.sleep(0.2)
+        if not _is_alive(pid):
+            if pid_file.exists():
+                pid_file.unlink(missing_ok=True)
+            return True
+        return False
+
+    if args.status:
+        pid = _read_pid()
+        if _is_alive(pid):
+            print(f"running (PID {pid})")
+            sys.exit(0)
+        else:
+            # Clean stale pid file
+            if pid_file.exists():
+                pid_file.unlink(missing_ok=True)
+            print("not running")
+            sys.exit(1)
+
+    if args.stop:
+        ok = _stop_graceful()
+        print("stopped" if ok else "stop failed")
+        sys.exit(0 if ok else 1)
+
+    if args.force_stop:
+        # Kill any matching processes and clear pid file
+        try:
+            subprocess.run(["pkill", "-9", "-f", "scripts/paper_processor_daemon.py"], check=False)
+        except Exception:
+            pass
+        if pid_file.exists():
+            pid_file.unlink(missing_ok=True)
+        print("force-stopped")
+        sys.exit(0)
+    
+    if args.restart:
+        print("Stopping existing daemon (if any)...")
+        _stop_graceful()
+        print("Starting daemon...")
     
     daemon = PaperProcessorDaemon(watch_dir, debug=args.debug)
     daemon.start()

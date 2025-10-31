@@ -337,6 +337,7 @@ class PaperMetadataProcessor:
         
         print(f"  DOIs: {identifiers['dois']}")
         print(f"  arXiv IDs: {identifiers['arxiv_ids']}")
+        print(f"  JSTOR IDs: {identifiers['jstor_ids']}")
         print(f"  ISSNs: {identifiers['issns']}")
         print(f"  ISBNs: {identifiers['isbns']}")
         print(f"  URLs: {len(identifiers['urls'])} found")
@@ -379,6 +380,11 @@ class PaperMetadataProcessor:
             else:
                 print(f"  ❌ Invalid arXiv ID: {arxiv_id} - {reason}")
         
+        valid_jstor_ids = []
+        for jstor_id in identifiers['jstor_ids']:
+            print(f"  ✅ Valid JSTOR ID: {jstor_id}")
+            valid_jstor_ids.append(jstor_id)
+        
         # Step 3: Try API lookup if we have valid identifiers
         if valid_dois:
             print(f"\n🌐 Step 3: Fetching metadata from APIs (priority order)...")
@@ -416,6 +422,23 @@ class PaperMetadataProcessor:
             else:
                 print(f"  ❌ arXiv API returned no data for ID: {arxiv_id}")
         
+        elif valid_jstor_ids:
+            print(f"\n📚 Step 3: JSTOR ID found - treating as journal article")
+            jstor_id = valid_jstor_ids[0]
+            print(f"  JSTOR ID: {jstor_id}")
+            print(f"  ℹ️  JSTOR ID confirms this is a journal article")
+            print(f"  ℹ️  Continuing with GROBID or manual extraction for full metadata")
+            # Mark as successful extraction with journal article type
+            # Continue to GROBID or Ollama for full metadata extraction
+            result['method'] = 'jstor_identifier'
+            result['success'] = True
+            result['metadata'] = {
+                'document_type': 'journal_article',
+                'jstor_id': jstor_id
+            }
+            result['processing_time_seconds'] = time.time() - start_time
+            return result
+        
         elif valid_isbns:
             print(f"\n📚 Step 3: ISBN found - use existing book lookup workflow")
             # TODO: Integrate with existing book lookup system
@@ -428,7 +451,7 @@ class PaperMetadataProcessor:
         # Step 4: Check if we have URLs (news articles, blog posts, web content)
         has_urls = len(identifiers.get('urls', [])) > 0
         
-        if has_urls and not valid_dois and not valid_isbns:
+        if has_urls and not valid_dois and not valid_isbns and not valid_jstor_ids:
             # Analyze URLs to determine likely document type
             urls = identifiers.get('urls', [])
             institutional_domains = ['.edu', '.ac.', 'university', 'college', 'institute', 'ssrn.com', 'arxiv.org', 'repec.org']

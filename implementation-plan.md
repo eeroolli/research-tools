@@ -1,10 +1,37 @@
+## Daemon controls and stability (next steps)
+
+- Add CLI controls to `scripts/paper_processor_daemon.py`:
+  - `--status`: print running/not and PID; exit 0/1 accordingly
+  - `--stop`: read `.daemon.pid`, SIGTERM, wait N seconds, SIGKILL if needed; clear PID
+  - `--force-stop`: `pkill -f scripts/paper_processor_daemon.py`; clear PID
+  - `--restart`: stop + start
+
+- Harden shutdown path:
+  - Single `shutdown()` used by SIGINT/SIGTERM and menu exits
+  - Stop watcher/services, remove `.daemon.pid`, flush logs
+  - Add `atexit` fallback to remove `.daemon.pid`
+
+- Keep PID file accurate:
+  - Periodically (e.g., every 30s) rewrite `.daemon.pid` while running
+  - Log (debug) on write failure
+
+- Optional (WSL/DrvFS reliability):
+  - Auto-use `PollingObserver` when `watch_dir` is under `/mnt/*`
+  - Handle `on_moved` events as creates (common on Windows scanners)
+
+- Windows helper scripts:
+  - `scripts/stop_scanner_daemon.bat` → calls WSL `--stop`
+  - Optional VBS/PS1 with hidden window for quiet start/stop
+
+Notes:
+- Start with CLI stop/status for immediate operability; others can follow incrementally.
 # Research-Tools Implementation Plan
 
-Last updated: 2025-10-29
+Last updated: 2025-10-30
 Related spec: `IMPLEMENT_ATTACH_TO_EXISTING.md` (feature behavior)
 
 At a glance:
-- Completed: Paper daemon end-to-end, attach workflows, publications-first reuse, linked-path normalization, skip-attach, metadata editing workflow, config path normalization (Oct 29, 2025)
+- Completed: Paper daemon end-to-end, attach workflows, publications-first reuse, linked-path normalization, skip-attach, metadata editing workflow, config path normalization, JSTOR support, arXiv URL fixes, enhanced UX (Nov 30, 2025)
 - In Progress: Smart preprocessing/classification, sampling/validation, document profiler
 - Next: OpenAlex/PubMed integration, unified metadata manager, test harness expansion
 - Backlog: Local Zotero DB integration, advanced caching, hybrid photo pipeline, auto document-type detection (low priority)
@@ -12,7 +39,7 @@ At a glance:
 ## User-Centric Processing Stages (Single Flow View)
 
 1) Intake & Identification — DONE
-- Extract identifiers (DOI/URL/arXiv) via regex; quick local Zotero search by authors/year/title.
+- Extract identifiers (DOI/URL/arXiv/JSTOR) via regex; quick local Zotero search by authors/year/title.
 
 2) User Confirmation — DONE
 - User confirms document type (manual); selects/edits authors/title/year as needed.
@@ -99,6 +126,17 @@ At a glance:
 - OpenAlex API integration - DOI lookup and metadata search with CrossRef fallback
 - PubMed API integration - Complete with DOI lookup and metadata search
 - Config-driven API priority system - Users can customize API order in config.personal.conf
+- **Extraction flow optimization** - GREP-first approach (fast identifier extraction + API lookup) before GROBID fallback (2-4 seconds vs 5-10+ seconds for papers with DOIs)
+- **Centralized DOI normalization** - `IdentifierValidator.normalize_doi()` used by all API clients for consistent DOI cleaning
+- **Manual DOI entry in metadata editor** - Always available, independent of Zotero items, with validation and optional metadata fetching
+- **Tags display enhancement** - Tags fetched from Zotero database and displayed first when selecting existing items
+- **DOI OCR error handling** - Handles OCR variants like "DO!", "DO1", "DOl" in identifier extraction
+- **ISSN preference** - Online ISSN preferred over print ISSN when both exist
+- **JSTOR identifier extraction** - JSTOR stable URL IDs now extracted separately from generic URLs, automatically classified as journal articles
+- **arXiv URL misclassification fix** - Enhanced arXiv extraction with proximity checks and subject whitelist to prevent false positives (e.g., JSTOR URLs)
+- **Improved identifier separation** - JSTOR URLs excluded from generic URL extraction to prevent confusion and double-counting
+- **Enhanced Zotero item selection UX** - Added metadata review step before attachment with options to edit, proceed, or go back
+- **UX flow optimization** - Eliminated duplicate code in item selection, streamlined metadata display
 
 ### ❌ **Not Completed:**
 - Detailed migration tasks from `archive/AI_CHAT_DOCUMENTS.md` (Phases 2-4)
@@ -146,12 +184,12 @@ At a glance:
 #### 0.2 Smart Paper Processing System ✅
 *Optimized paper metadata extraction with validation*
 
-- [x] **Identifier Extraction** - Fast regex-based DOI/ISSN/ISBN/**arXiv ID**/URL extraction (1-2 seconds)
+- [x] **Identifier Extraction** - Fast regex-based DOI/ISSN/ISBN/**arXiv ID**/**JSTOR ID**/URL extraction (1-2 seconds)
 - [x] **Identifier Validation** - ISSN/ISBN checksum validation, DOI/arXiv/URL format validation, hallucination detection
 - [x] **CrossRef API Client** - Full Zotero fields: title, authors, journal, volume, issue, pages, abstract, tags
 - [x] **arXiv API Client** - Preprint metadata with categories, abstracts, DOI of published versions
 - [x] **Ollama Integration** - Fallback AI for papers without identifiers (available; low priority to use — GROBID sufficient for now)
-- [x] **Smart Workflow** - Priority: DOI → arXiv → ISBN → URL/Ollama → Nothing/Ollama
+- [x] **Smart Workflow** - Priority: DOI → arXiv → JSTOR → ISBN → URL/Ollama → Nothing/Ollama
 - [x] **Testing Framework** - pytest with 25 unit tests for validation
 - [x] **Performance** - 60-100x faster for papers with DOIs/arXiv IDs (1s vs 120-180s)
 - [x] **Code Organization** - Prototypes in `scripts/prototypes/`, production in `shared_tools/`, analysis in `scripts/analysis/`
