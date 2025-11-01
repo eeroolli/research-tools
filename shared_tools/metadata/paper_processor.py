@@ -303,6 +303,30 @@ class PaperMetadataProcessor:
         
         return unique_authors
     
+    def _detect_language_from_filename(self, pdf_path: Path) -> Optional[str]:
+        """Detect language from filename prefix (NO_, EN_, DE_, etc.)
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            Language code (NO, EN, DE, FI, SE) or None if not detected
+        """
+        filename = pdf_path.name.upper()
+        language_map = {
+            'NO_': 'NO',
+            'EN_': 'EN',
+            'DE_': 'DE',
+            'FI_': 'FI',
+            'SE_': 'SE'
+        }
+        
+        for prefix, lang_code in language_map.items():
+            if filename.startswith(prefix):
+                return lang_code
+        
+        return None
+    
     def process_pdf(self, pdf_path: Path, use_ollama_fallback: bool = True, progress_callback=None) -> Dict:
         """Process a PDF to extract metadata using smart workflow.
         
@@ -341,6 +365,10 @@ class PaperMetadataProcessor:
         print(f"  ISSNs: {identifiers['issns']}")
         print(f"  ISBNs: {identifiers['isbns']}")
         print(f"  URLs: {len(identifiers['urls'])} found")
+        if identifiers.get('years'):
+            print(f"  Years: {identifiers['years']} (best: {identifiers.get('best_year')})")
+        elif identifiers.get('best_year'):
+            print(f"  Year: {identifiers.get('best_year')}")
         
         # Step 2: Validate identifiers
         print("\n🔍 Step 2: Validating identifiers...")
@@ -513,9 +541,13 @@ class PaperMetadataProcessor:
                 if progress_callback:
                     progress_callback(found_info, 0)
                 
+                # Detect language from filename if available
+                language = self._detect_language_from_filename(pdf_path)
+                
                 # Start Ollama processing with progress indicator
                 metadata = self.ollama.extract_paper_metadata(text, validate=True, 
                                                               document_context=document_context,
+                                                              language=language,
                                                               progress_callback=progress_callback,
                                                               found_info=found_info)
                 if metadata:
@@ -552,9 +584,10 @@ class PaperMetadataProcessor:
             print(f"  🔍 Trying regex author extraction...")
             import pdfplumber
             with pdfplumber.open(pdf_path) as pdf:
-                text = pdf.pages[0].extract_text()
+                # Extract first page for regex
+                text_page1 = pdf.pages[0].extract_text()
             
-            regex_authors = self._extract_authors_with_regex_simple(text)
+            regex_authors = self._extract_authors_with_regex_simple(text_page1)
             if regex_authors:
                 print(f"  ✅ Regex found {len(regex_authors)} author(s): {', '.join(regex_authors)}")
                 
@@ -576,8 +609,34 @@ class PaperMetadataProcessor:
                 print(f"  ❌ Regex found no authors, trying Ollama...")
                 print(f"  ⚠️  This is slow (60-120 seconds)...")
                 
+                # For book chapters, extract strategically:
+                # - Full first page (main content + author/title info)
+                # - Next 3-4 pages: first 100 chars (header) + last 20 chars (footer/page numbers)
+                with pdfplumber.open(pdf_path) as pdf:
+                    pages_text = []
+                    
+                    # First page: extract everything
+                    first_page_text = pdf.pages[0].extract_text()
+                    if first_page_text:
+                        pages_text.append(f"=== PAGE 1 ===\n{first_page_text}\n")
+                    
+                    # Next 3-4 pages: header + footer only
+                    for i in range(1, min(5, len(pdf.pages))):
+                        page_text = pdf.pages[i].extract_text()
+                        if page_text:
+                            # Get first 100 chars (header) and last 20 chars (footer/page number)
+                            header = page_text[:100].strip()
+                            footer = page_text[-20:].strip()
+                            pages_text.append(f"=== PAGE {i+1} HEADER: {header}\nPAGE {i+1} FOOTER: {footer} ===\n")
+                    
+                    text = '\n'.join(pages_text)
+                
+                # Detect language from filename if available
+                language = self._detect_language_from_filename(pdf_path)
+                
                 metadata = self.ollama.extract_paper_metadata(text, validate=True,
-                                                              document_context="book_chapter")
+                                                              document_context="book_chapter",
+                                                              language=language)
                 if metadata:
                     result['method'] = 'ollama_fallback'
                     result['metadata'] = metadata

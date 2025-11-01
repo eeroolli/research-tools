@@ -173,6 +173,7 @@ class ZoteroLocalSearch:
                 doi = self._get_doi(item_id)
                 abstract = self._get_abstract(item_id)
                 tags = self._get_tags(item_id)
+                creators = self._get_item_creators(cursor, item_id)
                 
                 matches.append({
                     'item_key': item_key,
@@ -187,7 +188,8 @@ class ZoteroLocalSearch:
                     'journal': container_info['value'] if container_info else None,  # Backward compat
                     'doi': doi,
                     'abstract': abstract,
-                    'tags': tags
+                    'tags': tags,
+                    'creators': creators
                 })
         
         except Exception as e:
@@ -286,6 +288,7 @@ class ZoteroLocalSearch:
                     doi = self._get_doi(item_id)
                     abstract = self._get_abstract(item_id)
                     tags = self._get_tags(item_id)
+                    creators = self._get_item_creators(self.db_connection.cursor(), item_id)
                     
                     matches.append({
                         'item_key': item_key,
@@ -300,7 +303,8 @@ class ZoteroLocalSearch:
                         'journal': container_info['value'] if container_info else None,  # Backward compat
                         'doi': doi,
                         'abstract': abstract,
-                        'tags': tags
+                        'tags': tags,
+                        'creators': creators
                     })
         
         except Exception as e:

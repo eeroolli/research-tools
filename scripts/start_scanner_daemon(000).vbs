@@ -12,7 +12,7 @@ objShell.Popup "Starting Paper Processor Daemon..." & vbCrLf & vbCrLf & _
 ' Launch Windows Terminal with WSL and the daemon
 ' Using cmd /K keeps the window open even if the daemon exits
 ' The terminal window will remain visible for you to interact with
-objShell.Run "cmd /K wsl -e bash -c ""source ~/miniconda3/etc/profile.d/conda.sh && conda activate research-tools && cd /mnt/f/prog/research-tools && python scripts/paper_processor_daemon.py --restart""", 1, False
+objShell.Run "cmd /K wsl -e bash -c ""source ~/miniconda3/etc/profile.d/conda.sh && conda activate research-tools && cd /mnt/f/prog/research-tools && python scripts/paper_processor_daemon.py""", 1, False
 
 ' Exit VBS immediately (but the terminal window stays open)
 WScript.Quit

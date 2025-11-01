@@ -105,18 +105,18 @@ class FilenameGenerator:
         
         # Remove or replace problematic characters if configured
         if self.title_clean_special_chars:
+            # Use pathvalidate for proper cross-platform filename sanitization
+            from pathvalidate import sanitize_filename
+            
+            # Use 'universal' platform to sanitize for all OS (Windows + POSIX)
+            # This ensures filenames work across WSL, Windows, and cloud storage (Google Drive, etc.)
+            text = sanitize_filename(text, replacement_text='_', platform='universal')
+            
+            # Handle additional readability improvements and problematic characters
+            # Commas are technically valid on Windows but cause issues in paths and cloud storage
             replacements = {
-                '/': '_',
-                '\\': '_',
-                ':': '_',
-                '*': '_',
-                '?': '_',
-                '"': '_',
-                '<': '_',
-                '>': '_',
-                '|': '_',
-                '\n': '_',
-                '\r': '_',
+                '&': 'and',  # Replace & with 'and' for readability
+                ',': '_',    # Remove commas (problematic in paths and cloud storage)
             }
             
             for old, new in replacements.items():
@@ -132,12 +132,13 @@ class FilenameGenerator:
         
         return text
     
-    def generate_filename(self, metadata: Dict, original_filename: str = None) -> str:
+    def generate_filename(self, metadata: Dict, original_filename: str = None, is_scan: bool = False) -> str:
         """Generate filename using configurable patterns.
         
         Args:
             metadata: Metadata dictionary with title, authors, year, etc.
             original_filename: Original filename to extract extension from (optional)
+            is_scan: If True, appends '_scan' to filename (for scanned documents)
             
         Returns:
             Generated filename with appropriate extension
@@ -183,6 +184,10 @@ class FilenameGenerator:
             doi_safe=doi_safe,
             isbn_safe=isbn_safe
         )
+        
+        # Add _scan suffix if this is a scanned document
+        if is_scan:
+            filename += '_scan'
         
         # Determine file extension
         extension = self._get_file_extension(metadata, original_filename)
@@ -242,6 +247,22 @@ class FilenameGenerator:
         
         # Default to PDF for academic documents
         return 'pdf'
+    
+    def generate(self, metadata: Dict, is_scan: bool = False) -> str:
+        """Generate filename without extension (convenience method).
+        
+        Args:
+            metadata: Metadata dictionary with title, authors, year, etc.
+            is_scan: If True, appends '_scan' to filename
+            
+        Returns:
+            Generated filename WITHOUT extension
+        """
+        full_filename = self.generate_filename(metadata, is_scan=is_scan)
+        # Remove extension
+        if '.' in full_filename:
+            return full_filename.rsplit('.', 1)[0]
+        return full_filename
 
 
 def create_filename_generator() -> FilenameGenerator:

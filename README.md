@@ -36,6 +36,12 @@ For detailed development status, technical architecture, and upcoming features, 
 2. The VBS shows a helpful message about startup time (30 seconds, can be closed)
 3. Daemon continues starting in background even if you close the message
 
+**Optimal Epson Scanner Settings for OCR Quality:**
+- **Text Enhancement**: OFF (better OCR results when disabled)
+- **Portrait Mode**: 400 dpi (single-page scans)
+- **Landscape Mode**: 600 dpi (two-up scans that will be split later)
+- **Note**: GPU acceleration is not currently used for scanner OCR processing
+
 **Startup Time:**
 - **First scan of day**: ~60 seconds (Ollama startup + Python imports)
 - **Subsequent scans**: ~5 seconds (Ollama already running)

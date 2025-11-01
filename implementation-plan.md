@@ -114,6 +114,13 @@ At a glance:
 - Batch local lookups for speed and prefetching
 - CI test data fixtures and baseline performance metrics
 - Automatic document type detection (low priority; manual selection in UX suffices)
+- **Black border removal from PDFs** (Low Priority)
+  - Remove black borders from scanned book chapter PDFs that often appear when scanning copies
+  - Implementation options:
+    1. Integrate into splitting workflow (offer after splitting book chapters)
+    2. Create separate batch tool to process all PDFs in publications/ directory
+  - Technology: Use existing tools (PyMuPDF for PDF→image conversion, OpenCV for edge detection/border cropping, PIL for image processing)
+  - Note: Not needed immediately; can be implemented later as standalone tool or workflow enhancement
 
 ### 📌 **Recently Completed (Oct 2025):**
 - Hash-based duplicate detection during copy/name collisions
@@ -461,6 +468,7 @@ Note: Largely covered by GROBID already (title/authors/venue/year from first pag
 - [x] **Directory organization** - Store in `G:\my Drive\publications\` (single folder for now)
 - [x] **Original preservation** - Move to `done/` folder with scanner filename (also after identical reuse or skip-attach)
 - [ ] **Extraction to shared module** - Move common functions to `shared_tools/papers/file_manager.py`
+- [ ] **Black border removal** (Low Priority) - Optional enhancement for scanned book chapters with black borders; could be integrated into splitting workflow or implemented as separate batch processing tool
 
 #### 4.5 Workflow Integration 🚧
 - [x] **Separate workflows** - Books and papers use same underlying systems but different entry points

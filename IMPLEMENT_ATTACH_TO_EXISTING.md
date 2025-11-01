@@ -1,4 +1,4 @@
-# Implementation Plan: Attach Scanned PDF to Existing Zotero Item
+# Implementation: Attach Scanned PDF to Existing Zotero Item
 
 ## Recent Updates (Oct 2025)
 
@@ -25,11 +25,16 @@ Implementation references:
   - `add_paper(...)` now cleanly reports when no attachment was requested
   - `attach_pdf(...)` and `attach_pdf_to_existing(...)` normalize path and attachment title
 
-**Status:** Ready to implement  
-**Priority:** High - Critical functionality for 90% of your scans
+Status: Completed (Oct 2025)
+Changelog:
+- 2025-10-29: Publications-first identical reuse; Windows path normalization; filename-based attachment titles; skip-attach option; refined messaging and errors.
 
-## Problem Statement
+See overall roadmap and progress: `implementation-plan.md`.
+Related plan section: "At a glance" and "Completed" in `implementation-plan.md`.
 
+## Scope
+
+Attach scanned PDFs to existing Zotero items and create new Zotero items with optional linked-file attachments, including duplicate handling and publications-first reuse.
 When scanning a paper, you often already have the item in Zotero (90% of cases). The daemon must:
 1. Find the existing Zotero item
 2. Generate correct filename using Zotero metadata
@@ -37,34 +42,7 @@ When scanning a paper, you often already have the item in Zotero (90% of cases).
 4. Attach as linked file in Zotero
 5. **Never use "Unknown" or "P_et_al" in filenames**
 
-## Current Status
-
-### ✅ What's Working
-- Daemon finds Zotero items correctly
-- Author selection UI (with back/restart support)
-- Item selection UI (letters A-Z)
-- Powershell copy script ready (`copy_to_publications.ps1`)
-- Filename generator ready (with `_scan` suffix support)
-
-### ❌ Current Bugs
-
-**Bug 1: Filename Generation Uses Wrong Metadata**
-```
-Current: P_et_al_Unknown_A_REVIEW_OF_PERSONAL_AND_SITUATIONAL_FACTORS_scan.pdf
-Should be: Schultz_Oskamp_1995_Who_Recycles_And_When_scan.pdf
-```
-
-**Root Cause:** Uses extracted scan metadata instead of Zotero item metadata
-
-**Fix Needed:** When `handle_item_selected()` is called, we have:
-- `selected_item` dict from Zotero with correct authors/title/year
-- `metadata` dict from scan extraction (poor quality)
-
-**Solution:** Always use `selected_item` metadata for filename generation
-
----
-
-## Implementation Plan
+## Workflow Details
 
 ### Task 1: Fix Author Display in handle_item_selected() ✅
 **File:** `scripts/paper_processor_daemon.py` (lines 3196-3252)  
@@ -82,58 +60,14 @@ print(f"Authors: {author_str}")  # ✅ Added
 
 ---
 
-### Task 2: Fix Filename Generation to Use Zotero Metadata ✅
-**File:** `scripts/paper_processor_daemon.py` (lines 3226-3235)  
-**Status:** Needs verification  
-**Current Code:**
-```python
-# Merge Zotero metadata with scan metadata for filename
-# Priority: Zotero authors > scan authors
-final_authors = zotero_authors if zotero_authors else metadata.get('authors', [])
-
-merged_metadata = {
-    'title': selected_item.get('title', metadata.get('title', 'Unknown_Title')),
-    'authors': final_authors,
-    'year': selected_item.get('year', metadata.get('year', 'Unknown')),
-}
-```
-
-**What's Wrong:**
-- Falls back to scan metadata when Zotero data missing
-- Should require author confirmation before proceeding
-
-**Fix:**
-```python
-# BUILD metadata from Zotero item ONLY
-# This is a selected Zotero item, so Zotero data is canonical
-final_authors = zotero_authors if zotero_authors else []
-
-# CRITICAL: Don't proceed without confirmed authors
-if not final_authors:
-    print("⚠️  WARNING: No authors found in Zotero item!")
-    confirm_anyway = input("Filename will use 'Unknown_Author'. Proceed? [y/n]: ").strip().lower()
-    if confirm_anyway != 'y':
-        self.move_to_manual_review(pdf_path)
-        return
-    final_authors = ['Unknown_Author']
-
-# Show preview
-print(f"📝 Filename preview: {final_authors[0]}_1995_Who_Recycles_scan.pdf")
-
-# Generate using Zotero metadata ONLY
-merged_metadata = {
-    'title': selected_item.get('title'),  # Required from Zotero
-    'authors': final_authors,  # Confirmed authors
-    'year': selected_item.get('year'),  # From Zotero
-}
-```
+### Filename generation uses Zotero metadata ✅
+**File:** `scripts/paper_processor_daemon.py`
+Uses selected Zotero metadata for filenames; avoids falling back to low-quality scan metadata.
 
 ---
 
-### Task 3: Implement Metadata Editing (Optional)
-**File:** `scripts/paper_processor_daemon.py`  
-**Location:** When user selects action 2 (Edit metadata)  
-**Purpose:** Allow user to correct metadata before attaching
+### Optional metadata editing
+**File:** `scripts/paper_processor_daemon.py`
 
 **Flow:**
 ```python
@@ -163,9 +97,8 @@ elif action == 'edit':
 
 ---
 
-### Task 4: Verify PowerShell Copy Works
-**Test:** The `copy_to_publications.ps1` script  
-**Command to test:**
+### Copy/placement
+Copies to publications directory only when no identical file exists; otherwise reuses the existing file path.
 ```powershell
 powershell.exe -File F:\prog\research-tools\scripts\copy_to_publications.ps1 `
   "F:\test\source.pdf" `
@@ -179,9 +112,9 @@ powershell.exe -File F:\prog\research-tools\scripts\copy_to_publications.ps1 `
 
 ---
 
-### Task 5: Test Zotero API Attachment
+### Zotero API attachment
 **Method:** `ZoteroPaperProcessor.attach_pdf_to_existing()`  
-**File:** `shared_tools/zotero/paper_processor.py` (line 371)
+**File:** `shared_tools/zotero/paper_processor.py`
 
 **Test:**
 ```python
@@ -242,8 +175,8 @@ assert result == True
 **Input:** Zotero item missing author field  
 **Expected:** Warning displayed, user can proceed or cancel
 
-### Test Case 4: Google Drive Copy Fails
-**Input:** Network issue during copy
+### Test Case 4: Copy Fails
+**Input:** WSL/GoogleDrive  issue during copy
 **Expected:** Error shown, PDF stays in papers/, moved to manual/
 
 ---
@@ -301,40 +234,18 @@ if final_authors:
 
 ---
 
-## Files to Modify
-
-### Primary File
+## Files
 - `scripts/paper_processor_daemon.py`
-  - `handle_item_selected()` - Fix metadata source
-  - Add author confirmation step
-  - Show filename preview
-  - Publications-first identical reuse and skip-attach option
-
-### If Needed
 - `shared_tools/zotero/paper_processor.py`
-  - Verify `attach_pdf_to_existing()` works correctly
-  - Normalize path/title and support item creation without attachment
-
-### Test Scripts
-- Create `test_attach_workflow.py` for testing
 
 ---
 
-## Implementation Order
-
-1. **Fix author extraction** - Extract from Zotero 'creators' field correctly
-2. **Add author confirmation** - Show preview, ask for confirmation
-3. **Fix filename generation** - Use only Zotero metadata when attaching to existing item
-4. **Test PowerShell copy** - Verify Google Drive works
-5. **Test Zotero attachment** - Verify API works
-6. **End-to-end test** - Complete workflow
-7. **Edge cases** - Missing authors, bad metadata, copy failures
-8. **Identical file reuse** - Publications-first size-then-hash reuse
-9. **Skip-attach support** - Optional item creation without attachment
+## Notes
+This feature is complete and stable. Future enhancements (e.g., persistent hash cache) are tracked in `implementation-plan.md`.
 
 ---
 
-## Questions to Answer During Implementation
+## Open Questions
 
 1. What if Zotero item has no authors?
    → Warning + proceed with "Unknown_Author" or cancel?

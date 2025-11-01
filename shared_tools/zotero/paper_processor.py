@@ -352,17 +352,19 @@ class ZoteroPaperProcessor:
             True if successful
         """
         try:
-            # Normalize path and title
+            # Convert WSL path to Windows path for Zotero (runs on Windows)
             path_str = str(pdf_path)
-            filename = ntpath.basename(path_str)
+            windows_path = self._convert_wsl_to_windows_path(path_str)
+            
+            filename = ntpath.basename(windows_path)
             attach_title = filename or (title or 'PDF')
 
-            # Create attachment item
+            # Create attachment item with Windows path
             attachment = {
                 'itemType': 'attachment',
                 'linkMode': 'linked_file',
                 'title': attach_title,
-                'path': path_str,
+                'path': windows_path,
                 'parentItem': item_key
             }
             
@@ -425,6 +427,110 @@ class ZoteroPaperProcessor:
             print(f"Error updating item field: {e}")
             return False
     
+    def update_item_tags(self, item_key: str, add_tags: list = None, remove_tags: list = None) -> bool:
+        """Update tags on an existing Zotero item.
+        
+        Args:
+            item_key: Zotero item key
+            add_tags: List of tag names to add (optional)
+            remove_tags: List of tag names to remove (optional)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Get current item data
+            response = requests.get(
+                f"{self.base_url}/items/{item_key}",
+                headers=self.headers,
+                timeout=10
+            )
+            
+            if response.status_code != 200:
+                print(f"❌ Failed to get item: {response.status_code}")
+                return False
+            
+            item_data = response.json()
+            current_tags = item_data['data'].get('tags', [])
+            
+            # Convert current tags to list of tag names for easier manipulation
+            current_tag_names = [tag['tag'] if isinstance(tag, dict) else str(tag) for tag in current_tags]
+            
+            # Remove specified tags
+            if remove_tags:
+                current_tag_names = [tag for tag in current_tag_names if tag not in remove_tags]
+            
+            # Add new tags (avoid duplicates)
+            if add_tags:
+                existing_tag_names_lower = [t.lower() for t in current_tag_names]
+                for tag_name in add_tags:
+                    if tag_name and tag_name.lower() not in existing_tag_names_lower:
+                        current_tag_names.append(tag_name)
+            
+            # Convert back to Zotero format (list of dicts)
+            updated_tags = [{'tag': tag_name} for tag_name in current_tag_names if tag_name]
+            
+            # Prepare update data
+            update_data = {
+                'key': item_data['data']['key'],
+                'version': item_data['version'],
+                'tags': updated_tags
+            }
+            
+            # Update item
+            update_response = requests.patch(
+                f"{self.base_url}/items/{item_key}",
+                headers=self.headers,
+                json=update_data,
+                timeout=10
+            )
+            
+            if update_response.status_code == 204:
+                return True
+            else:
+                print(f"❌ Failed to update tags: {update_response.status_code}")
+                print(f"Response: {update_response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error updating tags: {e}")
+            return False
+    
+    def _convert_wsl_to_windows_path(self, path_str: str) -> str:
+        """Convert WSL path to Windows path format.
+        
+        Zotero runs on Windows, so it needs Windows paths (G:\...) not WSL paths (/mnt/g/...).
+        
+        Args:
+            path_str: Path string in WSL format (/mnt/g/...) or Windows format (G:\...)
+            
+        Returns:
+            Windows path string (G:\My Drive\...) or original if already Windows format
+        """
+        path_str = str(path_str)
+        
+        # If already Windows path (contains : or starts with letter drive), return as-is
+        if ':' in path_str or (len(path_str) > 1 and path_str[1] == ':'):
+            # Normalize Windows path separators
+            return path_str.replace('/', '\\')
+        
+        # If WSL path (starts with /mnt/), convert to Windows
+        if path_str.startswith('/mnt/'):
+            # Extract drive letter: /mnt/g/... -> g
+            parts = path_str.split('/')
+            if len(parts) >= 4 and parts[1] == 'mnt':
+                drive_letter = parts[2].upper()
+                # Get remainder after /mnt/drive/
+                remainder = '/'.join(parts[3:])
+                # Convert to Windows format: G:\remainder
+                windows_path = f"{drive_letter}:\\{remainder}"
+                # Normalize separators
+                windows_path = windows_path.replace('/', '\\')
+                return windows_path
+        
+        # If not recognized format, return as-is (might be relative path)
+        return path_str
+    
     def attach_pdf_to_existing(self, item_key: str, pdf_path: Union[str, Path]) -> bool:
         """Attach PDF to existing Zotero item.
         
@@ -433,23 +539,25 @@ class ZoteroPaperProcessor:
         
         Args:
             item_key: Zotero item key
-            pdf_path: Path to PDF file
+            pdf_path: Path to PDF file (can be WSL or Windows format)
             
         Returns:
             True if successful
         """
         try:
-            # Normalize path and title from possibly Windows path
+            # Convert WSL path to Windows path for Zotero (runs on Windows)
             path_str = str(pdf_path)
-            filename = ntpath.basename(path_str)
+            windows_path = self._convert_wsl_to_windows_path(path_str)
+            
+            filename = ntpath.basename(windows_path)
             title = filename.rsplit('.', 1)[0] if '.' in filename else filename
 
-            # Create attachment item
+            # Create attachment item with Windows path
             attachment = {
                 'itemType': 'attachment',
                 'linkMode': 'linked_file',
                 'title': title,
-                'path': path_str,
+                'path': windows_path,
                 'parentItem': item_key
             }
             

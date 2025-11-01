@@ -30,6 +30,37 @@ class IdentifierValidator:
     ]
     
     @classmethod
+    def normalize_doi(cls, doi: Optional[str]) -> Optional[str]:
+        """Normalize/clean DOI by removing common prefixes.
+        
+        This only cleans the DOI format, does NOT validate.
+        Use validate_doi() if you need validation.
+        
+        Args:
+            doi: DOI string to normalize (can have prefixes)
+            
+        Returns:
+            Cleaned DOI string (without prefixes), or None if input is empty/None
+        """
+        if not doi:
+            return None
+        
+        # Clean the DOI
+        doi = doi.strip()
+        
+        # Remove common prefixes (case-insensitive)
+        if doi.lower().startswith('doi:'):
+            doi = doi[4:].strip()
+        if doi.lower().startswith('https://doi.org/'):
+            doi = doi[16:].strip()
+        if doi.lower().startswith('http://dx.doi.org/'):
+            doi = doi[18:].strip()
+        if doi.lower().startswith('http://doi.org/'):
+            doi = doi[15:].strip()
+        
+        return doi if doi else None
+    
+    @classmethod
     def validate_doi(cls, doi: Optional[str]) -> Tuple[bool, Optional[str], str]:
         """Validate DOI format.
         
@@ -42,27 +73,21 @@ class IdentifierValidator:
         if not doi:
             return (True, None, "No DOI provided")
         
-        # Clean the DOI
-        doi = doi.strip()
-        
-        # Remove common prefixes
-        if doi.lower().startswith('doi:'):
-            doi = doi[4:].strip()
-        if doi.startswith('https://doi.org/'):
-            doi = doi[16:].strip()
-        if doi.startswith('http://dx.doi.org/'):
-            doi = doi[18:].strip()
+        # Normalize the DOI (removes prefixes)
+        normalized = cls.normalize_doi(doi)
+        if not normalized:
+            return (False, None, "Empty DOI after normalization")
         
         # Check for suspicious patterns
         for pattern in cls.FAKE_PATTERNS:
-            if re.match(pattern, doi):
-                return (False, None, f"Suspicious pattern: {doi}")
+            if re.match(pattern, normalized):
+                return (False, None, f"Suspicious pattern: {normalized}")
         
         # Validate format
-        if cls.DOI_PATTERN.match(doi):
-            return (True, doi, "Valid DOI")
+        if cls.DOI_PATTERN.match(normalized):
+            return (True, normalized, "Valid DOI")
         else:
-            return (False, None, f"Invalid DOI format: {doi}")
+            return (False, None, f"Invalid DOI format: {normalized}")
     
     @classmethod
     def validate_issn(cls, issn: Optional[str]) -> Tuple[bool, Optional[str], str]:

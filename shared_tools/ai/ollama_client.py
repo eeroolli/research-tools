@@ -33,19 +33,21 @@ class OllamaClient:
         self.validator = IdentifierValidator()
     
     def extract_paper_metadata(self, text: str, validate: bool = True, 
-                              document_context: str = "general", progress_callback=None, found_info: dict = None, debug: bool = False) -> Optional[Dict]:
+                              document_context: str = "general", language: str = None,
+                              progress_callback=None, found_info: dict = None, debug: bool = False) -> Optional[Dict]:
         """Extract structured metadata from paper text using Ollama.
         
         Args:
             text: OCR or extracted text from paper (typically first page)
             validate: Whether to validate extracted identifiers
             document_context: Context hint - "news_article", "book_chapter", or "general"
+            language: Language code (e.g., "NO", "EN", "DE", "FI", "SE") - helps with extraction accuracy
             
         Returns:
             Dictionary with extracted and validated metadata, or None if failed
         """
         # Build the extraction prompt with context-specific instructions
-        prompt = self._build_extraction_prompt(text, document_context)
+        prompt = self._build_extraction_prompt(text, document_context, language=language)
         
         try:
             # Debug: Show extracted text if requested
@@ -104,16 +106,62 @@ class OllamaClient:
             print(f"Error running Ollama: {e}")
             return None
     
-    def _build_extraction_prompt(self, text: str, document_context: str = "general") -> str:
+    def _build_extraction_prompt(self, text: str, document_context: str = "general", language: str = None) -> str:
         """Build the extraction prompt for Ollama with context-specific instructions.
         
         Args:
             text: Text to extract metadata from
             document_context: Context hint for specialized extraction
+            language: Language code (NO, EN, DE, FI, SE, etc.) for language-aware extraction
             
         Returns:
             Formatted prompt string
         """
+        # Language-specific instructions
+        language_instructions = ""
+        if language:
+            lang_map = {
+                'NO': 'Norwegian',
+                'EN': 'English', 
+                'DE': 'German',
+                'FI': 'Finnish',
+                'SE': 'Swedish'
+            }
+            lang_name = lang_map.get(language.upper(), language.upper())
+            
+            if language.upper() == 'NO':
+                language_instructions = f"""
+LANGUAGE CONTEXT: This document is in {lang_name}.
+- Author patterns: "Av [Name]", "Forfatter: [Name]", "[Name] og [Name]"
+- Date formats: "23. april 2025", "23.4.2025", "2025-04-23"
+- Common terms: "Forlag" (publisher), "Tidsskrift" (journal), "Kapittel" (chapter)
+- Extract authors, titles, and metadata in {lang_name} format
+"""
+            elif language.upper() == 'DE':
+                language_instructions = f"""
+LANGUAGE CONTEXT: This document is in {lang_name}.
+- Author patterns: "Von [Name]", "Autor: [Name]", "[Name] und [Name]"
+- Date formats: "23. April 2025", "23.04.2025"
+- Common terms: "Verlag" (publisher), "Zeitschrift" (journal), "Kapitel" (chapter)
+- Extract authors, titles, and metadata in {lang_name} format
+"""
+            elif language.upper() == 'FI':
+                language_instructions = f"""
+LANGUAGE CONTEXT: This document is in Finnish.
+- Author patterns: "Tekijä:", "Tekijät:", "[Name] ja [Name]" (and)
+- Date formats: "23. huhtikuuta 2025", "23.4.2025", "2025-04-23"
+- Common terms: "Kustantaja" (publisher), "Lehti"/"Aikakauslehti" (journal), "Luku" (chapter)
+- Extract authors, titles, and metadata in Finnish format
+"""
+            elif language.upper() == 'SE':
+                language_instructions = f"""
+LANGUAGE CONTEXT: This document is in Swedish.
+- Author patterns: "Av [Name]", "Av: [Name]", "[Name] och [Name]"
+- Date formats: "23 april 2025", "23.4.2025", "2025-04-23"
+- Common terms: "Förlag" (publisher), "Tidskrift" (journal), "Kapitel" (chapter)
+- Extract authors, titles, and metadata in Swedish format
+"""
+        
         # Base instructions
         base_instructions = """CRITICAL INSTRUCTIONS:
 - Return ONLY information you can see in the text
@@ -121,8 +169,8 @@ class OllamaClient:
 - DO NOT make up fake identifiers like "1234-5678" or "John Doe"
 - ONLY extract what is actually present in the text
 - FOR AUTHORS: Look for ALL authors mentioned - check title page, headers, footers, and bylines
-- AUTHORS can be separated by commas, "and", "&", or line breaks
-- Look for patterns like "By [Name]", "Authors: [Names]", "[Name] and [Name]", etc."""
+- AUTHORS can be separated by commas, "and", "og" (Norwegian), "und" (German), "&", or line breaks
+- Look for patterns like "By [Name]", "Av [Name]" (Norwegian), "Von [Name]" (German), "Authors: [Names]", "[Name] and [Name]", etc."""
         
         # Comprehensive hints for ALL document types (always included - Ollama uses what applies)
         comprehensive_hints = """
@@ -137,11 +185,17 @@ NEWS/WEB ARTICLES:
 - document_type: "news_article"
 
 BOOK CHAPTERS:
-- Extract BOTH chapter AND book info
-- Headers/footers VALUABLE - contain book title (repeating!), chapter title, authors, pages
-- REPEATING text = metadata (not noise!)
-- Patterns: "By", "In:", "Edited by", "Chapter N"
-- Return: title (chapter), authors (chapter), book_title, book_authors, book_editors, pages
+- Extract BOTH chapter AND book info - this is a book chapter!
+- RUNNING HEADS (page headers/footers) are CRITICAL metadata sources:
+  * ODD-NUMBERED PAGES (1,3,5,7...): Header/footer often shows CHAPTER TITLE or chapter number
+  * EVEN-NUMBERED PAGES (2,4,6,8...): Header/footer often shows BOOK TITLE
+- LANDSCAPE/TWO-UP FORMAT: If text is very wide, look on RIGHT SIDE for chapter info, LEFT SIDE is usually from facing page
+- REPEATING text = metadata (not noise!) - book titles repeat on every page
+- Patterns to find: "Chapter N:", "In: [Book Title]", "Edited by [Name]", "[Chapter Title] | [Book Title]"
+- Chapter authors usually on first page below chapter title
+- Book authors/editors often in header/footer or on first page
+- Look for "pp." or "pages" numbers
+- Return: title (chapter), authors (chapter), book_title, book_authors, book_editors, pages, chapter_number
 - document_type: "book_chapter"
 
 JOURNAL ARTICLES:
@@ -173,6 +227,7 @@ MANUSCRIPTS:
         return f"""Extract structured information from this document text. 
 
 {base_instructions}
+{language_instructions}
 {comprehensive_hints}
 
 Return ONLY valid JSON with these exact fields:
@@ -195,7 +250,7 @@ FOR BOOK CHAPTERS ONLY (if document_type is "book_chapter"):
 - chapter_number (string or null) - Chapter number if visible (e.g., "5" or "Chapter 5")
 
 Text from document:
-{text[:3000]}
+{text[:5000]}
 
 Remember: Return ONLY the JSON object. No explanatory text before or after. Use null for missing fields."""
     
@@ -257,7 +312,7 @@ Remember: Return ONLY the JSON object. No explanatory text before or after. Use 
                     return None
                 
                 return self.extract_paper_metadata(text, validate=validate, 
-                                                  document_context=document_context)
+                                                  document_context=document_context, language=None)
                 
         except Exception as e:
             print(f"Error extracting text from {pdf_path}: {e}")

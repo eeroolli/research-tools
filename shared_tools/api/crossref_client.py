@@ -46,9 +46,12 @@ class CrossRefClient:
         Returns:
             Dictionary with metadata or None if not found
         """
-        # Clean DOI
-        doi = doi.replace('https://doi.org/', '').replace('http://dx.doi.org/', '')
-        doi = doi.replace('doi:', '').strip()
+        # Normalize DOI using centralized function
+        from shared_tools.utils.identifier_validator import IdentifierValidator
+        normalized_doi = IdentifierValidator.normalize_doi(doi)
+        if not normalized_doi:
+            return None
+        doi = normalized_doi
         
         try:
             url = f"{self.BASE_URL}{doi}"
@@ -197,6 +200,86 @@ class CrossRefClient:
         }
         
         return type_mapping.get(crossref_type, 'unknown')
+    
+    def search_by_metadata(self, title: str = None, authors: list = None, 
+                          year: str = None, journal: str = None, 
+                          max_results: int = 5) -> list:
+        """Search CrossRef by metadata (title, authors, year, journal).
+        
+        Args:
+            title: Paper title (or keywords)
+            authors: List of author names
+            year: Publication year
+            journal: Journal name
+            max_results: Maximum number of results to return
+            
+        Returns:
+            List of metadata dictionaries (empty if no matches)
+        """
+        # Build query parameters
+        query_parts = []
+        
+        if title:
+            # Remove common words and use as phrase search
+            query_parts.append(f'title:{title}')
+        elif authors and len(authors) > 0:
+            # Use first author's last name if no title
+            first_author = authors[0]
+            if ' ' in first_author:
+                last_name = first_author.split()[-1]
+            else:
+                last_name = first_author
+            query_parts.append(f'author:{last_name}')
+        
+        if journal:
+            query_parts.append(f'container-title:{journal}')
+        
+        if year:
+            # CrossRef can filter by year using filter parameter
+            pass  # Will use filter below
+        
+        if not query_parts:
+            return []
+        
+        # Build query string
+        query = '+'.join(query_parts)
+        
+        # Build request parameters
+        params = {
+            'query': query,
+            'rows': max_results,
+            'sort': 'relevance'
+        }
+        
+        if year:
+            # Filter by publication year
+            params['filter'] = f'from-pub-date:{year},to-pub-date:{year}'
+        
+        try:
+            # CrossRef search endpoint
+            url = "https://api.crossref.org/works"
+            response = self.session.get(url, params=params, timeout=self.timeout)
+            
+            if response.status_code == 200:
+                data = response.json()
+                items = data.get('message', {}).get('items', [])
+                
+                results = []
+                for item in items:
+                    # Parse each item
+                    # Wrap in 'message' format for _parse_crossref_response
+                    parsed = self._parse_crossref_response({'message': item})
+                    if parsed:
+                        results.append(parsed)
+                
+                return results
+            else:
+                print(f"CrossRef search error: {response.status_code}")
+                return []
+                
+        except requests.RequestException as e:
+            print(f"CrossRef search request failed: {e}")
+            return []
 
 
 if __name__ == "__main__":

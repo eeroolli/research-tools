@@ -15,7 +15,7 @@ libraries:
         item: "items/{id}"
       parameters:
         default_size: 10
-        content_classes_papers: "article,journal"
+        content_classes_papers: "article,journal,dissertation,thesis"
         content_classes_books: "book"
     
     field_mappings:
@@ -118,6 +118,7 @@ libraries:
       parameters:
         limit: 10
         type: "AllFields"
+      notes: "Finna API uses format parameter for content types - thesis searches work with AllFields type"
     
     field_mappings:
       papers:

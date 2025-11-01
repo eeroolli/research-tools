@@ -1,0 +1,42 @@
+feature: Optimize extraction flow with GREP-first approach and enhance metadata editor
+
+Extraction Flow Optimization:
+- Restructured process_paper() to prioritize fast identifier extraction (GREP + API lookup) before GROBID fallback
+- Changed from GROBID-first to GREP-first approach (2-4 seconds vs 5-10+ seconds for papers with DOIs)
+- Leverages existing metadata_processor.process_pdf() optimized workflow
+- Maintains all error handling while improving speed for papers with identifiers
+
+Centralized DOI Normalization:
+- Added normalize_doi() static method in IdentifierValidator for consistent DOI cleaning
+- Updated all API clients (PubMed, OpenAlex, CrossRef) to use centralized normalization
+- Eliminates code duplication and ensures consistent behavior across codebase
+
+Manual DOI Entry Enhancement:
+- Made DOI entry always available in metadata editor, independent of Zotero items
+- Added validation with clear feedback (valid/invalid messages)
+- Auto-normalizes common DOI formats (https://doi.org/, doi:, etc.)
+- Optional metadata fetching when valid DOI entered and no existing metadata
+- Retry mechanism for invalid DOIs
+
+Tags Display Enhancement:
+- Added _get_tags() method in ZoteroLocalSearch to fetch tags from SQLite database
+- Tags included in all search results (DOI search, title fuzzy search, author-ordered search)
+- Tags displayed first when selecting Zotero items (right after title, before authors)
+- Added tags to search result normalization
+
+Minor:
+- Update config.conf documentation for API priority settings
+- Clarified comments regarding priority system (1 = highest, 9 = lowest)
+- Added guidance for setting priorities based on research focus
+
+Files modified:
+- scripts/paper_processor_daemon.py: GREP-first flow, manual DOI entry, tags display
+- shared_tools/utils/identifier_validator.py: Added normalize_doi() method
+- shared_tools/api/pubmed_client.py: Use centralized normalize_doi()
+- shared_tools/api/openalex_client.py: Use centralized normalize_doi()
+- shared_tools/api/crossref_client.py: Use centralized normalize_doi()
+- shared_tools/zotero/local_search.py: Added _get_tags() and included in all searches
+- debug_plan_journals.md: Documented all completed work
+- implementation-plan.md: Updated recently completed section
+
+

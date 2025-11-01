@@ -212,11 +212,15 @@ class ScannedPaperProcessor:
         
         # Use pathvalidate for proper cross-platform filename sanitization
         if self.title_clean_special_chars:
-            text = sanitize_filename(text, replacement_text='_')
+            # Use 'universal' platform to sanitize for all OS (Windows + POSIX)
+            # This ensures filenames work across WSL, Windows, and cloud storage (Google Drive, etc.)
+            text = sanitize_filename(text, replacement_text='_', platform='universal')
             
-            # Handle additional readability improvements
+            # Handle additional readability improvements and problematic characters
+            # Commas are technically valid on Windows but cause issues in paths and cloud storage
             replacements = {
                 '&': 'and',  # Replace & with 'and' for readability
+                ',': '_',    # Remove commas (problematic in paths and cloud storage)
             }
             
             for old, new in replacements.items():

@@ -43,9 +43,12 @@ class PubMedClient:
         Returns:
             Dictionary with metadata or None if not found
         """
-        # Clean DOI
-        doi = doi.replace('https://doi.org/', '').replace('http://dx.doi.org/', '')
-        doi = doi.replace('doi:', '').strip()
+        # Normalize DOI using centralized function
+        from shared_tools.utils.identifier_validator import IdentifierValidator
+        normalized_doi = IdentifierValidator.normalize_doi(doi)
+        if not normalized_doi:
+            return None
+        doi = normalized_doi
         
         try:
             # Step 1: Search for DOI
