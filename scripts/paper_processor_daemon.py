@@ -1823,6 +1823,12 @@ class PaperProcessorDaemon:
                         print("⚠️  Could not attach PDF to Zotero")
             else:
                 # New metadata - ask about Zotero
+                # Ensure language is detected from filename and added to metadata if not already present
+                if not metadata.get('language'):
+                    detected_language = self._detect_language_from_filename(pdf_path)
+                    if detected_language:
+                        metadata['language'] = detected_language
+                
                 add_zotero = input("\nAdd to Zotero? (y/n): ").strip().lower()
                 if add_zotero == 'y':
                     print("📖 Adding to Zotero...")
@@ -4154,6 +4160,16 @@ class PaperProcessorDaemon:
             self.move_to_manual_review(pdf_path)
             return False
         
+        # Ensure language is detected from filename and update existing item if missing
+        if not final_metadata.get('language'):
+            detected_language = self._detect_language_from_filename(pdf_path)
+            if detected_language:
+                final_metadata['language'] = detected_language
+                # Update existing Zotero item if language field is empty
+                item_key = zotero_item.get('key')
+                if item_key:
+                    self.zotero_processor.update_item_field_if_missing(item_key, 'language', detected_language)
+        
         # STEP 2: Tags Comparison
         print("\n🔄 Step 2: Tags Comparison")
         final_tags = self.edit_tags_interactively(
@@ -5429,6 +5445,12 @@ class PaperProcessorDaemon:
         # Add selected tags to metadata
         final_metadata['tags'] = final_tags
         
+        # Ensure language is detected from filename and added to metadata if not already present
+        if not final_metadata.get('language'):
+            detected_language = self._detect_language_from_filename(pdf_path)
+            if detected_language:
+                final_metadata['language'] = detected_language
+        
         # Step 5: Create item and attach PDF
         print("\n📖 Step 5: Creating Zotero Item")
 
@@ -5567,6 +5589,12 @@ class PaperProcessorDaemon:
         except Exception as e:
             print(f"❌ File copy failed: {e}")
             print("Proceeding to create item without attachment...")
+        
+        # Ensure language is detected from filename and added to metadata if not already present
+        if not final_metadata.get('language'):
+            detected_language = self._detect_language_from_filename(pdf_path)
+            if detected_language:
+                final_metadata['language'] = detected_language
         
         # Create Zotero item (linked file if copy succeeded)
         try:

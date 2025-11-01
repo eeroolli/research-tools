@@ -91,12 +91,16 @@ class ZoteroPaperProcessor:
             # Step 1: Check for duplicates
             doi = metadata.get('doi')
             title = metadata.get('title')
+            language = metadata.get('language', '').strip()
             
             if doi:
                 existing = self.search_by_doi(doi)
                 if existing:
                     result['action'] = 'duplicate_skipped'
                     result['item_key'] = existing['key']
+                    # Update language if provided and missing in existing item
+                    if language:
+                        self.update_item_field_if_missing(existing['key'], 'language', language)
                     result['success'] = True
                     return result
             
@@ -105,6 +109,9 @@ class ZoteroPaperProcessor:
                 if existing:
                     result['action'] = 'duplicate_skipped'
                     result['item_key'] = existing['key']
+                    # Update language if provided and missing in existing item
+                    if language:
+                        self.update_item_field_if_missing(existing['key'], 'language', language)
                     result['success'] = True
                     return result
             
