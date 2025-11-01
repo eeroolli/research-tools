@@ -76,8 +76,7 @@ class ConfigManager:
         self.config['ZOTERO'] = {
             'duplicate_checking': 'true',
             'smart_tag_management': 'true',
-            'annotation_storage': 'true',
-            'pdf_optimization': 'true'
+            'annotation_storage': 'true'
         }
         
         # Save default configuration
