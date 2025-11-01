@@ -221,11 +221,13 @@ class DetailedISBNLookupService:
             # Try to get ISBN13
             isbn = ''
             for i in (d.get('isbn') or []):
-                if len(str(i)) == 13 and i.isdigit():
-                    isbn = i
+                i_str = str(i)
+                if len(i_str) == 13 and i_str.isdigit():
+                    isbn = i_str
                     break
-                if not isbn and len(str(i)) == 10:
-                    isbn = i
+                if not isbn and len(i_str) == 10 and i_str.isdigit():
+                    isbn = i_str
+                    break
             creators = []
             for name in (d.get('author_name') or [])[:5]:
                 parts = name.split()
