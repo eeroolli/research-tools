@@ -39,6 +39,9 @@ from shared_tools.utils.filename_generator import FilenameGenerator
 # Import book lookup service for book chapters
 from add_or_remove_books_zotero import DetailedISBNLookupService
 
+# Import national library manager for thesis, book chapter, and book searches
+from shared_tools.api.config_driven_manager import ConfigDrivenNationalLibraryManager
+
 
 class PaperProcessorDaemon:
     """Main daemon class."""
@@ -67,6 +70,9 @@ class PaperProcessorDaemon:
         # Initialize book lookup service (for book chapters)
         self.book_lookup_service = DetailedISBNLookupService()
         
+        # Initialize national library manager (for thesis, book chapters, books)
+        self.national_library_manager = ConfigDrivenNationalLibraryManager()
+        
         # Initialize services
         self.ollama_process = None
         self.ollama_ready = False
@@ -92,6 +98,16 @@ class PaperProcessorDaemon:
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize author validator: {e}")
             self.author_validator = None
+        
+        # Initialize journal validator for recognizing Zotero journals
+        try:
+            from shared_tools.utils.journal_validator import JournalValidator
+            self.journal_validator = JournalValidator()
+            self.journal_validator.refresh_if_needed(max_age_hours=24, silent=True)
+            self.logger.info("✅ Journal validator ready")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to initialize journal validator: {e}")
+            self.journal_validator = None
         
         # Load tag groups from configuration
         self.tag_groups = self._load_tag_groups()
@@ -1069,6 +1085,28 @@ class PaperProcessorDaemon:
         elif field_name == 'From Zotero':
             print(f"  {field_name}: {'✅ Yes' if field_value else '❌ No'}")
         
+        elif field_name == 'Journal':
+            # Validate journal against Zotero if validator available
+            if self.journal_validator and isinstance(field_value, str) and field_value.strip():
+                validation = self.journal_validator.validate_journal(field_value)
+                if validation['matched']:
+                    journal_name = validation['journal_name']
+                    paper_count = validation['paper_count']
+                    match_type = validation['match_type']
+                    confidence = validation['confidence']
+                    
+                    if match_type == 'exact':
+                        print(f"  {field_name}: ✅ {journal_name} (in Zotero, {paper_count} papers)")
+                    elif match_type == 'fuzzy':
+                        print(f"  {field_name}: {field_value}")
+                        print(f"    💡 Did you mean '{journal_name}'? ({paper_count} papers, {confidence}% confidence)")
+                else:
+                    print(f"  {field_name}: {field_value}")
+                    print(f"    🆕 New journal (not in Zotero collection)")
+            else:
+                # Fallback if validator not available or no journal value
+                print(f"  {field_name}: {field_value}")
+        
         elif isinstance(field_value, list):
             if len(field_value) == 0:
                 print(f"  {field_name}: (empty)")
@@ -1229,12 +1267,14 @@ class PaperProcessorDaemon:
             # Arrow indicates author order: first → second → third, etc.
             author_display = ' & '.join(author_lastnames)
             year_str = f" (year: {year})" if year else " (any year)"
-            print(f"\n🔍 Searching Zotero database for authors (in order): {author_display}{year_str}")
+            doc_type_str = f" [type: {metadata.get('document_type', 'any')}]" if metadata.get('document_type') else ""
+            print(f"\n🔍 Searching Zotero database for authors (in order): {author_display}{year_str}{doc_type_str}")
             
             matches = self.local_zotero.search_by_authors_ordered(
                 author_lastnames, 
                 year=year,
-                limit=10
+                limit=10,
+                document_type=metadata.get('document_type')
             )
             
             # Normalize results
@@ -1272,7 +1312,8 @@ class PaperProcessorDaemon:
                         matches_no_year = self.local_zotero.search_by_authors_ordered(
                             author_lastnames,
                             year=None,
-                            limit=10
+                            limit=10,
+                            document_type=metadata.get('document_type')
                         )
                         normalized_matches = [self._normalize_search_result(item) for item in matches_no_year]
                         
@@ -1294,7 +1335,8 @@ class PaperProcessorDaemon:
                             matches_new_year = self.local_zotero.search_by_authors_ordered(
                                 author_lastnames,
                                 year=new_year,
-                                limit=10
+                                limit=10,
+                                document_type=metadata.get('document_type')
                             )
                             normalized_matches = [self._normalize_search_result(item) for item in matches_new_year]
                             
@@ -1974,15 +2016,60 @@ class PaperProcessorDaemon:
             online_metadata.get('journal') if online_metadata else None,
             local_metadata.get('journal') if local_metadata else None
         )
+        
+        # Show journal validation if validator available
+        current_journal = edited.get('journal', '').strip()
+        if self.journal_validator and current_journal:
+            validation = self.journal_validator.validate_journal(current_journal)
+            if validation['matched']:
+                journal_name = validation['journal_name']
+                paper_count = validation['paper_count']
+                match_type = validation['match_type']
+                
+                if match_type == 'exact':
+                    print(f"  ✅ Recognized: {journal_name} ({paper_count} papers in your collection)")
+                elif match_type == 'fuzzy':
+                    print(f"  💡 Suggestion: '{current_journal}' → '{journal_name}' ({paper_count} papers, {validation['confidence']}% confidence)")
+                    accept = input("  Use suggestion? [Y/n]: ").strip().lower()
+                    if not accept or accept == 'y':
+                        edited['journal'] = journal_name
+                        print(f"  ✅ Using: {journal_name}")
+            else:
+                print(f"  🆕 New journal (not in your Zotero collection)")
+        
         new_value = input("New journal/source (or Enter to keep current): ").strip()
         if new_value:
+            # Validate newly entered journal
             edited['journal'] = new_value
+            if self.journal_validator:
+                validation = self.journal_validator.validate_journal(new_value)
+                if validation['matched']:
+                    if validation['match_type'] == 'fuzzy':
+                        print(f"  💡 Did you mean '{validation['journal_name']}'? ({validation['paper_count']} papers, {validation['confidence']}% confidence)")
+                        use_suggestion = input("  Use suggestion? [Y/n]: ").strip().lower()
+                        if not use_suggestion or use_suggestion == 'y':
+                            edited['journal'] = validation['journal_name']
+                            print(f"  ✅ Using: {validation['journal_name']}")
+                    elif validation['match_type'] == 'exact':
+                        print(f"  ✅ Recognized: {validation['journal_name']} ({validation['paper_count']} papers)")
+                else:
+                    print(f"  🆕 New journal (not in your Zotero collection)")
         elif online_metadata and online_metadata.get('journal') and not edited.get('journal'):
             edited['journal'] = online_metadata['journal']
             print(f"✅ Auto-filled from online: {online_metadata['journal']}")
+            # Validate auto-filled journal
+            if self.journal_validator:
+                validation = self.journal_validator.validate_journal(edited['journal'])
+                if validation['matched']:
+                    print(f"  ✅ Recognized: {validation['journal_name']} ({validation['paper_count']} papers)")
         elif local_metadata and local_metadata.get('journal') and not edited.get('journal'):
             edited['journal'] = local_metadata['journal']
             print(f"✅ Auto-filled from local: {local_metadata['journal']}")
+            # Local journal is already from Zotero, so it should be recognized
+            if self.journal_validator:
+                validation = self.journal_validator.validate_journal(edited['journal'])
+                if validation['matched']:
+                    print(f"  ✅ Recognized: {validation['journal_name']} ({validation['paper_count']} papers)")
         
         # DOI - Always allow manual entry, even without Zotero items
         display_field_with_sources(
@@ -2151,6 +2238,77 @@ class PaperProcessorDaemon:
             edited['document_type'] = local_metadata['document_type']
             print(f"✅ Auto-filled from local: {local_metadata['document_type']}")
         
+        # Tags - offer to edit if we have tag sources
+        current_tags = edited.get('tags', [])
+        online_tags_list = online_metadata.get('tags', []) if online_metadata else []
+        local_tags_list = local_metadata.get('tags', []) if local_metadata else []
+        
+        if current_tags or online_tags_list or local_tags_list:
+            print("\n🏷️  Tags:")
+            if current_tags:
+                print(f"  [Current] {', '.join(current_tags)}")
+            if online_tags_list:
+                print(f"  [Online]  {', '.join(online_tags_list)}")
+            if local_tags_list:
+                print(f"  [Local]   {', '.join(local_tags_list)}")
+            
+            print("\nTag editing options:")
+            print("  [Enter] = Keep current tags (or none)")
+            print("  [t]     = Edit tags interactively")
+            
+            tag_choice = input("Choice: ").strip().lower()
+            if tag_choice == 't':
+                edited['tags'] = self.edit_tags_interactively(
+                    current_tags=current_tags,
+                    online_tags=online_tags_list,
+                    local_tags=local_tags_list
+                )
+            # If user presses Enter, tags stay as they are in edited dict
+        
+        # Notes
+        current_note = edited.get('note', '')
+        online_note = online_metadata.get('note', '') if online_metadata else None
+        local_note = local_metadata.get('note', '') if local_metadata else None
+        
+        if current_note or online_note or local_note:
+            print("\n📝 Note:")
+            if current_note:
+                display_note = current_note[:200] + "..." if len(current_note) > 200 else current_note
+                print(f"  [Current] {display_note}")
+            if online_note:
+                display_note = online_note[:200] + "..." if len(online_note) > 200 else online_note
+                print(f"  [Online]  {display_note}")
+            if local_note:
+                display_note = local_note[:200] + "..." if len(local_note) > 200 else local_note
+                print(f"  [Local]   {display_note}")
+            
+            print("\nNote editing options:")
+            print("  [Enter] = Keep current note (or none)")
+            print("  [o]     = Use online note")
+            print("  [l]     = Use local note")
+            print("  [e]     = Edit note manually")
+            
+            note_choice = input("Choice: ").strip().lower()
+            
+            if note_choice == 'o' and online_note:
+                edited['note'] = online_note
+                print(f"✅ Using online note ({len(online_note)} characters)")
+            elif note_choice == 'l' and local_note:
+                edited['note'] = local_note
+                print(f"✅ Using local note ({len(local_note)} characters)")
+            elif note_choice == 'e':
+                print("Enter new note (end with 'END' on a new line):")
+                lines = []
+                while True:
+                    line = input()
+                    if line.strip() == 'END':
+                        break
+                    lines.append(line)
+                new_note = '\n'.join(lines)
+                if new_note.strip():
+                    edited['note'] = new_note.strip()
+                    print(f"✅ Note updated ({len(new_note)} characters)")
+        
         print("\n✅ Metadata editing complete")
         print()
         
@@ -2165,6 +2323,11 @@ class PaperProcessorDaemon:
         if edited.get('abstract'):
             abstract_preview = edited['abstract'][:100] + "..." if len(edited['abstract']) > 100 else edited['abstract']
             print(f"  Abstract: {abstract_preview}")
+        if edited.get('tags'):
+            print(f"  Tags: {', '.join(edited['tags'])}")
+        if edited.get('note'):
+            note_preview = edited['note'][:100] + "..." if len(edited['note']) > 100 else edited['note']
+            print(f"  Note: {note_preview}")
         print()
         
         return edited
@@ -2802,7 +2965,14 @@ class PaperProcessorDaemon:
                                                                        progress_callback=self._show_ollama_progress)
                     if ollama_result['success'] and ollama_result.get('metadata', {}).get('authors'):
                         result = ollama_result
-                        self.logger.info("✅ Ollama found authors")
+                        # Only log "Ollama found authors" if Ollama was actually used (not regex fallback)
+                        method = ollama_result.get('method', '')
+                        if method == 'ollama_fallback':
+                            self.logger.info("✅ Ollama found authors")
+                        elif method == 'regex_fallback':
+                            self.logger.info(f"✅ Regex found authors (during Ollama fallback step)")
+                        else:
+                            self.logger.info(f"✅ Found authors via {method}")
                     else:
                         self.logger.warning("Ollama also failed to find authors")
                 else:
@@ -2817,11 +2987,17 @@ class PaperProcessorDaemon:
                 # Filter garbage authors (keeps only known authors when extraction is poor)
                 metadata = self.filter_garbage_authors(metadata)
 
+                # Check for extracted year from identifier extraction (parentheses, copyright, etc.)
+                identifiers = result.get('identifiers_found', {})
+                if identifiers.get('best_year') and not metadata.get('year'):
+                    metadata['year'] = identifiers['best_year']
+                    self.logger.info(f"Auto-filled year from scan: {identifiers['best_year']}")
+                    print(f"✅ Auto-filled year from scan: {identifiers['best_year']}")
+                
                 # Prompt for year BEFORE document type, so numeric input isn't misrouted
                 metadata = self.prompt_for_year(metadata)
                 
                 # Check if JSTOR ID was found - automatically set as journal article
-                identifiers = result.get('identifiers_found', {})
                 if identifiers.get('jstor_ids') and not metadata.get('document_type'):
                     metadata['document_type'] = 'journal_article'
                     self.logger.info("JSTOR ID detected - automatically set as journal article")
@@ -3413,6 +3589,70 @@ class PaperProcessorDaemon:
             self.logger.error(f"Split failed: {e}")
             return None
     
+    def _delete_first_page_from_pdf(self, pdf_path: Path) -> Optional[Path]:
+        """Delete the first page from a PDF and return path to the modified file.
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            Path to modified PDF without page 1, or None if failed
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            self.logger.error("PyMuPDF (fitz) not available - cannot delete page 1")
+            return None
+        
+        doc = None
+        new_doc = None
+        try:
+            # Open the PDF
+            doc = fitz.open(pdf_path)
+            
+            # Check if PDF has more than 1 page
+            if len(doc) <= 1:
+                self.logger.warning(f"PDF has only {len(doc)} page(s) - cannot delete page 1")
+                doc.close()
+                return None
+            
+            # Create new PDF without first page
+            new_doc = fitz.open()
+            
+            # Copy all pages except the first one (page 0)
+            for page_num in range(1, len(doc)):
+                page = doc[page_num]
+                new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
+                new_page.show_pdf_page(new_page.rect, doc, page_num)
+            
+            # Save to a new file in the same directory
+            import tempfile
+            temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            out_path = temp_dir / f"{pdf_path.stem}_no_page1.pdf"
+            
+            new_doc.save(str(out_path))
+            new_doc.close()
+            doc.close()
+            
+            self.logger.info(f"Created PDF without page 1: {out_path.name}")
+            return out_path
+            
+        except Exception as e:
+            self.logger.error(f"Failed to delete page 1 from PDF: {e}")
+            # Ensure both documents are closed to prevent resource leaks
+            if new_doc is not None:
+                try:
+                    new_doc.close()
+                except Exception:
+                    pass  # Ignore errors during cleanup
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass  # Ignore errors during cleanup
+            return None
+    
     def start(self):
         """Start the daemon."""
         # Single-instance guard
@@ -3930,19 +4170,22 @@ class PaperProcessorDaemon:
             
             # Rebuild author_map each iteration (in case authors were edited)
             author_map = {}
-            for i, info in enumerate(author_info[:26]):  # Limit to 26 authors
-                letter = letters[i]
-                author_map[letter] = info['name']
-                if info['paper_count'] > 0:
-                    papers_str = f"(in Zotero: {info['paper_count']} publications)"
-                elif info['recognized']:
-                    if info['recognized_as'] and info['recognized_as'] != info['name']:
-                        papers_str = f"(in Zotero as '{info['recognized_as']}', 0 publications found)"
+            if author_info:
+                for i, info in enumerate(author_info[:26]):  # Limit to 26 authors
+                    letter = letters[i]
+                    author_map[letter] = info['name']
+                    if info['paper_count'] > 0:
+                        papers_str = f"(in Zotero: {info['paper_count']} publications)"
+                    elif info['recognized']:
+                        if info['recognized_as'] and info['recognized_as'] != info['name']:
+                            papers_str = f"(in Zotero as '{info['recognized_as']}', 0 publications found)"
+                        else:
+                            papers_str = "(in Zotero, 0 publications found)"
                     else:
-                        papers_str = "(in Zotero, 0 publications found)"
-                else:
-                    papers_str = "(not in Zotero)"
-                print(f"  [{letter}] {info['name']} {papers_str}")
+                        papers_str = "(not in Zotero)"
+                    print(f"  [{letter}] {info['name']} {papers_str}")
+            else:
+                print("  (No authors - use 'n' to add a new author)")
             
             print("\nSelection options:")
             print("  'a'   = Search by first author only")
@@ -3952,16 +4195,35 @@ class PaperProcessorDaemon:
             print("  ''    = Use all authors as extracted")
             print("  'e'   = Edit an author name")
             print("  'n'   = Add new author manually")
+            print("  '-a'  = Delete author 'a' from list")
             print("  'z'   = Back to previous step")
             print("  'r'   = Restart from beginning")
             
-            selection = input("\nYour selection (letters like 'a', 'ab', 'all', or commands e/n/z/r): ").strip()
+            selection = input("\nYour selection (letters like 'a', 'ab', 'all', or commands e/n/-a/z/r): ").strip()
             selection_lower = selection.lower()
             
             if selection_lower == 'z':
                 return 'BACK'
             elif selection_lower == 'r':
                 return 'RESTART'
+            elif selection_lower.startswith('-'):
+                # Delete an author by letter
+                letter_to_delete = selection_lower[1:]  # Remove the '-' prefix
+                if letter_to_delete in author_map:
+                    author_to_remove = author_map[letter_to_delete]
+                    # Remove from author_info
+                    author_info = [info for info in author_info if info['name'] != author_to_remove]
+                    # Remove from authors list
+                    authors = [a for a in authors if a != author_to_remove]
+                    print(f"✅ Removed: {author_to_remove}")
+                    
+                    # If no authors left, show message but continue to allow adding new author
+                    if not author_info:
+                        print("⚠️  No authors remaining - you can add a new author with 'n'")
+                else:
+                    print(f"⚠️  Invalid author letter: '{letter_to_delete}'")
+                print()  # Blank line before showing list again
+                continue
             elif selection_lower == 'e':
                 # Edit an author
                 if not author_info:
@@ -3999,11 +4261,23 @@ class PaperProcessorDaemon:
                 # Add new author
                 new_author = input("\nEnter new author name: ").strip()
                 if new_author:
-                    info = {'name': new_author, 'paper_count': 0}
+                    info = {'name': new_author, 'paper_count': 0, 'recognized': False, 'recognized_as': None}
                     if self.author_validator:
                         author_data = self.author_validator.get_author_info(new_author)
                         if author_data:
                             info['paper_count'] = author_data.get('paper_count', 0)
+                            info['recognized'] = True
+                            info['recognized_as'] = author_data.get('name')
+                        else:
+                            # Try OCR correction / alternatives match
+                            try:
+                                suggestion = self.author_validator.suggest_ocr_correction(new_author)
+                                if suggestion:
+                                    info['recognized'] = True
+                                    info['recognized_as'] = suggestion.get('corrected_name')
+                                    info['paper_count'] = suggestion.get('paper_count', 0)
+                            except Exception:
+                                pass
                     author_info.append(info)
                     authors.append(new_author)  # Also add to original list for consistency
                     print(f"✅ Added: {new_author}")
@@ -4092,11 +4366,12 @@ class PaperProcessorDaemon:
                     author_str += " et al."
                 print(f"      Authors: {author_str}")
             
-            # Show year and PDF status
+            # Show year, item type, and PDF status
             year = match.get('year', '?')
+            item_type = match.get('item_type') or match.get('itemType', 'unknown')
             has_pdf = match.get('has_attachment', match.get('hasAttachment', False))
             pdf_icon = '✅' if has_pdf else '❌'
-            print(f"      Year: {year}  |  PDF: {pdf_icon}")
+            print(f"      Year: {year}  |  Type: {item_type}  |  PDF: {pdf_icon}")
             
             # Show container info (journal/book/conference) based on document type
             container_info = match.get('container_info')
@@ -4327,13 +4602,14 @@ class PaperProcessorDaemon:
         
         return enhanced_metadata
     
-    def search_online_libraries(self, metadata: dict) -> dict:
-        """Search online libraries (CrossRef, arXiv) with metadata.
+    def search_online_libraries(self, metadata: dict, pdf_path: Path = None) -> dict:
+        """Search online libraries (CrossRef, arXiv, National Libraries) with metadata.
         
         Shows all results and lets user select one or choose "none".
         
         Args:
             metadata: Combined metadata (extracted + manual)
+            pdf_path: Path to PDF file (for language detection)
             
         Returns:
             Online metadata dict if user selected one, None if no results or user chose "none"
@@ -4467,9 +4743,60 @@ class PaperProcessorDaemon:
                         print("✅ Found book metadata")
                     else:
                         print("❌ No book metadata found")
+                        
+                        # Try national library search as fallback
+                        language = None
+                        if pdf_path:
+                            language = self._detect_language_from_filename(pdf_path)
+                        elif hasattr(self, '_original_scan_path') and self._original_scan_path:
+                            language = self._detect_language_from_filename(self._original_scan_path)
+                        if language and book_title:
+                            try:
+                                print(f"\n🔍 Trying national library search for {language}...")
+                                nat_lib_results = self._search_national_library_for_book(
+                                    book_title=book_title, 
+                                    editor=editor,
+                                    language=language,
+                                    country_code=language
+                                )
+                                if nat_lib_results:
+                                    all_results.extend(nat_lib_results)
+                                    source_name = "Google Books/OpenLibrary + National Libraries"
+                                    print(f"✅ Found {len(nat_lib_results)} additional result(s) in national libraries")
+                            except Exception as e:
+                                self.logger.error(f"National library search error: {e}")
+                                print(f"⚠️  National library search failed: {e}")
                 except Exception as e:
                     self.logger.error(f"Book lookup error: {e}")
                     print(f"⚠️  Book search failed: {e}")
+        
+        # Also try national library search for books and theses
+        if doc_type in ['book', 'thesis'] and not all_results:
+            title = metadata.get('title', '')
+            authors = metadata.get('authors', [])
+            language = None
+            if pdf_path:
+                language = self._detect_language_from_filename(pdf_path)
+            elif hasattr(self, '_original_scan_path') and self._original_scan_path:
+                language = self._detect_language_from_filename(self._original_scan_path)
+            
+            if title and language:
+                try:
+                    print(f"\n🔍 Trying national library search for {doc_type} ({language})...")
+                    nat_lib_results = self._search_national_library_for_book(
+                        book_title=title,
+                        authors=authors,
+                        language=language,
+                        country_code=language,
+                        item_type='books' if doc_type == 'book' else 'papers'
+                    )
+                    if nat_lib_results:
+                        all_results.extend(nat_lib_results)
+                        source_name = "National Libraries"
+                        print(f"✅ Found {len(nat_lib_results)} result(s) in national libraries")
+                except Exception as e:
+                    self.logger.error(f"National library search error: {e}")
+                    print(f"⚠️  National library search failed: {e}")
         
         if not all_results:
             print("❌ No matches found in online libraries")
@@ -4608,6 +4935,160 @@ class PaperProcessorDaemon:
         
         return normalized
     
+    def _detect_language_from_filename(self, pdf_path: Path) -> Optional[str]:
+        """Detect language from filename prefix (NO_, EN_, DE_, etc.)
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            Language code (NO, EN, DE, FI, SE) or None if not detected
+        """
+        filename = pdf_path.name.upper()
+        language_map = {
+            'NO_': 'NO',
+            'EN_': 'EN',
+            'DE_': 'DE',
+            'FI_': 'FI',
+            'SE_': 'SE'
+        }
+        
+        for prefix, lang_code in language_map.items():
+            if filename.startswith(prefix):
+                return lang_code
+        
+        return None
+    
+    def _search_national_library_for_book(self, book_title: str, editor: str = None, 
+                                         authors: list = None, language: str = None,
+                                         country_code: str = None, item_type: str = 'books') -> list:
+        """Search national library for book, book chapter, or thesis metadata.
+        
+        Args:
+            book_title: Title to search for
+            editor: Optional editor name (for book chapters)
+            authors: Optional list of author names
+            language: Language code (NO, EN, DE, etc.)
+            country_code: Country code for library selection (defaults to language)
+            item_type: 'books' or 'papers' (theses are usually papers)
+            
+        Returns:
+            List of normalized metadata dicts compatible with CrossRef/arXiv format
+        """
+        results = []
+        
+        if not book_title:
+            return results
+        
+        # Build search query from title + editor/author
+        query_parts = [book_title]
+        if editor:
+            query_parts.append(editor)
+        elif authors:
+            # Use first author if available
+            first_author = authors[0] if isinstance(authors[0], str) else ' '.join(authors[0]) if isinstance(authors[0], list) else str(authors[0])
+            query_parts.append(first_author)
+        
+        query = ' '.join(query_parts)
+        
+        # Get appropriate client
+        client = None
+        if country_code:
+            client = self.national_library_manager.get_client_by_country_code(country_code)
+        elif language:
+            client = self.national_library_manager.get_client_by_language(language.lower())
+        
+        if not client:
+            self.logger.warning(f"No national library client found for language={language}, country={country_code}")
+            return results
+        
+        try:
+            # Search national library
+            search_result = client.search(query, item_type=item_type)
+            
+            # Extract results
+            if item_type == 'books':
+                items = search_result.get('books', [])
+            else:
+                items = search_result.get('papers', [])
+            
+            # Normalize each result
+            for item in items[:5]:  # Limit to 5 results
+                normalized = self._normalize_national_library_result(item, book_title, editor, item_type)
+                if normalized:
+                    results.append(normalized)
+        
+        except Exception as e:
+            self.logger.error(f"Error searching national library: {e}")
+        
+        return results
+    
+    def _normalize_national_library_result(self, item: dict, expected_title: str = None,
+                                          expected_editor: str = None, item_type: str = 'books') -> Optional[dict]:
+        """Normalize national library result to standard format.
+        
+        Args:
+            item: Raw result from national library API
+            expected_title: Expected title for validation
+            expected_editor: Expected editor (for book chapters)
+            item_type: 'books' or 'papers'
+            
+        Returns:
+            Normalized metadata dict or None if invalid
+        """
+        try:
+            normalized = {}
+            
+            # Extract title
+            title = item.get('title') or item.get('book_title', '')
+            if not title:
+                return None  # Skip items without title
+            
+            normalized['title'] = title
+            
+            # Extract authors
+            authors = item.get('authors', [])
+            if isinstance(authors, list) and authors:
+                normalized['authors'] = [str(a) for a in authors if a]
+            else:
+                normalized['authors'] = []
+            
+            # Extract editors (for book chapters)
+            editors = item.get('editors', [])
+            if editors:
+                normalized['editors'] = [str(e) for e in editors if e]
+            
+            # Extract publisher
+            publisher = item.get('publisher', '')
+            if publisher:
+                normalized['publisher'] = publisher
+            
+            # Extract year
+            year = item.get('year', '')
+            if year:
+                normalized['year'] = str(year)
+            
+            # Extract ISBN
+            isbn = item.get('isbn', '')
+            if isbn:
+                normalized['isbn'] = isbn
+            
+            # Extract URL
+            url = item.get('url', '')
+            if url:
+                normalized['url'] = url
+            
+            # For book chapters, preserve chapter title
+            if expected_editor:
+                normalized['book_title'] = title
+                # Chapter title would be in original metadata
+            
+            return normalized
+        
+        except Exception as e:
+            self.logger.error(f"Error normalizing national library result: {e}")
+            return None
+    
     def handle_create_new_item(self, pdf_path: Path, extracted_metadata: dict) -> bool:
         """Handle creating a new Zotero item with online library check.
         
@@ -4649,7 +5130,7 @@ class PaperProcessorDaemon:
                 if not proceed:  # Enter = default yes
                     proceed = 'y'
                 if proceed == 'y':
-                    online_metadata = self.search_online_libraries(combined_metadata)
+                    online_metadata = self.search_online_libraries(combined_metadata, pdf_path=pdf_path)
                     break
                 elif proceed == 'n':
                     online_metadata = None
@@ -4921,15 +5402,92 @@ class PaperProcessorDaemon:
         while True:
             choice = input("\nProceed or edit? [y/e/z]: ").strip().lower()
             
+            # Enter (empty string) always proceeds (acts as 'y')
+            if not choice:
+                choice = 'y'
+            
             if choice == 'z':
                 print("⬅️  Going back to item selection")
                 return
             elif choice == 'e':
-                # User wants to edit - notify and exit
-                print("ℹ️  Please edit this item in Zotero, then process the scan again")
-                self.move_to_manual_review(pdf_path)
-                return
-            elif choice == 'y' or choice == '':
+                # User wants to edit tags - offer interactive tag editing
+                item_key = selected_item.get('key') or selected_item.get('item_key')
+                if not item_key:
+                    print("❌ No item key found - cannot edit tags")
+                    print("ℹ️  Please edit this item in Zotero, then process the scan again")
+                    self.move_to_manual_review(pdf_path)
+                    return
+                
+                # Get current tags from the item (local search returns tags as strings)
+                current_tags_raw = selected_item.get('tags', [])
+                # Convert to dict format for edit_tags_interactively if needed
+                # edit_tags_interactively expects dict format, but returns dict format
+                current_tags = [{'tag': tag} if isinstance(tag, str) else tag for tag in current_tags_raw]
+                
+                # Offer tag editing
+                print("\n🏷️  EDIT TAGS")
+                print("="*70)
+                print("You can edit tags for this Zotero item.")
+                print("  (t) Edit tags interactively")
+                print("  (z) Go back (don't edit)")
+                print("  (m) Move to manual review (edit in Zotero directly)")
+                print("="*70)
+                
+                edit_choice = input("\nChoose edit option [t/z/m]: ").strip().lower()
+                
+                if edit_choice == 'z':
+                    # Go back to proceed/edit menu
+                    continue
+                elif edit_choice == 'm':
+                    # User wants to edit in Zotero directly
+                    print("ℹ️  Please edit this item in Zotero, then process the scan again")
+                    self.move_to_manual_review(pdf_path)
+                    return
+                elif edit_choice == 't':
+                    # Edit tags interactively
+                    print("\n✏️  Editing tags...")
+                    updated_tags = self.edit_tags_interactively(current_tags=current_tags)
+                    
+                    # Extract tag names from both lists for comparison
+                    # Both should be in dict format now
+                    current_tag_names = [tag['tag'] if isinstance(tag, dict) else str(tag) for tag in current_tags]
+                    updated_tag_names = [tag['tag'] if isinstance(tag, dict) else str(tag) for tag in updated_tags]
+                    
+                    # Calculate what to add and remove
+                    add_tags = [tag for tag in updated_tag_names if tag not in current_tag_names]
+                    remove_tags = [tag for tag in current_tag_names if tag not in updated_tag_names]
+                    
+                    if add_tags or remove_tags:
+                        print(f"\n💾 Saving tag changes to Zotero...")
+                        success = self.zotero_processor.update_item_tags(
+                            item_key, 
+                            add_tags=add_tags if add_tags else None,
+                            remove_tags=remove_tags if remove_tags else None
+                        )
+                        if success:
+                            print("✅ Tags updated successfully!")
+                            # Update selected_item with new tags for display
+                            selected_item['tags'] = updated_tags
+                        else:
+                            print("⚠️  Failed to update tags in Zotero")
+                            retry = input("Continue anyway? [y/N]: ").strip().lower()
+                            if retry != 'y':
+                                return
+                    else:
+                        print("ℹ️  No tag changes to save")
+                    
+                    # After editing tags, ask if they want to proceed
+                    print("\n" + "="*70)
+                    proceed = input("Proceed with PDF attachment? [Y/n]: ").strip().lower()
+                    if proceed == 'n':
+                        print("⬅️  Going back...")
+                        continue
+                    # Otherwise break and continue with attachment
+                    break
+                else:
+                    print("⚠️  Invalid choice, going back...")
+                    continue
+            elif choice == 'y':
                 # Continue with attachment
                 break
             else:
@@ -5012,7 +5570,7 @@ class PaperProcessorDaemon:
         print(f"  4. Move scan to: done/")
         print("="*70)
         print()
-        print("  (y) Proceed with all actions")
+        print("  (y/Enter) Proceed with all actions")
         print("  (n) Cancel - move to manual review")
         print("  (skip) Move to manual review")
         print("  (z) Go back to item selection")
@@ -5020,6 +5578,10 @@ class PaperProcessorDaemon:
         
         # Ask for confirmation
         confirm = input("Proceed with these actions? [y/n/skip/z]: ").strip().lower()
+        
+        # Enter (empty string) always proceeds (acts as 'y')
+        if not confirm:
+            confirm = 'y'
         
         if confirm == 'y' or confirm == 'yes':
             # Execute the actions
@@ -5061,6 +5623,7 @@ class PaperProcessorDaemon:
         # Step 1: Determine which PDF to use (original or split)
         pdf_to_copy = pdf_path
         name_lower = pdf_path.name.lower()
+        split_result = None
         
         if name_lower.endswith('_double.pdf'):
             # Always split on _double.pdf
@@ -5096,6 +5659,20 @@ class PaperProcessorDaemon:
             except Exception as e:
                 self.logger.debug(f"Two-up detection skipped: {e}")
                 pass
+        
+        # Step 1b: For book chapters, offer to delete page 1 after splitting
+        if split_result and metadata and metadata.get('document_type', '').lower() == 'book_chapter':
+            print("\nThis is a book chapter. After splitting, page 1 is typically blank.")
+            print("For book chapters, the first content page is usually page 2.")
+            choice = input("Delete page 1 from the split PDF? [y/N]: ").strip().lower()
+            if choice == 'y':
+                modified_pdf = self._delete_first_page_from_pdf(pdf_to_copy)
+                if modified_pdf:
+                    pdf_to_copy = modified_pdf
+                    self.logger.info(f"Using PDF without page 1: {modified_pdf.name}")
+                    print("✅ Page 1 deleted from split PDF")
+                else:
+                    print("⚠️  Failed to delete page 1 - using original split PDF")
         
         # Step 2: Copy to publications directory via PowerShell
         print(f"2/4 Copying to publications directory...")

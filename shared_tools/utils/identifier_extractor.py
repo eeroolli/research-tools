@@ -46,6 +46,25 @@ class IdentifierExtractor:
         r'\b([a-z\-]+(?:\.[A-Z]{2})?/\d{7})\b',
     ]
     
+    # Year patterns - common publication year formats
+    # Each pattern is a tuple: (pattern, pattern_type, priority_score)
+    # Priority: higher score = more likely to be publication year
+    YEAR_PATTERNS = [
+        # Pattern 1: Year in parentheses (YYYY) - very reliable for publication year
+        (r'\((\d{4})\)', 'parentheses', 10),
+        # Pattern 2: Copyright symbol with space © YYYY - high priority
+        (r'©\s+(\d{4})', 'copyright_spaced', 9),
+        # Pattern 3: Copyright symbol without space ©YYYY - high priority
+        (r'©(\d{4})', 'copyright', 9),
+        # Pattern 4: Comma-space-year pattern (anything, YYYY)
+        # Matches: "Plenum Press, New York, 1993" or "Something, 1993"
+        (r',\s+(\d{4})\b', 'comma_year', 8),
+        # Pattern 5: Standalone year with spaces (space YYYY word boundary)
+        # Matches: " 2023", " 2023 ", "2023 " with word boundaries
+        (r'\s+(\d{4})\b', 'standalone_spaced', 7),
+        (r'\b(\d{4})\s+', 'standalone_spaced', 7),
+    ]
+    
     @classmethod
     def extract_dois(cls, text: str) -> List[str]:
         """Extract all DOIs from text.
@@ -312,6 +331,209 @@ class IdentifierExtractor:
         return arxiv_ids
     
     @classmethod
+    def extract_years(cls, text: str) -> List[str]:
+        """Extract all publication years from text using common patterns.
+        
+        Looks for:
+        - Years in parentheses: (YYYY)
+        - Copyright symbol followed by year: © YYYY or ©YYYY
+        
+        Args:
+            text: Text to search for years
+            
+        Returns:
+            List of unique year strings (1900-2100) found in text
+        """
+        years = []
+        seen_years = set()
+        
+        for pattern_data in cls.YEAR_PATTERNS:
+            pattern = pattern_data[0]  # Extract pattern string
+            matches = re.finditer(pattern, text)
+            for match in matches:
+                # All patterns capture year in group 1
+                year_str = match.group(1)
+                
+                # Validate year is in reasonable range (1900-2100)
+                try:
+                    year = int(year_str)
+                    if 1900 <= year <= 2100:
+                        if year_str not in seen_years:
+                            years.append(year_str)
+                            seen_years.add(year_str)
+                except ValueError:
+                    continue
+        
+        return years
+    
+    @classmethod
+    def extract_best_year(cls, text: str) -> Optional[str]:
+        """Extract the most likely publication year from text.
+        
+        Scores years based on:
+        - Position in text (earlier = higher score, especially first 30%)
+        - Pattern type (parentheses and copyright = higher score)
+        - Body text detection: years in body text sections (3+ similar-length lines) are ignored
+        - Exception: footers are still checked (years in footers are valid)
+        - Proximity to publication-related keywords
+        
+        Args:
+            text: Text to search for years
+            
+        Returns:
+            Best candidate year string (1900-2100) or None if no valid year found
+        """
+        if not text:
+            return None
+        
+        text_length = len(text)
+        candidates = []  # List of (year_str, score, position) tuples
+        
+        # Publication-related keywords that indicate this is likely the publication year
+        publication_keywords = [
+            'published', 'publication', 'copyright', '©', 'copyrighted',
+            'vol', 'volume', 'issue', 'journal', 'article', 'paper'
+        ]
+        
+        # Check word count - short pages (<50 words) like title pages don't need body text filtering
+        word_count = len(text.split())
+        skip_body_text_filter = word_count < 50
+        
+        # First pass: Identify body text regions (3+ consecutive lines of similar length)
+        # Body text sections are where we'll ignore years (except in footers)
+        # Skip this for short pages (title pages, thesis covers, etc.)
+        lines = text.split('\n')
+        body_text_regions = []  # List of (start_pos, end_pos) tuples for body text regions
+        
+        if skip_body_text_filter:
+            # Short page - treat entire page as metadata, no body text filtering
+            pass
+        else:
+            # Find body text regions by scanning for 3 consecutive similar-length lines
+            for i in range(len(lines) - 2):
+                # Check three consecutive lines
+                three_lines = [lines[i].strip(), lines[i+1].strip(), lines[i+2].strip()]
+                # Filter out empty lines for length calculation
+                non_empty_lengths = [len(line) for line in three_lines if line]
+                
+                if len(non_empty_lengths) >= 3:
+                    avg_length = sum(non_empty_lengths) / 3
+                    # Skip very short lines (likely metadata)
+                    if avg_length >= 20:
+                        # Check if all three are within 15% of average (stricter = better body text detection)
+                        variance_ok = all(
+                            abs(length - avg_length) / avg_length <= 0.15
+                            for length in non_empty_lengths
+                        )
+                        if variance_ok:
+                            # Found body text region starting at line i
+                            # Extend region until we find non-body-text lines
+                            region_start = i
+                            region_end = i + 2
+                            
+                            # Extend forward while lines remain similar
+                            for j in range(i + 3, len(lines)):
+                                current_line = lines[j].strip()
+                                if not current_line:
+                                    continue
+                                current_length = len(current_line)
+                                # Check if this line is similar to the body text pattern
+                                if abs(current_length - avg_length) / avg_length <= 0.15:
+                                    region_end = j
+                                else:
+                                    break
+                            
+                            # Check if this region is in footer (last 10% of text)
+                            # Calculate position in text for this region
+                            region_start_pos = sum(len(lines[k]) + 1 for k in range(region_start))  # +1 for newline
+                            region_end_pos = sum(len(lines[k]) + 1 for k in range(region_end + 1))
+                            position_ratio_end = region_end_pos / text_length if text_length > 0 else 0
+                            
+                            # Only mark as body text if NOT in footer (last 10%)
+                            if position_ratio_end < 0.9:
+                                body_text_regions.append((region_start_pos, region_end_pos))
+        
+        # Helper function to check if position is in body text
+        def is_in_body_text(pos: int) -> bool:
+            for start, end in body_text_regions:
+                if start <= pos <= end:
+                    return True
+            return False
+        
+        # Second pass: Extract years, skipping those in body text regions
+        for pattern_data in cls.YEAR_PATTERNS:
+            pattern, pattern_type, base_score = pattern_data
+            matches = re.finditer(pattern, text)
+            
+            for match in matches:
+                year_str = match.group(1)
+                
+                # Validate year is in reasonable range
+                try:
+                    year = int(year_str)
+                    if 1900 <= year <= 2100:
+                        position = match.start()
+                        position_ratio = position / text_length if text_length > 0 else 0
+                        
+                        # Skip years in body text regions (citations in paragraphs)
+                        # Exception: footers are still checked
+                        if is_in_body_text(position):
+                            continue  # Skip this candidate - it's in body text
+                        
+                        # Calculate score for years in short paragraphs (likely metadata)
+                        score = base_score
+                        
+                        # Position bonus: earlier in text = higher score
+                        # First 15% gets maximum bonus (very early = likely metadata)
+                        if position_ratio <= 0.15:
+                            position_bonus = 8 * (1 - position_ratio / 0.15)  # 0-8 bonus for very early
+                        elif position_ratio <= 0.3:
+                            position_bonus = 4 * (1 - (position_ratio - 0.15) / 0.15)  # 0-4 bonus
+                        elif position_ratio <= 0.5:
+                            position_bonus = 2 * (1 - (position_ratio - 0.3) / 0.2)  # 0-2 bonus
+                        else:
+                            position_bonus = 0
+                        score += position_bonus
+                        
+                        # Keyword proximity bonus: check if publication keywords nearby
+                        context_start = max(0, position - 50)
+                        context_end = min(text_length, position + 100)
+                        context = text[context_start:context_end].lower()
+                        
+                        keyword_bonus = 0
+                        for keyword in publication_keywords:
+                            if keyword in context:
+                                keyword_bonus += 3  # Increased bonus for publication keywords
+                                break  # Only count once
+                        score += keyword_bonus
+                        
+                        candidates.append((year_str, score, position, year))
+                        
+                except ValueError:
+                    continue
+        
+        if not candidates:
+            return None
+        
+        # Find the maximum (most recent) year among all candidates
+        # You can't cite something from the future, so most recent year gets bonus
+        max_year = max(candidate[3] for candidate in candidates) if candidates else None
+        
+        # Add recency bonus: most recent year gets +5 bonus
+        # Format: (year_str, score, position, year_int)
+        updated_candidates = []
+        for year_str, score, position, year_int in candidates:
+            if year_int == max_year:
+                score += 5  # Bonus for most recent year
+            updated_candidates.append((year_str, score, position))
+        
+        # Sort by score (descending), then by position (ascending) as tiebreaker
+        updated_candidates.sort(key=lambda x: (-x[1], x[2]))
+        
+        # Return the highest scoring year
+        return updated_candidates[0][0]
+    
+    @classmethod
     def extract_all(cls, text: str) -> dict:
         """Extract all identifiers from text.
         
@@ -328,15 +550,19 @@ class IdentifierExtractor:
             'arxiv_ids': cls.extract_arxiv_ids(text),
             'jstor_ids': cls.extract_jstor_ids(text),
             'urls': cls.extract_urls(text),
+            'years': cls.extract_years(text),
+            'best_year': cls.extract_best_year(text),
         }
     
     @classmethod
-    def extract_first_page_identifiers(cls, pdf_path) -> dict:
+    def extract_first_page_identifiers(cls, pdf_path, document_type: Optional[str] = None) -> dict:
         """Extract identifiers from first page of PDF.
         
         Args:
             pdf_path: Path to PDF file
-            
+            document_type: Optional document type (e.g., 'book_chapter') for type-specific handling
+                          - 'book_chapter': Handles landscape pages by ignoring left side if right has more content
+                          
         Returns:
             Dictionary with found identifiers
         """
@@ -344,7 +570,7 @@ class IdentifierExtractor:
             import pdfplumber
         except ImportError:
             print("Error: pdfplumber not installed")
-            return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': []}
+            return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}
         
         try:
             from pathlib import Path
@@ -352,21 +578,75 @@ class IdentifierExtractor:
             
             with pdfplumber.open(pdf_path) as pdf:
                 if len(pdf.pages) == 0:
-                    return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': []}
+                    return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}
                 
                 # Extract text from first page
                 first_page = pdf.pages[0]
-                text = first_page.extract_text()
+                
+                # For book chapters, handle landscape pages (left side might be previous chapter)
+                if document_type == 'book_chapter':
+                    text = cls._extract_text_for_book_chapter(first_page)
+                else:
+                    text = first_page.extract_text()
                 
                 if not text:
-                    return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': []}
+                    return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}
                 
                 # Extract all identifiers
                 return cls.extract_all(text)
                 
         except Exception as e:
             print(f"Error extracting identifiers from {pdf_path}: {e}")
-            return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': []}
+            return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}
+    
+    @classmethod
+    def _extract_text_for_book_chapter(cls, page) -> str:
+        """Extract text from book chapter page, handling landscape format.
+        
+        For landscape pages, the left side might be the end of the previous chapter.
+        We detect this and ignore the left side if it has much less content than the right side.
+        
+        Args:
+            page: pdfplumber page object
+            
+        Returns:
+            Extracted text (right side only if landscape and left side has less content)
+        """
+        # Check if page is landscape (width > height)
+        width = page.width
+        height = page.height
+        is_landscape = width > height
+        
+        if not is_landscape:
+            # Portrait page - extract normally
+            return page.extract_text() or ""
+        
+        # Landscape page - extract left and right sides separately
+        # Split page into left and right halves
+        mid_x = width / 2
+        
+        # Extract from left half
+        left_bbox = (0, 0, mid_x, height)
+        left_crop = page.crop(left_bbox)
+        left_text = left_crop.extract_text() or ""
+        left_words = len(left_text.split())
+        
+        # Extract from right half
+        right_bbox = (mid_x, 0, width, height)
+        right_crop = page.crop(right_bbox)
+        right_text = right_crop.extract_text() or ""
+        right_words = len(right_text.split())
+        
+        # Decision: if right side has significantly more words, ignore left side
+        # Threshold: right side has at least 2x more words than left
+        if right_words > 0 and left_words > 0:
+            word_ratio = right_words / left_words
+            if word_ratio >= 2.0:
+                # Right side has much more content - use only right side
+                return right_text
+        
+        # Otherwise, use both sides (left might be valid content)
+        return (left_text + "\n" + right_text).strip()
 
 
 if __name__ == "__main__":
@@ -394,6 +674,32 @@ if __name__ == "__main__":
     print(f"ISSNs found: {results['issns']}")
     print(f"ISBNs found: {results['isbns']}")
     print(f"URLs found: {results['urls']}")
+    print(f"Years found: {results['years']}")
+    
+    # Test year extraction
+    print("\n" + "=" * 60)
+    print("Testing year extraction:")
+    year_test_text = """
+    This article was published in (2023)
+    © 2022 All rights reserved
+    Copyright ©2021
+    Volume 45, Issue 3
+    
+    Lots of text here. As Wildavsky wrote (1995), this is important.
+    This paragraph contains many words and would be considered body text.
+    Douglas (1986) argued that we should consider this issue carefully.
+    Smith and Jones (2000) found similar results in their research studies.
+    Some text (1995) with year in parentheses later in document that is also body text.
+    """
+    year_results = IdentifierExtractor.extract_years(year_test_text)
+    print(f"All years found: {year_results}")
+    best_year = IdentifierExtractor.extract_best_year(year_test_text)
+    print(f"Best year (should be 2023, 2022, or 2021 - citation years in body text ignored): {best_year}")
+    expected_years = ['2023', '2022', '2021', '1995', '1986', '2000']
+    print(f"Expected years in list: {expected_years}")
+    print(f"All years found in list: {all(year in year_results for year in expected_years)}")
+    # Best year should be early publication year, NOT citation years from body text
+    print(f"Best year is publication year (body text citations ignored): {best_year in ['2023', '2022', '2021']}")
     
     # Verify OCR error handling
     expected_ocr_dois = ['10.1080/13501780701394094', '10.1000/test.doi', '10.2000/example.doi']
