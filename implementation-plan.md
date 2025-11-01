@@ -20,8 +20,9 @@
   - Handle `on_moved` events as creates (common on Windows scanners)
 
 - Windows helper scripts:
-  - `scripts/stop_scanner_daemon.bat` → calls WSL `--stop`
-  - Optional VBS/PS1 with hidden window for quiet start/stop
+  - `scripts/start_scanner_daemon_restart.vbs` → Restart daemon (recommended before scanning session)
+  - `scripts/start_scanner_daemon_quiet.vbs` → Silent post-scan trigger (used by Epson Capture Pro)
+  - `scripts/stop_scanner_daemon.bat` → calls WSL `--stop` (future enhancement)
 
 Notes:
 - Start with CLI stop/status for immediate operability; others can follow incrementally.
@@ -96,6 +97,7 @@ At a glance:
 - **Smart Author Extraction** - Page-limited processing (first 2 pages) to avoid citation pollution
 - **Document Type Detection** - Automatic classification of academic documents (journal articles, books, conferences, etc.)
 - **Enhanced Metadata Extraction** - Keywords, publisher, volume, issue, pages, language, conference info
+- **Automatic Language Detection** - Detects language from filename prefix (NO_, EN_, DE_, FI_, SE_) and automatically adds to Zotero items (new items and updates existing items if language field is missing)
 - **Author Validation System** - Recognizes all authors in user's Zotero via lastname matching with alternatives
 
 ### 🚧 **In Progress:**
@@ -144,6 +146,7 @@ At a glance:
 - **Improved identifier separation** - JSTOR URLs excluded from generic URL extraction to prevent confusion and double-counting
 - **Enhanced Zotero item selection UX** - Added metadata review step before attachment with options to edit, proceed, or go back
 - **UX flow optimization** - Eliminated duplicate code in item selection, streamlined metadata display
+- **Automatic language detection from filenames** - Detects language prefix (NO_, EN_, DE_, FI_, SE_) and automatically adds to Zotero items when creating new items or updating existing ones with missing language field
 
 ### ❌ **Not Completed:**
 - Detailed migration tasks from `archive/AI_CHAT_DOCUMENTS.md` (Phases 2-4)
@@ -474,21 +477,31 @@ Note: Largely covered by GROBID already (title/authors/venue/year from first pag
 - [x] **Separate workflows** - Books and papers use same underlying systems but different entry points
 - [x] **Configuration sharing** - Reuse existing config system (config.personal.conf)
 - [x] **Logging consistency** - Extend CSV logging with Zotero fields
-- [x] **Scanner integration** - Epson buttons to be configured for NO/EN/DE languages
+- [x] **Scanner integration** - Epson Capture Pro jobs configured with language prefixes (NO_, EN_, DE_) and orientations (Portrait/Landscape), post-scan action triggers quiet.vbs
 - [x] **Conference detection** - conference_detector.py for presentations (Oct 11, 2025)
 - [x] **Interactive menu** - PENDING: Add to process_scanned_papers.py (NEXT SESSION)
 - [ ] **Testing** - End-to-end testing with real scanner
 
 #### 4.6 User Workflow (Target) ✅
+**Current Workflow:**
 ```
-1. Press Epson scanner button (NO/EN/DE)
-2. Scanner saves PDF to I:\FraScanner\papers\
-3. Scanner triggers start_paper_processor.py
-4. Daemon processes automatically (5-130 seconds depending on identifiers)
-5. ✅ INTERACTIVE MENU: User reviews and approves actions
-6. Execute approved actions
-7. Ready for next scan
+1. Start daemon (run start_scanner_daemon_restart.vbs)
+2. Turn on scanner
+3. Put paper in scanner
+4. Open Epson Capture Pro
+5. Click job (Language/Orientation)
+6. Scan document
+7. Save document (to scanner folder)
+8. Epson triggers quiet.vbs (silently)
+9. Terminal opens with PDF info
+10. Make choices & edit metadata
+11. Metadata (tags etc) saved to Zotero
+12. PDF saved to publications folder (with new name or not)
+13. PDF linked to Zotero item
+14. Done - Recycle paper, ready for next scan
 ```
+
+**See SCANNER_SETUP.md for detailed configuration and workflow.**
 
 **Target timing:** 5-10 seconds for papers with DOI/arXiv, 65-130 seconds for papers needing Ollama
 

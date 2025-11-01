@@ -9,9 +9,9 @@ This guide explains how to configure your Epson scanner to automatically trigger
 ## Prerequisites
 
 - ✅ Epson Capture Pro installed on Windows
-- ✅ WSL2 with research-tools installed
-- ✅ Paper processor daemon implemented
-- ✅ Batch/PowerShell launcher scripts created
+- ✅ WSL2 with research-tools repo installed
+- ✅ Paper processor daemon implemented (done)
+- ✅ Batch/PowerShell launcher scripts created (done)
 - ✅ **GROBID Integration** - Advanced academic paper metadata extraction
 - ✅ **Docker** - For GROBID container (auto-started by daemon)
 
@@ -66,16 +66,14 @@ Starting paper processor daemon...
 
 1. **Go to:** Advanced Settings → Post-Processing → Run Program
 2. **Enable:** "Run program after job completion"
-3. **Choose ONE option:**
-
-   **VBS Launcher (Recommended)**
+3. **Use Quiet Launcher (Recommended):**
    ```
-   F:\prog\research-tools\scripts\start_scanner_daemon.vbs
+   F:\prog\research-tools\scripts\start_scanner_daemon_quiet.vbs
    ```
    - Epson compatible
-   - Shows helpful startup message
+   - Runs silently (no popup windows)
    - Works on any Windows computer
-   - User-friendly feedback
+   - Best for automated post-scan triggering
 
 4. **Save settings**
 
@@ -85,44 +83,78 @@ Starting paper processor daemon...
 
 ### Button Configuration
 
-Create separate jobs/profiles for each language:
+Create separate jobs/profiles for each language and orientation:
 
-**Norwegian Button:**
-- Name: "Papers - Norwegian"
-- Language prefix: NO_
-- Destination: I:\FraScanner\papers\
-- Post-action: Run scripts\start_scanner_daemon.vbs
-
-**English Button:**
-- Name: "Papers - English"
+**English Portrait:**
+- Name: "Papers - English Portrait"
 - Language prefix: EN_
-- Destination: I:\FraScanner\papers\
-- Post-action: Run scripts\start_scanner_daemon.vbs
+- Scan settings:
+  - Scan double-sided
+  - Scan language: English
+  - Remove empty pages (in case it is only one-sided scan)
+- Save settings:
+   - Filename pattern: Starts with `EN_`
+   - PDF - Options - Language: English
+   - Location: I:\FraScanner\papers\ (or what every you defined in config.conf)
+- Index settings off
+- Send Settings
+   - Destination: Application - Setting name - Edit
+           `[add path]\research-tools\scripts\start_scanner_daemon_quiet.vbs`
 
-**German Button:**
-- Name: "Papers - German"
-- Language prefix: DE_
-- Destination: I:\FraScanner\papers\
-- Post-action: Run scripts\start_scanner_daemon.vbs
+**English Landscape:**
+- Name: "Papers - English Landscape"
+- Description: To be used when there are two pages next to each other like in a book
+- All the same settings as English Portait but add:
+   Filename pattern: Starts with `EN_` and ends with `_double`
+
+**Other Languages:**
+You can create similar profiles for other languages (Norwegian, German, etc.):
+- Each with: exactly same settings as the English ones, except: 
+- Norwegian Portrait: Prefix `NO_`
+- German Portrait: Prefix `DE_`
+- And so on...
 
 ---
 
-## Step 4: Test the Setup
+## Step 4: Starting the Daemon Before Scanning
+
+### Initial Startup
+
+**Before you start scanning, do a full restart of the daemon:**
+
+1. **Run the restart script:**
+   ```
+   F:\prog\research-tools\scripts\start_scanner_daemon_restart.vbs
+   ```
+   - This ensures a clean start
+   - Stops any existing daemon instance
+   - Starts fresh daemon process
+   - Recommended: Run this when you begin your scanning session or if you have any problems.
+
+2. **Verify daemon is running:**
+   ```cmd
+   wsl cat /mnt/i/FraScanner/papers/.daemon.pid
+   wsl ps aux | findstr paper_processor_daemon
+   ```
+   You should see the PID file and process running.
+
+---
+
+## Step 5: Test the Setup
 
 ### Test Sequence
 
-1. **Start fresh:**
+1. **Start with restart (if not already running):**
    ```cmd
-   wsl cat /mnt/i/FraScanner/papers/.daemon.pid
+   F:\prog\research-tools\scripts\start_scanner_daemon_restart.vbs
    ```
-   If file exists, daemon is already running.
 
 2. **Scan a test document:**
    - Press your configured scanner button
    - Watch for:
      - PDF saved to I:\FraScanner\papers\
-     - Batch file runs (window may flash)
-     - Daemon terminal appears (first time only)
+     - Quiet VBS script runs silently (no popup)
+     - Daemon processes the file automatically
 
 3. **Verify daemon is running:**
    ```cmd
@@ -131,13 +163,13 @@ Create separate jobs/profiles for each language:
    ```
 
 4. **Check processing:**
-   - Watch daemon terminal for activity
+   - Check daemon logs or terminal for activity
    - Should show: "New scan detected: EN_..."
    - Should process automatically
 
 5. **Test second scan:**
    - Scan another document
-   - Batch file runs instantly (daemon already running)
+   - Quiet VBS script runs silently (daemon already running)
    - New PDF processed automatically
 
 ---
@@ -146,74 +178,105 @@ Create separate jobs/profiles for each language:
 
 ```
 ┌─────────────────┐
-│ Press Scanner   │
-│ Button (NO/EN/DE)│
+│ Start Daemon    │
+│ Run restart     │
+│ script          │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ Epson scans &   │
-│ saves PDF to    │
-│ I:\FraScanner\  │
-│    papers\      │
+│ Turn on         │
+│ Scanner         │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Put the Paper   │
+│ in Scanner      │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Open Epson      │
+│ Capture Pro     │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Click Job       │
+│ (Language/      │
+│  Orientation)   │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Scan            │
+│ Document        │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Save            │
+│ Document        │
+│ (to scanner     │
+│  folder)        │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
 │ Epson triggers  │
-│ start_scanner_  │
-│ daemon.bat      │
+│ quiet.vbs       │
+│ (silently)      │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ Batch calls WSL:│
-│ Check if daemon │
-│ running?        │
-└────────┬────────┘
-         │
-    ┌────┴────┐
-    │ NO  YES │
-    │         │
-    ▼         ▼
-┌───────┐ ┌──────┐
-│Start  │ │Exit  │
-│Daemon │ │Fast  │
-│Show   │ │(<1sec)│
-│Terminal│ │      │
-└───┬───┘ └──────┘
-    │
-    ▼
-┌─────────────────┐
-│ Daemon detects  │
-│ new PDF         │
-│ (within 2 sec)  │
+│ Terminal       │
+│ Opens with     │
+│ PDF Info       │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ Extract metadata│
-│ (DOI/API/Ollama)│
+│ Make Choices   │
+│ & Edit         │
+│ Metadata       │
+│ (see           │
+│  PAPER_        │
+│  PROCESSOR_    │
+│  UX_FLOW.md)   │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ Interactive Menu│
-│ (FUTURE)        │
-│ User decides    │
+│ Metadata       │
+│ (tags etc)     │
+│ Saved to       │
+│ Zotero         │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ Add to Zotero   │
-│ Move to done/   │
-│ or failed/      │
+│ PDF Saved      │
+│ to             │
+│ Publications   │
+│ Folder         │
+│ (with new      │
+│  name or not)  │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ ✅ Ready for    │
-│ next scan       │
+│ PDF Linked     │
+│ to Zotero      │
+│ Item           │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ ✅ Done        │
+│ Recycle Paper  │
+│ Ready for Next │
 └─────────────────┘
 ```
 
@@ -221,16 +284,21 @@ Create separate jobs/profiles for each language:
 
 ## Troubleshooting
 
-### Batch file doesn't run
+### VBS script doesn't run
 
 **Check Epson Capture Pro settings:**
-- Verify path is correct: `F:\prog\research-tools\scripts\start_scanner_daemon.bat`
+- Verify path is correct: `F:\prog\research-tools\scripts\start_scanner_daemon_quiet.vbs`
 - Try absolute path without spaces
 - Check "Run as administrator" if needed
 
 **Test manually:**
 ```cmd
-F:\prog\research-tools\scripts\start_scanner_daemon.bat
+F:\prog\research-tools\scripts\start_scanner_daemon_quiet.vbs
+```
+
+**Or test the restart script:**
+```cmd
+F:\prog\research-tools\scripts\start_scanner_daemon_restart.vbs
 ```
 
 ### Daemon doesn't start
@@ -309,7 +377,8 @@ Create different batch files for different workflows:
 
 | File | Windows Path | WSL Path |
 |------|-------------|----------|
-| VBS launcher | `F:\prog\research-tools\scripts\start_scanner_daemon.vbs` | `/mnt/f/prog/research-tools/scripts/start_scanner_daemon.vbs` |
+| Quiet VBS launcher (post-scan) | `F:\prog\research-tools\scripts\start_scanner_daemon_quiet.vbs` | `/mnt/f/prog/research-tools/scripts/start_scanner_daemon_quiet.vbs` |
+| Restart VBS launcher (startup) | `F:\prog\research-tools\scripts\start_scanner_daemon_restart.vbs` | `/mnt/f/prog/research-tools/scripts/start_scanner_daemon_restart.vbs` |
 | Python launcher | `F:\prog\research-tools\scripts\start_paper_processor.py` | `/mnt/f/prog/research-tools/scripts/start_paper_processor.py` |
 | Daemon script | `F:\prog\research-tools\scripts\paper_processor_daemon.py` | `/mnt/f/prog/research-tools/scripts/paper_processor_daemon.py` |
 | Scanner destination | `I:\FraScanner\papers\` | `/mnt/i/FraScanner/papers/` |
@@ -363,8 +432,11 @@ If GROBID fails to start:
 
 **From Windows:**
 ```cmd
-REM Test VBS launcher
-F:\prog\research-tools\scripts\start_scanner_daemon.vbs
+REM Start/restart daemon before scanning
+F:\prog\research-tools\scripts\start_scanner_daemon_restart.vbs
+
+REM Test quiet launcher (post-scan action)
+F:\prog\research-tools\scripts\start_scanner_daemon_quiet.vbs
 
 REM Check daemon status
 wsl cat /mnt/i/FraScanner/papers/.daemon.pid

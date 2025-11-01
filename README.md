@@ -16,12 +16,12 @@ For detailed development status, technical architecture, and upcoming features, 
 **Want to scan and process academic papers?**
 
 1. **Start the daemon:**
-   - **Windows**: Double-click `scripts/start_scanner_daemon.vbs`
+   - **Windows**: Double-click `scripts/start_scanner_daemon_restart.vbs` (recommended before scanning session)
    - **Linux/WSL**: `python scripts/paper_processor_daemon.py`
 
 2. **Scan your papers** to the configured scanner folder (see `config.conf: scanner_papers_dir`)
    - Use any scanner that saves PDFs
-   - Or drag-drop PDFs manually
+   - Or drag-drop PDFs manually to the folder
 
 3. **Review each paper** in the interactive menu:
    - Approve extracted metadata
@@ -32,19 +32,19 @@ For detailed development status, technical architecture, and upcoming features, 
 4. **Stop when done:** Press Ctrl+C in the terminal
 
 **Setup for Epson Scanner:**
-1. In Epson Capture Pro, set "After Scan" action to run Application `scripts/start_scanner_daemon.vbs`.
-2. The VBS shows a helpful message about startup time (30 seconds, can be closed)
-3. Daemon continues starting in background even if you close the message
+1. **Before scanning**: Run `scripts/start_scanner_daemon_restart.vbs` to start/restart the daemon
+2. In Epson Capture Pro, set "After Scan" action (Send Settings → Destination → Application) to run `scripts/start_scanner_daemon_quiet.vbs`
+3. The quiet VBS runs silently in the background (no popup windows)
 
 **Optimal Epson Scanner Settings for OCR Quality:**
 - **Text Enhancement**: OFF (better OCR results when disabled)
 - **Portrait Mode**: 400 dpi (single-page scans)
 - **Landscape Mode**: 600 dpi (two-up scans that will be split later)
-- **Note**: GPU acceleration is not currently used for scanner OCR processing
+- **Note**: GPU acceleration is not currently used for scanner OCR processing     
 
 **Startup Time:**
-- **First scan of day**: ~60 seconds (Ollama startup + Python imports)
-- **Subsequent scans**: ~5 seconds (Ollama already running)
+- **First scan of day**: ~60 seconds (GROBID startup + Python imports)
+- **Subsequent scans**: ~5 seconds (Grobid already running)
 
 **Features:**
 - ✅ **GROBID Integration** - Advanced academic paper metadata extraction
