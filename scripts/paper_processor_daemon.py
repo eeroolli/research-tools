@@ -1206,7 +1206,7 @@ class PaperProcessorDaemon:
             
             # Step 2: Try quick title/DOI search first
             if metadata.get('title') or metadata.get('doi'):
-                print("\n🔍 Quick search by title/DOI...")
+                print("\n🔍 Quick Zotero search using found info...")
                 matches = self.local_zotero.search_by_metadata(metadata, max_matches=10)
                 
                 if matches:
@@ -1982,9 +1982,35 @@ class PaperProcessorDaemon:
             online_authors if online_authors else None,
             local_authors if local_authors else None
         )
-        new_value = input("New authors (comma-separated, or Enter to keep current): ").strip()
+        
+        # Show author count and quick options if there are many authors
+        author_count = len(edited.get('authors', []))
+        if author_count > 5:
+            print(f"\n⚠️  Found {author_count} authors. Quick options:")
+            print("  (clear)  Delete all authors")
+            print("  (first)  Use only first author")
+            print("  (last)   Use only last author")
+        
+        new_value = input("New authors (comma-separated, Enter to keep, 'clear', 'first', or 'last'): ").strip()
         if new_value:
-            edited['authors'] = [a.strip() for a in new_value.split(',')]
+            if new_value.lower() == 'clear':
+                edited['authors'] = []
+                print("✅ All authors deleted")
+            elif new_value.lower() == 'first':
+                if edited.get('authors'):
+                    edited['authors'] = [edited['authors'][0]]
+                    print(f"✅ Using only first author: {edited['authors'][0]}")
+                else:
+                    print("⚠️  No authors to select from")
+            elif new_value.lower() == 'last':
+                if edited.get('authors'):
+                    last_author = edited['authors'][-1]
+                    edited['authors'] = [last_author]
+                    print(f"✅ Using only last author: {last_author}")
+                else:
+                    print("⚠️  No authors to select from")
+            else:
+                edited['authors'] = [a.strip() for a in new_value.split(',')]
         elif online_metadata and online_metadata.get('authors') and not edited.get('authors'):
             edited['authors'] = online_metadata['authors']
             print(f"✅ Auto-filled from online: {', '.join(online_metadata['authors'])}")
@@ -2622,13 +2648,55 @@ class PaperProcessorDaemon:
         try:
             if 'TAG_GROUPS' in config:
                 for key, value in config['TAG_GROUPS'].items():
-                    # Parse comma-separated tags
-                    tags = [tag.strip() for tag in value.split(',') if tag.strip()]
+                    # Parse enhanced syntax: "add:tag1,tag2 remove:tag3" or simple "tag1,tag2"
+                    tags = self._parse_tag_group_syntax(value)
                     tag_groups[key] = tags
         except Exception as e:
             self.logger.warning(f"Could not load tag groups: {e}")
         
         return tag_groups
+    
+    def _parse_tag_group_syntax(self, value: str) -> list:
+        """Parse tag group value with enhanced syntax support.
+        
+        Supports:
+        - "tag1,tag2" - simple comma-separated list
+        - "add:tag1,tag2" - explicit add
+        - "add:tag1,tag2 remove:tag3" - add and remove
+        - "remove:tag1,tag2" - explicit remove only
+        
+        Returns list of tag operations dict with 'add' and/or 'remove' keys.
+        """
+        if not value:
+            return []
+        
+        # Dictionary to store add and remove operations
+        operations = {'add': [], 'remove': []}
+        
+        # Check if we have add: or remove: prefixes
+        if 'add:' in value or 'remove:' in value:
+            # Parse enhanced syntax
+            parts = value.split()
+            current_operation = None
+            
+            for part in parts:
+                if part.startswith('add:'):
+                    current_operation = 'add'
+                    tags_str = part[4:]  # Remove "add:" prefix
+                    # Parse comma-separated tags
+                    tags = [tag.strip() for tag in tags_str.split(',') if tag.strip()]
+                    operations[current_operation].extend(tags)
+                elif part.startswith('remove:'):
+                    current_operation = 'remove'
+                    tags_str = part[7:]  # Remove "remove:" prefix
+                    # Parse comma-separated tags
+                    tags = [tag.strip() for tag in tags_str.split(',') if tag.strip()]
+                    operations[current_operation].extend(tags)
+        else:
+            # Simple syntax: just comma-separated tags
+            operations['add'] = [tag.strip() for tag in value.split(',') if tag.strip()]
+        
+        return operations
     
     def edit_tags_interactively(self, current_tags: list = None, online_tags: list = None, local_tags: list = None) -> list:
         """Interactive tag editing interface with separate menu system."""
@@ -2659,9 +2727,9 @@ class PaperProcessorDaemon:
             print("\n🔧 TAG ACTIONS:")
             
             # Show tag groups with their actual tags
-            group1_tags = ', '.join(self.tag_groups.get('group1', [])) or '(empty)'
-            group2_tags = ', '.join(self.tag_groups.get('group2', [])) or '(empty)'
-            group3_tags = ', '.join(self.tag_groups.get('group3', [])) or '(empty)'
+            group1_tags = self._format_tag_group_display(self.tag_groups.get('group1', {}))
+            group2_tags = self._format_tag_group_display(self.tag_groups.get('group2', {}))
+            group3_tags = self._format_tag_group_display(self.tag_groups.get('group3', {}))
             
             print("  (s) Skip tag editing")
             print(f"  1. Add tag group 1: {group1_tags}")
@@ -2722,26 +2790,62 @@ class PaperProcessorDaemon:
         
         return [name for name in tag_names if name.strip()]
     
+    def _format_tag_group_display(self, group_ops: dict) -> str:
+        """Format tag group operations for display.
+        
+        Args:
+            group_ops: Dict with 'add' and/or 'remove' keys containing lists of tags
+            
+        Returns:
+            Formatted string like "tag1, tag2" or "add:tag1, tag2 | remove:tag3"
+        """
+        if not group_ops or isinstance(group_ops, list):
+            # Backward compatibility: if it's a list, display as-is
+            if isinstance(group_ops, list):
+                return ', '.join(group_ops) if group_ops else '(empty)'
+            return '(empty)'
+        
+        add_tags = group_ops.get('add', [])
+        remove_tags = group_ops.get('remove', [])
+        
+        parts = []
+        if add_tags:
+            parts.append(', '.join(add_tags))
+        if remove_tags:
+            parts.append(f"remove: {', '.join(remove_tags)}")
+        
+        return ' | '.join(parts) if parts else '(empty)'
+    
     def _add_tag_group(self, working_tags: list, group_name: str) -> list:
-        """Add tags from a configured tag group."""
-        group_tags = self.tag_groups.get(group_name, [])
-        if not group_tags:
+        """Apply tag group operations (add and/or remove tags)."""
+        group_ops = self.tag_groups.get(group_name, {})
+        if not group_ops:
             print(f"❌ No tags configured for {group_name}")
             return working_tags
         
-        print(f"\n📋 {group_name.upper()} TAGS: {', '.join(group_tags)}")
-        confirm = input("Add these tags? [Y/n]: ").strip().lower()
-        if not confirm:  # Enter = default yes
-            confirm = 'y'
+        # Handle add operations
+        add_tags = group_ops.get('add', [])
+        remove_tags = group_ops.get('remove', [])
         
-        if confirm == 'y':
-            # Add tags without duplicates
-            for tag in group_tags:
-                if tag not in working_tags:
-                    working_tags.append(tag)
-            print(f"✅ Added {group_name} tags")
-        else:
-            print("❌ Tag group not added")
+        # Add tags without duplicates
+        for tag in add_tags:
+            if tag not in working_tags:
+                working_tags.append(tag)
+        
+        # Remove tags
+        for tag in remove_tags:
+            if tag in working_tags:
+                working_tags.remove(tag)
+        
+        # Format summary message
+        msg_parts = []
+        if add_tags:
+            msg_parts.append(f"Added: {', '.join(add_tags)}")
+        if remove_tags:
+            msg_parts.append(f"Removed: {', '.join(remove_tags)}")
+        
+        if msg_parts:
+            print(f"✅ {group_name} tags: {' | '.join(msg_parts)}")
         
         return working_tags
     
@@ -2751,18 +2855,10 @@ class PaperProcessorDaemon:
             print("❌ No online tags available")
             return working_tags
         
-        print(f"\n📋 ONLINE TAGS: {', '.join(online_tag_names)}")
-        confirm = input("Add these tags? [Y/n]: ").strip().lower()
-        if not confirm:  # Enter = default yes
-            confirm = 'y'
-        
-        if confirm == 'y':
-            for tag in online_tag_names:
-                if tag not in working_tags:
-                    working_tags.append(tag)
-            print("✅ Added online tags")
-        else:
-            print("❌ Online tags not added")
+        for tag in online_tag_names:
+            if tag not in working_tags:
+                working_tags.append(tag)
+        print(f"✅ Added online tags: {', '.join(online_tag_names)}")
         
         return working_tags
     
@@ -2772,18 +2868,10 @@ class PaperProcessorDaemon:
             print("❌ No local tags available")
             return working_tags
         
-        print(f"\n📋 LOCAL TAGS: {', '.join(local_tag_names)}")
-        confirm = input("Add these tags? [Y/n]: ").strip().lower()
-        if not confirm:  # Enter = default yes
-            confirm = 'y'
-        
-        if confirm == 'y':
-            for tag in local_tag_names:
-                if tag not in working_tags:
-                    working_tags.append(tag)
-            print("✅ Added local tags")
-        else:
-            print("❌ Local tags not added")
+        for tag in local_tag_names:
+            if tag not in working_tags:
+                working_tags.append(tag)
+        print(f"✅ Added local tags: {', '.join(local_tag_names)}")
         
         return working_tags
     
@@ -2901,7 +2989,7 @@ class PaperProcessorDaemon:
             True if file should be processed (academic paper)
         """
         # Only process files with academic paper prefixes
-        prefixes = ['NO_', 'EN_', 'DE_']
+        prefixes = ['NO_', 'EN_', 'DE_', 'SE_', 'FI_']
         name_lower = filename.lower()
         # Ignore our own generated split artifacts to prevent double-processing
         if name_lower.endswith('_split.pdf'):
@@ -2931,6 +3019,9 @@ class PaperProcessorDaemon:
             has_metadata = result.get('success') and result.get('metadata')
             has_authors = has_metadata and result['metadata'].get('authors')
             
+            # Preserve identifiers_found (contains years, etc.) from GREP step
+            identifiers_found = result.get('identifiers_found', {})
+            
             # Step 1b: If GREP + API succeeded, we're done (fast path)
             if has_authors:
                 method = result.get('method', 'unknown')
@@ -2945,12 +3036,13 @@ class PaperProcessorDaemon:
                 metadata = self.grobid_client.extract_metadata(pdf_path)
                 
                 if metadata and metadata.get('authors'):
-                    # GROBID succeeded
+                    # GROBID succeeded - preserve identifiers_found from GREP
                     result = {
                         'success': True,
                         'metadata': metadata,
                         'method': 'grobid',
-                        'processing_time_seconds': 0  # GROBID timing not tracked here
+                        'processing_time_seconds': 0,  # GROBID timing not tracked here
+                        'identifiers_found': identifiers_found  # Preserve GREP years
                     }
                     self.logger.info(f"✅ GROBID extracted: {len(metadata.get('authors', []))} authors")
                 else:
@@ -2964,6 +3056,8 @@ class PaperProcessorDaemon:
                     ollama_result = self.metadata_processor.process_pdf(pdf_path, use_ollama_fallback=True, 
                                                                        progress_callback=self._show_ollama_progress)
                     if ollama_result['success'] and ollama_result.get('metadata', {}).get('authors'):
+                        # Preserve identifiers_found from GREP
+                        ollama_result['identifiers_found'] = identifiers_found
                         result = ollama_result
                         # Only log "Ollama found authors" if Ollama was actually used (not regex fallback)
                         method = ollama_result.get('method', '')
@@ -2987,14 +3081,75 @@ class PaperProcessorDaemon:
                 # Filter garbage authors (keeps only known authors when extraction is poor)
                 metadata = self.filter_garbage_authors(metadata)
 
-                # Check for extracted year from identifier extraction (parentheses, copyright, etc.)
+                # Always prompt user to confirm or enter year manually
+                # First, check what year sources we have
                 identifiers = result.get('identifiers_found', {})
-                if identifiers.get('best_year') and not metadata.get('year'):
-                    metadata['year'] = identifiers['best_year']
-                    self.logger.info(f"Auto-filled year from scan: {identifiers['best_year']}")
-                    print(f"✅ Auto-filled year from scan: {identifiers['best_year']}")
+                grep_year = identifiers.get('best_year')
+                grobid_year = metadata.get('year')
+                
+                # Build year sources list for display
+                year_sources = []
+                if grep_year:
+                    year_sources.append(('GREP (scan)', grep_year))
+                if grobid_year:
+                    year_sources.append(('GROBID/API', grobid_year))
+                
+                # Always prompt user to confirm or enter year
+                if year_sources:
+                    # Show all year sources that were found
+                    if len(year_sources) > 1:
+                        # Multiple sources - check for conflicts
+                        years = [source[1] for source in year_sources]
+                        if len(set(years)) > 1:
+                            # Conflict detected - show both and pick first as default
+                            print(f"\n⚠️  Year conflict detected:")
+                            for source_name, year_val in year_sources:
+                                print(f"   {source_name}:      {year_val}")
+                            # Use first year as suggested default
+                            suggested_year = years[0]
+                            suggested_source = year_sources[0][0]
+                        else:
+                            # No conflict - both sources agree
+                            print(f"\n📅 Year found by multiple sources:")
+                            for source_name, _ in year_sources:
+                                print(f"   {source_name}:      {years[0]}")
+                            suggested_year = years[0]
+                            suggested_source = 'consensus'
+                    else:
+                        # Single source
+                        suggested_source, suggested_year = year_sources[0]
+                        print(f"\n📅 Year found by {suggested_source}: {suggested_year}")
+                    
+                    # Simple prompt: press Enter to confirm or type a different year
+                    while True:
+                        try:
+                            year_input = input(f"Press Enter to confirm ({suggested_year}) or type a different year: ").strip()
+                        except (KeyboardInterrupt, EOFError):
+                            print("\n❌ Cancelled")
+                            self.move_to_failed(pdf_path)
+                            return
+                        
+                        if not year_input:
+                            # User pressed Enter - use suggested year
+                            metadata['year'] = suggested_year
+                            metadata['_year_source'] = suggested_source
+                            print(f"✅ Using {suggested_source}: {suggested_year}")
+                            self.logger.info(f"User confirmed year from {suggested_source}: {suggested_year}")
+                            metadata['_year_confirmed'] = True
+                            break
+                        elif year_input.isdigit() and len(year_input) == 4:
+                            # User entered a different year
+                            metadata['year'] = year_input
+                            metadata['_year_source'] = 'manual'
+                            print(f"✅ Using manual year: {year_input}")
+                            self.logger.info(f"User entered manual year: {year_input}")
+                            metadata['_year_confirmed'] = True
+                            break
+                        else:
+                            print("⚠️  Invalid year format (expected 4 digits or press Enter)")
                 
                 # Prompt for year BEFORE document type, so numeric input isn't misrouted
+                # (This will only prompt if no year was found by any source)
                 metadata = self.prompt_for_year(metadata)
                 
                 # Check if JSTOR ID was found - automatically set as journal article
@@ -3814,13 +3969,14 @@ class PaperProcessorDaemon:
         print("[2] Use Zotero metadata as it is (Keep existing Zotero item unchanged)")
         print("[3] Merge both (show field-by-field comparison)")
         print("[4] Edit manually")
-        print("[5] 📝 Manual processing later (too similar to decide)")
-        print("[6] 📄 Create new Zotero item from extracted metadata")
+        print("[5] 🔍 Search for more metadata online (CrossRef, arXiv, PubMed)")
+        print("[6] 📝 Manual processing later (too similar to decide)")
+        print("[7] 📄 Create new Zotero item from extracted metadata")
         print()
         
         while True:
             choice = input("Your choice: ").strip()
-            if choice in ['1', '2', '3', '4', '5', '6']:
+            if choice in ['1', '2', '3', '4', '5', '6', '7']:
                 return choice
             else:
                 print("Invalid choice. Please try again.")
@@ -3844,10 +4000,15 @@ class PaperProcessorDaemon:
             return self.edit_metadata_interactively(extracted)
             
         elif choice == '5':
+            # Search online libraries for enhanced metadata
+            print("🔍 Searching online libraries for enhanced metadata...")
+            return self._search_online_metadata(extracted, zotero)
+            
+        elif choice == '6':
             print("📝 Moving to manual processing...")
             return None  # Signal to stop processing
             
-        elif choice == '6':
+        elif choice == '7':
             print("📄 Creating new Zotero item...")
             return extracted  # Use extracted metadata for new item
     
@@ -3897,6 +4058,74 @@ class PaperProcessorDaemon:
         
         print("\n✅ Metadata merge complete")
         return merged
+    
+    def _search_online_metadata(self, extracted: dict, zotero: dict) -> dict:
+        """Search online libraries and let user choose how to merge results.
+        
+        Args:
+            extracted: Extracted metadata from PDF
+            zotero: Metadata from existing Zotero item
+            
+        Returns:
+            Final metadata dict with online results merged
+        """
+        # Use Zotero metadata as base for online search (it's more canonical)
+        base_metadata = zotero.copy() if zotero else extracted.copy()
+        
+        # Search online libraries
+        print("\n🔍 Searching CrossRef, arXiv, OpenAlex...")
+        online_metadata = self.search_online_libraries(base_metadata)
+        
+        if not online_metadata:
+            print("⚠️  No online metadata found. Using Zotero/Extracted metadata.")
+            return zotero if zotero else extracted
+        
+        # Show comparison between all three sources
+        print("\n" + "="*60)
+        print("🌐 ONLINE METADATA FOUND")
+        print("="*60)
+        
+        print("\nExtracted (from scan):")
+        self._display_metadata_universal(extracted)
+        
+        print("\nZotero (existing item):")
+        self._display_metadata_universal(zotero)
+        
+        print("\nOnline (CrossRef/arXiv/etc):")
+        self._display_metadata_universal(online_metadata)
+        
+        print("\nWhich metadata to use?")
+        print("[1] Use online metadata")
+        print("[2] Use online + merge with Zotero")
+        print("[3] Use online + merge with extracted")
+        print("[4] Edit manually with online as reference")
+        print("[5] Cancel (use Zotero metadata)")
+        print()
+        
+        while True:
+            choice = input("Your choice [1-5]: ").strip()
+            
+            if choice == '1':
+                print("✅ Using online metadata")
+                return online_metadata
+            elif choice == '2':
+                print("🔀 Merging online + Zotero...")
+                return self._merge_metadata_sources(online_metadata, zotero)
+            elif choice == '3':
+                print("🔀 Merging online + extracted...")
+                return self._merge_metadata_sources(online_metadata, extracted)
+            elif choice == '4':
+                print("✏️ Editing with online as reference...")
+                return self.edit_metadata_interactively(
+                    online_metadata, 
+                    local_metadata=zotero,
+                    online_source='online_libraries'
+                )
+            elif choice == '5':
+                print("✅ Using Zotero metadata (cancelled online)")
+                return zotero if zotero else extracted
+            else:
+                print("⚠️  Invalid choice. Please enter 1-5.")
     
     def attach_to_existing_zotero_item(self, pdf_path: Path, zotero_item: dict, metadata: dict) -> bool:
         """Attach scanned PDF to existing Zotero item with 3-step UX.
@@ -4412,7 +4641,7 @@ class PaperProcessorDaemon:
         print("  [A-Z] Select item from list above")
         print("[1]   🔍 Search again (different authors/year)")
         print("[2]   ✏️  Edit metadata")
-        print("[3]   📄 Create new Zotero item")
+        print("[3]   None of these items - create new")
         print("[4]   ❌ Skip document")
         print("  (z) ⬅️  Back to author selection")
         print("  (r) 🔄 Restart from beginning")
@@ -4432,7 +4661,7 @@ class PaperProcessorDaemon:
             elif choice == '2':
                 return ('edit', None)
             elif choice == '3':
-                return ('create', None)
+                return ('create', None)  # "None of these items"
             elif choice == '4':
                 return ('skip', None)
             elif choice == 'Z':
@@ -5753,7 +5982,9 @@ class PaperProcessorDaemon:
         if not authors and 'creators' in zotero_item:
             authors = []
             for creator in zotero_item['creators']:
-                if creator.get('creatorType') == 'author':
+                # Include both 'author' and 'presenter' for presentations
+                creator_type = creator.get('creatorType', '').lower()
+                if creator_type in ('author', 'presenter'):
                     first = creator.get('firstName', '')
                     last = creator.get('lastName', '')
                     if first and last:

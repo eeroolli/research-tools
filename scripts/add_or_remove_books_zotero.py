@@ -36,6 +36,12 @@ class DetailedISBNLookupService:
             self.lookup_google_books,
             self.lookup_norwegian_library,
         ]
+        
+        # Non-ISBN search services (title + editor/book title lookups)
+        self.metadata_services = [
+            self.lookup_google_books_by_title_editor,
+            self.lookup_openlibrary_by_title_editor,
+        ]
     
     def lookup_openlibrary(self, isbn: str) -> Optional[Dict]:
         """Lookup using OpenLibrary API with detailed info"""
@@ -109,6 +115,176 @@ class DetailedISBNLookupService:
         
         return None
     
+    # ------------------------------
+    # Title + Editor lookups (for book chapters without ISBN)
+    # ------------------------------
+    def lookup_google_books_by_title_editor(self, book_title: str, editor: str = None) -> Optional[Dict]:
+        """Lookup book metadata by book title and optional editor via Google Books.
+        
+        Args:
+            book_title: Book title to search for
+            editor: Optional editor name (can be empty for books without editors)
+            
+        Returns:
+            Normalized dict similar to ISBN lookups (itemType 'book', creators, publisher, date, ISBN, tags).
+        """
+        try:
+            url = "https://www.googleapis.com/books/v1/volumes"
+            # Google Books doesn't distinguish editor from author, so use inauthor if editor provided
+            q_parts = []
+            if book_title:
+                q_parts.append(f"intitle:{book_title}")
+            if editor:
+                # Editor is often just treated as an author in search
+                q_parts.append(f"inauthor:{editor}")
+            params = {
+                'q': ' '.join(q_parts) if q_parts else book_title,
+                'maxResults': 5,
+                'printType': 'books'
+            }
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            items = data.get('items', [])
+            if not items:
+                return None
+            # Pick best match (first)
+            info = items[0].get('volumeInfo', {})
+            # Authors in Google Books are typically authors; we will set editors separately if we detect editor in query
+            creators = []
+            for name in info.get('authors', []) or []:
+                parts = name.split()
+                if len(parts) >= 2:
+                    creators.append({'creatorType': 'author', 'firstName': ' '.join(parts[:-1]), 'lastName': parts[-1]})
+                else:
+                    creators.append({'creatorType': 'author', 'firstName': '', 'lastName': name})
+            # Add editor as editor creator if provided
+            if editor:
+                parts = editor.split()
+                if len(parts) >= 2:
+                    creators.append({'creatorType': 'editor', 'firstName': ' '.join(parts[:-1]), 'lastName': parts[-1]})
+                else:
+                    creators.append({'creatorType': 'editor', 'firstName': '', 'lastName': editor})
+            # Prefer ISBN_13
+            isbn = ''
+            for iden in info.get('industryIdentifiers', []) or []:
+                if iden.get('type') == 'ISBN_13':
+                    isbn = iden.get('identifier', '')
+                    break
+                if not isbn and iden.get('type') == 'ISBN_10':
+                    isbn = iden.get('identifier', '')
+            tags = [{'tag': c} for c in (info.get('categories') or [])[:10]]
+            return {
+                'itemType': 'book',
+                'title': info.get('title', ''),
+                'creators': creators,
+                'publisher': info.get('publisher', ''),
+                'date': info.get('publishedDate', ''),
+                'ISBN': isbn,
+                'language': info.get('language', ''),
+                'tags': tags,
+                'extra': f"Google Books ID: {items[0].get('id', '')}"
+            }
+        except Exception:
+            return None
+    
+    def lookup_openlibrary_by_title_editor(self, book_title: str, editor: str = None) -> Optional[Dict]:
+        """Lookup book metadata by title via OpenLibrary (optional editor for filtering).
+        
+        Args:
+            book_title: Book title to search for
+            editor: Optional editor name (can be empty for books without editors)
+        """
+        try:
+            # OpenLibrary search API
+            url = "https://openlibrary.org/search.json"
+            params = {
+                'title': book_title,
+                'limit': 5
+            }
+            # Use editor as author filter if provided (OpenLibrary treats editors as authors in search)
+            if editor:
+                params['author'] = editor
+            resp = requests.get(url, params=params, timeout=10)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            docs = data.get('docs', [])
+            if not docs:
+                return None
+            d = docs[0]
+            title = d.get('title', '')
+            publishers = (d.get('publisher') or [])
+            publisher = publishers[0] if publishers else ''
+            year = str(d.get('first_publish_year', ''))
+            # Try to get ISBN13
+            isbn = ''
+            for i in (d.get('isbn') or []):
+                if len(str(i)) == 13 and i.isdigit():
+                    isbn = i
+                    break
+                if not isbn and len(str(i)) == 10:
+                    isbn = i
+            creators = []
+            for name in (d.get('author_name') or [])[:5]:
+                parts = name.split()
+                if len(parts) >= 2:
+                    creators.append({'creatorType': 'author', 'firstName': ' '.join(parts[:-1]), 'lastName': parts[-1]})
+                else:
+                    creators.append({'creatorType': 'author', 'firstName': '', 'lastName': name})
+            if editor:
+                parts = editor.split()
+                if len(parts) >= 2:
+                    creators.append({'creatorType': 'editor', 'firstName': ' '.join(parts[:-1]), 'lastName': parts[-1]})
+                else:
+                    creators.append({'creatorType': 'editor', 'firstName': '', 'lastName': editor})
+            return {
+                'itemType': 'book',
+                'title': title,
+                'creators': creators,
+                'publisher': publisher,
+                'date': year,
+                'ISBN': isbn,
+                'tags': [],
+                'extra': 'OpenLibrary search'
+            }
+        except Exception:
+            return None
+    
+    def lookup_by_title_and_editor(self, book_title: str, editor: str = None) -> Optional[Dict]:
+        """Try multiple services to find book metadata by title and optional editor.
+        
+        Args:
+            book_title: Book title to search for
+            editor: Optional editor name (can be empty for books without editors)
+            
+        Returns:
+            Best matching book metadata dict or None if not found
+        """
+        if not book_title:
+            return None
+            
+        all_results: List[Dict] = []
+        for service in self.metadata_services:
+            try:
+                r = service(book_title, editor)
+                if r and r.get('title'):
+                    all_results.append(r)
+            except Exception:
+                continue
+        if not all_results:
+            return None
+        # Prefer results with ISBN, else first
+        best = None
+        for r in all_results:
+            if r.get('ISBN'):
+                best = r
+                break
+        if not best:
+            best = all_results[0]
+        return best
+
     def lookup_google_books(self, isbn: str) -> Optional[Dict]:
         """Lookup using Google Books API with detailed info"""
         try:
@@ -397,14 +573,77 @@ class ZoteroAPIBookProcessor:
         try:
             if config.has_section('TAG_GROUPS'):
                 for key, value in config.items('TAG_GROUPS'):
-                    # Parse comma-separated tags
-                    tags = [tag.strip() for tag in value.split(',') if tag.strip()]
-                    tag_groups[key] = tags
+                    # Parse enhanced syntax or simple comma-separated tags
+                    group_ops = self._parse_tag_group_syntax(value)
+                    tag_groups[key] = group_ops
                     
         except Exception as e:
             print(f"Warning: Could not load tag groups: {e}")
         
         return tag_groups
+
+    def _parse_tag_group_syntax(self, value: str) -> Dict[str, List[str]]:
+        """Parse tag group value with enhanced syntax support.
+        
+        Supports:
+        - "tag1,tag2" - simple comma-separated list
+        - "add:tag1,tag2" - explicit add
+        - "add:tag1,tag2 remove:tag3" - add and remove
+        - "remove:tag1,tag2" - explicit remove only
+        
+        Returns dict with 'add' and/or 'remove' keys containing lists of tags.
+        """
+        if not value:
+            return {}
+        
+        operations = {'add': [], 'remove': []}
+        
+        # Check if we have add: or remove: prefixes
+        if 'add:' in value or 'remove:' in value:
+            # Parse enhanced syntax
+            parts = value.split()
+            
+            for part in parts:
+                if part.startswith('add:'):
+                    tags_str = part[4:]  # Remove "add:" prefix
+                    tags = [tag.strip() for tag in tags_str.split(',') if tag.strip()]
+                    operations['add'].extend(tags)
+                elif part.startswith('remove:'):
+                    tags_str = part[7:]  # Remove "remove:" prefix
+                    tags = [tag.strip() for tag in tags_str.split(',') if tag.strip()]
+                    operations['remove'].extend(tags)
+        else:
+            # Simple syntax: just comma-separated tags
+            operations['add'] = [tag.strip() for tag in value.split(',') if tag.strip()]
+        
+        return operations
+
+    def _format_tag_group_display(self, group_ops) -> str:
+        """Format tag group operations for display.
+        
+        Args:
+            group_ops: Dict with 'add' and/or 'remove' keys, or list for backward compatibility
+            
+        Returns:
+            Formatted string like "tag1, tag2" or "add:tag1, tag2 | remove:tag3"
+        """
+        if not group_ops:
+            return '(empty)'
+        
+        # Backward compatibility: if it's a list, display as-is
+        if isinstance(group_ops, list):
+            return ', '.join(group_ops) if group_ops else '(empty)'
+        
+        add_tags = group_ops.get('add', [])
+        remove_tags = group_ops.get('remove', [])
+        
+        parts = []
+        if add_tags:
+            parts.append(', '.join(add_tags))
+        if remove_tags:
+            parts.append(f"remove: {', '.join(remove_tags)}")
+        
+        return ' | '.join(parts) if parts else '(empty)'
 
     def load_actions(self) -> Dict[int, Dict[str, str]]:
         """Load action definitions from configuration with personal overrides"""
@@ -526,8 +765,8 @@ class ZoteroAPIBookProcessor:
             if action_num in [1, 2, 3]:
                 # Show tag groups with spaces after commas
                 group_key = f"group{action_num}"
-                tags = self.tag_groups.get(group_key, [])
-                tag_display = ', '.join(tags)
+                group_ops = self.tag_groups.get(group_key, {})
+                tag_display = self._format_tag_group_display(group_ops)
                 print(f"  {action_num}. Add tags: {tag_display}")
             else:
                 print(f"  {action_num}. {action['description']}")
@@ -596,12 +835,17 @@ class ZoteroAPIBookProcessor:
                     if has_removal:
                         results['actions_taken'].append("Skipped group1 tags - item will be removed")
                         continue
-                    tags = self.tag_groups.get('group1', [])
-                    if tags and item_key:
-                        success = self.update_item_tags(item_key, add_tags=tags)
+                    group_ops = self.tag_groups.get('group1', {})
+                    add_tags = group_ops.get('add', []) if isinstance(group_ops, dict) else group_ops
+                    remove_tags = group_ops.get('remove', []) if isinstance(group_ops, dict) else []
+                    if add_tags and item_key:
+                        success = self.update_item_tags(item_key, add_tags=add_tags, remove_tags=remove_tags)
                         if success:
-                            results['tags_added'].extend(tags)
-                            results['actions_taken'].append(f"Added group1 tags: {', '.join(tags)}")
+                            results['tags_added'].extend(add_tags)
+                            msg = f"Added group1 tags: {', '.join(add_tags)}"
+                            if remove_tags:
+                                msg += f" | Removed: {', '.join(remove_tags)}"
+                            results['actions_taken'].append(msg)
                         else:
                             results['errors'].append("Failed to add group1 tags")
                 
@@ -609,12 +853,17 @@ class ZoteroAPIBookProcessor:
                     if has_removal:
                         results['actions_taken'].append("Skipped group2 tags - item will be removed")
                         continue
-                    tags = self.tag_groups.get('group2', [])
-                    if tags and item_key:
-                        success = self.update_item_tags(item_key, add_tags=tags)
+                    group_ops = self.tag_groups.get('group2', {})
+                    add_tags = group_ops.get('add', []) if isinstance(group_ops, dict) else group_ops
+                    remove_tags = group_ops.get('remove', []) if isinstance(group_ops, dict) else []
+                    if add_tags and item_key:
+                        success = self.update_item_tags(item_key, add_tags=add_tags, remove_tags=remove_tags)
                         if success:
-                            results['tags_added'].extend(tags)
-                            results['actions_taken'].append(f"Added group2 tags: {', '.join(tags)}")
+                            results['tags_added'].extend(add_tags)
+                            msg = f"Added group2 tags: {', '.join(add_tags)}"
+                            if remove_tags:
+                                msg += f" | Removed: {', '.join(remove_tags)}"
+                            results['actions_taken'].append(msg)
                         else:
                             results['errors'].append("Failed to add group2 tags")
                 
@@ -622,12 +871,17 @@ class ZoteroAPIBookProcessor:
                     if has_removal:
                         results['actions_taken'].append("Skipped group3 tags - item will be removed")
                         continue
-                    tags = self.tag_groups.get('group3', [])
-                    if tags and item_key:
-                        success = self.update_item_tags(item_key, add_tags=tags)
+                    group_ops = self.tag_groups.get('group3', {})
+                    add_tags = group_ops.get('add', []) if isinstance(group_ops, dict) else group_ops
+                    remove_tags = group_ops.get('remove', []) if isinstance(group_ops, dict) else []
+                    if add_tags and item_key:
+                        success = self.update_item_tags(item_key, add_tags=add_tags, remove_tags=remove_tags)
                         if success:
-                            results['tags_added'].extend(tags)
-                            results['actions_taken'].append(f"Added group3 tags: {', '.join(tags)}")
+                            results['tags_added'].extend(add_tags)
+                            msg = f"Added group3 tags: {', '.join(add_tags)}"
+                            if remove_tags:
+                                msg += f" | Removed: {', '.join(remove_tags)}"
+                            results['actions_taken'].append(msg)
                         else:
                             results['errors'].append("Failed to add group3 tags")
                 
@@ -1633,11 +1887,17 @@ class ZoteroAPIBookProcessor:
                     tags_to_add = []
                     for action_num in actions:
                         if action_num == 1:  # add_group1_tags
-                            tags_to_add.extend(self.tag_groups.get('group1', []))
+                            group_ops = self.tag_groups.get('group1', {})
+                            add_tags = group_ops.get('add', []) if isinstance(group_ops, dict) else group_ops
+                            tags_to_add.extend(add_tags)
                         elif action_num == 2:  # add_group2_tags
-                            tags_to_add.extend(self.tag_groups.get('group2', []))
+                            group_ops = self.tag_groups.get('group2', {})
+                            add_tags = group_ops.get('add', []) if isinstance(group_ops, dict) else group_ops
+                            tags_to_add.extend(add_tags)
                         elif action_num == 3:  # add_group3_tags
-                            tags_to_add.extend(self.tag_groups.get('group3', []))
+                            group_ops = self.tag_groups.get('group3', {})
+                            add_tags = group_ops.get('add', []) if isinstance(group_ops, dict) else group_ops
+                            tags_to_add.extend(add_tags)
                         elif action_num == 4:  # use_online_tags
                             online_tags = [tag.get('tag', '') if isinstance(tag, dict) else str(tag) 
                                          for tag in book_template.get('tags', [])]
