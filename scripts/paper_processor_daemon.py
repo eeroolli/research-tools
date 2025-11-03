@@ -5837,11 +5837,14 @@ class PaperProcessorDaemon:
             print(f"❌ Error: {e}")
             return False
     
-    def _prompt_for_note(self, item_key: str):
+    def _prompt_for_note(self, item_key: str) -> bool:
         """Prompt user to add a handwritten note to a Zotero item.
         
         Args:
             item_key: Zotero item key
+            
+        Returns:
+            True if note was added successfully or skipped, False if cancelled
         """
         print("\n" + "="*70)
         print("ADD HANDWRITTEN NOTE")
@@ -5849,10 +5852,14 @@ class PaperProcessorDaemon:
         print("You can add a sentence or two from your handwritten notes on the paper folder.")
         print("  (Enter) Skip - don't add a note")
         print("  (n) Add a note")
+        print("  (z) Cancel and go back")
         print("="*70)
-        note_choice = input("\nAdd a note? [Enter/n]: ").strip().lower()
+        note_choice = input("\nAdd a note? [Enter/n/z]: ").strip().lower()
         
-        if note_choice == 'n':
+        if note_choice == 'z':
+            print("⬅️  Cancelling note addition")
+            return False
+        elif note_choice == 'n':
             print("\n📝 Enter your note (press Enter on a blank line when finished):")
             note_lines = []
             while True:
@@ -5869,12 +5876,16 @@ class PaperProcessorDaemon:
                 print(f"\n💾 Adding note to Zotero item...")
                 if self.zotero_processor.add_note_to_item(item_key, note_text):
                     print("✅ Note added successfully!")
+                    return True
                 else:
                     print("⚠️  Failed to add note, continuing...")
+                    return True
             else:
                 print("ℹ️  No note text entered, skipping note...")
+                return True
         else:
             print("ℹ️  Skipping note...")
+            return True
     
     def handle_item_selected(self, pdf_path: Path, metadata: dict, selected_item: dict):
         """Handle user selecting a Zotero item.
@@ -6091,7 +6102,10 @@ class PaperProcessorDaemon:
             # Offer to add a handwritten note before proceeding
             item_key = selected_item.get('key') or selected_item.get('item_key')
             if item_key:
-                self._prompt_for_note(item_key)
+                note_result = self._prompt_for_note(item_key)
+                if not note_result:
+                    # User cancelled note addition, go back
+                    return
             
             # Execute the actions
             self._process_selected_item(pdf_path, selected_item, target_filename, metadata)
