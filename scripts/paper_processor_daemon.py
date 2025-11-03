@@ -1218,7 +1218,7 @@ class PaperProcessorDaemon:
             if year_result == 'BACK':
                 return ('back', None, metadata)
             elif year_result == 'RESTART':
-                return ('quit', None, metadata)
+                return ('restart', None, metadata)
             else:
                 metadata = year_result  # Year was added/updated in metadata
             year = metadata.get('year', None)
@@ -1256,7 +1256,7 @@ class PaperProcessorDaemon:
                     metadata['authors'] = metadata['_all_authors'].copy()
                 return ('back', None, metadata)
             elif selected_authors == 'RESTART':
-                return ('quit', None, metadata)  # Will cause restart from outer loop
+                return ('restart', None, metadata)  # Will cause restart from outer loop
             
             if not selected_authors:
                 print("❌ No authors selected")
@@ -3184,7 +3184,7 @@ class PaperProcessorDaemon:
                     # Simple prompt: press Enter to confirm or type a different year
                     while True:
                         try:
-                            year_input = input(f"Press Enter to confirm ({suggested_year}) or type a different year: ").strip()
+                            year_input = input(f"Press Enter to confirm ({suggested_year}) or type a different year (or 'r' to restart): ").strip()
                         except (KeyboardInterrupt, EOFError):
                             print("\n❌ Cancelled")
                             self.move_to_failed(pdf_path)
@@ -3198,6 +3198,11 @@ class PaperProcessorDaemon:
                             self.logger.info(f"User confirmed year from {suggested_source}: {suggested_year}")
                             metadata['_year_confirmed'] = True
                             break
+                        elif year_input.lower() == 'r':
+                            # User wants to restart
+                            print("🔄 Restarting from beginning...")
+                            self.process_paper(pdf_path)
+                            return
                         elif year_input.isdigit() and len(year_input) == 4:
                             # User entered a different year
                             metadata['year'] = year_input
@@ -3207,7 +3212,7 @@ class PaperProcessorDaemon:
                             metadata['_year_confirmed'] = True
                             break
                         else:
-                            print("⚠️  Invalid year format (expected 4 digits or press Enter)")
+                            print("⚠️  Invalid year format (expected 4 digits, press Enter, or 'r' to restart)")
                 
                 # Prompt for year BEFORE document type, so numeric input isn't misrouted
                 # (This will only prompt if no year was found by any source)
