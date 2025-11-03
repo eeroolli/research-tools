@@ -30,6 +30,13 @@ class GrobidClient:
         self.logger = logging.getLogger(__name__)
         self.config = config or {}
         
+        # Consolidation configuration (defaults per user preference)
+        self.consolidation_enabled: bool = bool(self.config.get('grobid.consolidation.enable', True))
+        self.consolidation_header_level: int = int(self.config.get('grobid.consolidation.header', 2))
+        self.consolidation_citations_level: int = int(self.config.get('grobid.consolidation.citations', 0))
+        # Request timeout (seconds)
+        self.request_timeout_seconds: int = int(self.config.get('grobid.timeout_seconds', 60))
+        
         # Initialize PDF rotation handler lazily to avoid hard dependency on cv2 in test contexts
         self.rotation_handler = None
         try:
@@ -63,7 +70,10 @@ class GrobidClient:
                 self.logger.debug(f"GROBID not available: {e}")
             return False
     
-    def extract_metadata(self, pdf_path: Path, max_pages: int = 2, handle_rotation: bool = True) -> Optional[Dict]:
+    def extract_metadata(self, pdf_path: Path, max_pages: int = 2, handle_rotation: bool = True,
+                        consolidate_header: Optional[int] = None,
+                        consolidate_citations: Optional[int] = None,
+                        enable_consolidation: Optional[bool] = None) -> Optional[Dict]:
         """Extract metadata from PDF using GROBID with optional rotation handling.
         
         Args:
@@ -116,11 +126,19 @@ class GrobidClient:
                 with open(in_path, 'rb') as f:
                     files = {'input': f}
                     data = {'start': '1', 'end': str(end_pages)}
+                    # Determine effective consolidation settings for this call
+                    effective_enabled = self.consolidation_enabled if enable_consolidation is None else bool(enable_consolidation)
+                    eff_header = self.consolidation_header_level if consolidate_header is None else int(consolidate_header)
+                    eff_citations = self.consolidation_citations_level if consolidate_citations is None else int(consolidate_citations)
+                    if effective_enabled:
+                        data['consolidateHeader'] = str(eff_header)
+                        data['consolidateCitations'] = str(eff_citations)
+                        self.logger.info(f"GROBID consolidation enabled (header={eff_header}, citations={eff_citations})")
                     return requests.post(
                         f"{self.base_url}/api/processFulltextDocument",
                         files=files,
                         data=data,
-                        timeout=60
+                        timeout=self.request_timeout_seconds
                     )
 
             # Send PDF to GROBID with page limit for better author extraction
@@ -164,6 +182,12 @@ class GrobidClient:
                 extraction_note = f'extracted from pages 1-{max_pages} only'
                 if rotation_applied:
                     extraction_note += f', rotation corrected ({rotation_applied})'
+                # Reflect consolidation status in note
+                effective_enabled = self.consolidation_enabled if enable_consolidation is None else bool(enable_consolidation)
+                eff_header = self.consolidation_header_level if consolidate_header is None else int(consolidate_header)
+                eff_citations = self.consolidation_citations_level if consolidate_citations is None else int(consolidate_citations)
+                if effective_enabled:
+                    extraction_note += f', consolidation header={eff_header}, citations={eff_citations}'
                 metadata['extraction_note'] = extraction_note
                 author_count = len(metadata.get('authors', []))
                 self.logger.info(f"GROBID extracted: {author_count} authors from first {max_pages} pages")
@@ -540,13 +564,17 @@ class GrobidClient:
 if __name__ == "__main__":
     # Test GROBID client
     import sys
+    import argparse
     from pathlib import Path
     
-    if len(sys.argv) != 2:
-        print("Usage: python grobid_client.py <pdf_path>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Test GROBID client")
+    parser.add_argument("pdf_path", type=str, help="Path to PDF")
+    parser.add_argument("--consolidate-header", type=int, default=None, help="Override consolidateHeader level (0-3)")
+    parser.add_argument("--consolidate-citations", type=int, default=None, help="Override consolidateCitations level (0-2)")
+    parser.add_argument("--no-consolidation", action="store_true", help="Disable consolidation for this run")
+    args = parser.parse_args()
     
-    pdf_path = Path(sys.argv[1])
+    pdf_path = Path(args.pdf_path)
     if not pdf_path.exists():
         print(f"PDF not found: {pdf_path}")
         sys.exit(1)
@@ -560,7 +588,12 @@ if __name__ == "__main__":
     print(f"✅ GROBID server available")
     print(f"📄 Processing: {pdf_path.name}")
     
-    metadata = client.extract_metadata(pdf_path)
+    metadata = client.extract_metadata(
+        pdf_path,
+        consolidate_header=args.consolidate_header,
+        consolidate_citations=args.consolidate_citations,
+        enable_consolidation=False if args.no_consolidation else None,
+    )
     
     if metadata:
         print("\n✅ GROBID extracted metadata:")
