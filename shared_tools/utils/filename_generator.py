@@ -192,8 +192,22 @@ class FilenameGenerator:
         # Determine file extension
         extension = self._get_file_extension(metadata, original_filename)
         
-        # Add appropriate extension
-        if not filename.lower().endswith(f'.{extension}'):
+        # Remove periods from filename (except for final extension dot)
+        # Always split off extension, remove periods from base, then rejoin
+        if '.' in filename:
+            # Split into base and extension (handle multiple dots by taking last as extension)
+            parts = filename.rsplit('.', 1)
+            if len(parts) == 2:
+                base, ext = parts
+                base = base.replace('.', '_')  # Remove all periods from base
+                filename = f"{base}.{ext}"
+            else:
+                # No extension found, remove periods then add extension
+                filename = filename.replace('.', '_')
+                filename += f'.{extension}'
+        else:
+            # No extension yet, remove periods then add extension
+            filename = filename.replace('.', '_')
             filename += f'.{extension}'
         
         return filename

@@ -39,13 +39,14 @@ class BorderRemover:
         # Configuration parameters
         self.max_border_width = self.config.get('max_border_width', 300)
         # Page-edge specific configuration
-        self.page_white_delta = self.config.get('page_white_delta', 10)  # tolerance below page white (stricter)
-        self.dark_threshold = self.config.get('dark_threshold', 80)       # scanner bed / dark area (stricter)
-        self.sustained_run = self.config.get('sustained_run', 20)         # min consecutive white pixels (stricter)
+        self.page_white_delta = self.config.get('page_white_delta', 8)   # tolerance below page white (tighter)
+        self.dark_threshold = self.config.get('dark_threshold', 60)       # scanner bed / dark area (stricter)
+        self.sustained_run = self.config.get('sustained_run', 24)         # min consecutive white pixels (stricter)
         self.sustained_text = self.config.get('sustained_text', 20)      # min consecutive text-like pixels (stricter)
-        self.max_check_percentage = self.config.get('max_check_percentage', 0.35)  # scan up to 35% of side
+        self.max_check_percentage = self.config.get('max_check_percentage', 0.25)  # scan up to 25% of side (reduced)
+        self.edge_inset = self.config.get('edge_inset', 10)              # pixels from edge to start checking for dark borders
         self.smoothing_window = self.config.get('smoothing_window', 5)   # smoothing window (reduced, less aggressive)
-        self.min_valid_ratio = self.config.get('min_valid_ratio', 0.6)    # require 60% of scanlines to find TW
+        self.min_valid_ratio = self.config.get('min_valid_ratio', 0.7)    # require 70% of scanlines to find TW
         self.whiten_gray = self.config.get('whiten_gray', 240)           # default gray value for whitening
         # Per-side diagnostic grays (so we can see provenance)
         self.top_gray = self.config.get('top_gray', 240)
@@ -87,12 +88,15 @@ class BorderRemover:
     def detect_borders(self, image: np.ndarray) -> Dict[str, int]:
         """Detect border widths on all sides of an image.
         
+        Only reports borders if they actually contain dark pixels (scanner bed).
+        This prevents false positives on printouts which have wide white margins.
+        
         Args:
             image: Grayscale or color image as numpy array
             
         Returns:
             Dictionary with keys: 'top', 'bottom', 'left', 'right'
-            Values are pixel widths of detected borders
+            Values are pixel widths of detected borders (0 if no dark border found)
         """
         # Convert to grayscale if color
         if len(image.shape) == 3:
@@ -102,7 +106,53 @@ class BorderRemover:
         
         h, w = gray.shape
         
-        return self._detect_borders_projection(gray, h, w)
+        # Get candidate borders (where content starts)
+        candidate_borders = self._detect_borders_projection(gray, h, w)
+        
+        # Verify borders actually contain dark pixels (scanner bed)
+        dark_threshold = float(self.dark_threshold)
+        verified_borders = {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}
+        
+        # Sample pixels in border regions - require at least some dark pixels
+        min_dark_fraction = 0.15  # At least 15% of border region should be dark
+        
+        # Top border
+        if candidate_borders['top'] > 0:
+            border_region = gray[0:candidate_borders['top'], :]
+            if border_region.size > 0:
+                dark_pixels = np.sum(border_region <= dark_threshold)
+                dark_fraction = dark_pixels / border_region.size
+                if dark_fraction >= min_dark_fraction:
+                    verified_borders['top'] = candidate_borders['top']
+        
+        # Bottom border
+        if candidate_borders['bottom'] > 0:
+            border_region = gray[h-candidate_borders['bottom']:h, :]
+            if border_region.size > 0:
+                dark_pixels = np.sum(border_region <= dark_threshold)
+                dark_fraction = dark_pixels / border_region.size
+                if dark_fraction >= min_dark_fraction:
+                    verified_borders['bottom'] = candidate_borders['bottom']
+        
+        # Left border
+        if candidate_borders['left'] > 0:
+            border_region = gray[:, 0:candidate_borders['left']]
+            if border_region.size > 0:
+                dark_pixels = np.sum(border_region <= dark_threshold)
+                dark_fraction = dark_pixels / border_region.size
+                if dark_fraction >= min_dark_fraction:
+                    verified_borders['left'] = candidate_borders['left']
+        
+        # Right border
+        if candidate_borders['right'] > 0:
+            border_region = gray[:, w-candidate_borders['right']:w]
+            if border_region.size > 0:
+                dark_pixels = np.sum(border_region <= dark_threshold)
+                dark_fraction = dark_pixels / border_region.size
+                if dark_fraction >= min_dark_fraction:
+                    verified_borders['right'] = candidate_borders['right']
+        
+        return verified_borders
     
     def _detect_borders_projection(self, gray: np.ndarray, height: int, width: int) -> Dict[str, int]:
         """Detect white margins around text content.
@@ -1267,6 +1317,66 @@ class BorderRemover:
         bottom = max(0, h - 1 - bottom_idx) if bottom_idx >= 0 else 0
         left = max(0, left_idx) if left_idx >= 0 else 0
         right = max(0, w - 1 - right_idx) if right_idx >= 0 else 0
+
+        # Verify actual dark borders: only report if we find dark pixels within edge inset band
+        # This prevents false positives on laser-printed PDFs with wide white margins
+        inset = self.edge_inset
+        
+        def has_dark_at_edge(side: str, distance: int) -> bool:
+            """Check if there are dark pixels within edge inset band."""
+            if distance == 0:
+                return False  # No border detected
+            
+            # Sample pixels in the edge band (from edge to edge+inset)
+            dark_count = 0
+            total_samples = 0
+            sample_step = max(1, inset // 5)  # Sample ~5 points across inset
+            
+            if side == 'top' and distance > 0:
+                y_range = range(0, min(inset, distance))
+                for y in y_range[::sample_step]:
+                    x_samples = range(0, w, max(1, w // 20))  # Sample across width
+                    for x in x_samples:
+                        if gray[y, x] <= dark_thr:
+                            dark_count += 1
+                        total_samples += 1
+            elif side == 'bottom' and distance > 0:
+                y_range = range(max(0, h - inset), h)
+                for y in y_range[::sample_step]:
+                    x_samples = range(0, w, max(1, w // 20))
+                    for x in x_samples:
+                        if gray[y, x] <= dark_thr:
+                            dark_count += 1
+                        total_samples += 1
+            elif side == 'left' and distance > 0:
+                x_range = range(0, min(inset, distance))
+                for x in x_range[::sample_step]:
+                    y_samples = range(0, h, max(1, h // 20))
+                    for y in y_samples:
+                        if gray[y, x] <= dark_thr:
+                            dark_count += 1
+                        total_samples += 1
+            elif side == 'right' and distance > 0:
+                x_range = range(max(0, w - inset), w)
+                for x in x_range[::sample_step]:
+                    y_samples = range(0, h, max(1, h // 20))
+                    for y in y_samples:
+                        if gray[y, x] <= dark_thr:
+                            dark_count += 1
+                        total_samples += 1
+            
+            # Require at least 10% of samples to be dark (scanner bed is consistently dark)
+            return total_samples > 0 and (dark_count / total_samples) >= 0.10
+        
+        # Only report borders where we find actual dark pixels
+        if not has_dark_at_edge('top', top):
+            top = 0
+        if not has_dark_at_edge('bottom', bottom):
+            bottom = 0
+        if not has_dark_at_edge('left', left):
+            left = 0
+        if not has_dark_at_edge('right', right):
+            right = 0
 
         return {'top': top, 'bottom': bottom, 'left': left, 'right': right}
 

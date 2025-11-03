@@ -3067,6 +3067,27 @@ class PaperProcessorDaemon:
         # Remember the original scan path for final move operations
         self._original_scan_path = Path(pdf_path)
         
+        # Ask user if document starts at a different page (early prompt to avoid wrong extraction)
+        page_offset = self._prompt_for_page_offset(pdf_path)
+        if page_offset is None:
+            # User cancelled
+            self.move_to_failed(pdf_path)
+            return
+        
+        # Create temporary PDF without first pages if needed
+        pdf_to_use = pdf_path
+        temp_pdf_path = None
+        effective_page_offset = 0  # Will be 0 if temp PDF created successfully
+        if page_offset > 0:
+            temp_pdf_path = self._create_pdf_from_page_offset(pdf_path, page_offset)
+            if temp_pdf_path:
+                pdf_to_use = temp_pdf_path
+                effective_page_offset = 0  # Temp PDF already starts at correct page
+                self.logger.info(f"Using temporary PDF starting from page {page_offset + 1}")
+            else:
+                effective_page_offset = page_offset  # Use offset parameter if temp PDF creation failed
+                self.logger.warning(f"Failed to create temporary PDF, using original with page offset {page_offset + 1}")
+        
         try:
             # Step 1: Extract metadata
             self.logger.info("Extracting metadata...")
@@ -3074,7 +3095,7 @@ class PaperProcessorDaemon:
             # Step 1a: Try GREP first (fast identifier extraction + API lookup)
             # This is much faster (2-4 seconds) when identifiers are found
             self.logger.info("Step 1: Trying fast GREP identifier extraction + API lookup...")
-            result = self.metadata_processor.process_pdf(pdf_path, use_ollama_fallback=False)
+            result = self.metadata_processor.process_pdf(pdf_to_use, use_ollama_fallback=False, page_offset=effective_page_offset)
             
             # Check if we got metadata with authors from GREP + API
             has_metadata = result.get('success') and result.get('metadata')
@@ -3094,7 +3115,7 @@ class PaperProcessorDaemon:
             # - API lookup returned no results
             elif not has_authors and self.grobid_ready:
                 self.logger.info("Step 2: No identifiers found or API lookup failed - trying GROBID...")
-                metadata = self.grobid_client.extract_metadata(pdf_path)
+                metadata = self.grobid_client.extract_metadata(pdf_to_use)
                 
                 if metadata and metadata.get('authors'):
                     # GROBID succeeded - preserve identifiers_found from GREP
@@ -3114,8 +3135,9 @@ class PaperProcessorDaemon:
                 self.logger.info("Step 3: No authors found from GREP/API/GROBID - trying Ollama as last resort...")
                 if self._ensure_ollama_ready():
                     # Try with Ollama fallback
-                    ollama_result = self.metadata_processor.process_pdf(pdf_path, use_ollama_fallback=True, 
-                                                                       progress_callback=self._show_ollama_progress)
+                    ollama_result = self.metadata_processor.process_pdf(pdf_to_use, use_ollama_fallback=True, 
+                                                                       progress_callback=self._show_ollama_progress,
+                                                                       page_offset=effective_page_offset)
                     if ollama_result['success'] and ollama_result.get('metadata', {}).get('authors'):
                         # Preserve identifiers_found from GREP
                         ollama_result['identifiers_found'] = identifiers_found
@@ -3344,6 +3366,14 @@ class PaperProcessorDaemon:
         except Exception as e:
             self.logger.error(f"Processing error: {e}", exc_info=self.debug)
             self.move_to_failed(pdf_path)
+        finally:
+            # Clean up temporary PDF if created
+            if temp_pdf_path and temp_pdf_path.exists():
+                try:
+                    temp_pdf_path.unlink()
+                    self.logger.info(f"Cleaned up temporary PDF: {temp_pdf_path.name}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to clean up temporary PDF {temp_pdf_path}: {e}")
     
     def handle_user_choice(self, choice: str, pdf_path: Path, metadata: dict, 
                           local_matches: list, result: dict):
@@ -3808,6 +3838,136 @@ class PaperProcessorDaemon:
             return None
         except Exception as e:
             self.logger.error(f"Split failed: {e}")
+            return None
+    
+    def _prompt_for_page_offset(self, pdf_path: Path) -> Optional[int]:
+        """Prompt user to specify which page the document actually starts on.
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            Page offset (0-indexed: 0 = page 1, 1 = page 2, etc.) or None if cancelled
+        """
+        try:
+            # Get total page count for validation
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                total_pages = len(pdf.pages)
+        except Exception:
+            total_pages = None
+        
+        print("\n" + "="*80)
+        print("📄 Document Starting Page")
+        print("="*80)
+        if total_pages:
+            print(f"This PDF scan has {total_pages} physical page(s).")
+        print()
+        print("⚠️  IMPORTANT: We're counting the SCAN PAGES (physical pages in this PDF file),")
+        print("    NOT the page numbers printed on the journal or book pages.")
+        print()
+        print("Sometimes scans include extra pages before the actual document starts")
+        print("(cover pages, previous chapters, etc.).")
+        print()
+        print("If your document starts on scan page 2, 3, 4, etc., enter that number now.")
+        print()
+        
+        while True:
+            try:
+                user_input = input("Enter starting scan page number (1-{}) or press Enter for page 1: ".format(total_pages if total_pages else "N")).strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Cancelled")
+                return None
+            
+            if not user_input:
+                # User pressed Enter - document starts at page 1
+                return 0
+            
+            if user_input.isdigit():
+                page_num = int(user_input)
+                if page_num < 1:
+                    print("⚠️  Page number must be at least 1")
+                    continue
+                if total_pages and page_num > total_pages:
+                    print(f"⚠️  Page number cannot exceed {total_pages} (total pages in PDF)")
+                    continue
+                # Convert to 0-indexed offset (page 1 -> offset 0, page 2 -> offset 1, etc.)
+                offset = page_num - 1
+                if offset == 0:
+                    print("✅ Document starts at scan page 1")
+                else:
+                    print(f"✅ Document will start from scan page {page_num} (skipping first {offset} scan page(s))")
+                return offset
+            else:
+                print("⚠️  Please enter a number or press Enter for page 1")
+    
+    def _create_pdf_from_page_offset(self, pdf_path: Path, page_offset: int) -> Optional[Path]:
+        """Create a temporary PDF starting from a specific page offset.
+        
+        Args:
+            pdf_path: Path to original PDF file
+            page_offset: 0-indexed page offset (0 = page 1, 1 = page 2, etc.)
+            
+        Returns:
+            Path to temporary PDF starting from specified page, or None if failed
+        """
+        if page_offset < 1:
+            # No offset needed, return None (use original)
+            return None
+        
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            self.logger.error("PyMuPDF (fitz) not available - cannot create PDF from page offset")
+            return None
+        
+        doc = None
+        new_doc = None
+        try:
+            # Open the PDF
+            doc = fitz.open(pdf_path)
+            
+            # Check if PDF has enough pages
+            if len(doc) <= page_offset:
+                self.logger.warning(f"PDF has only {len(doc)} page(s) - cannot start from page {page_offset + 1}")
+                doc.close()
+                return None
+            
+            # Create new PDF starting from page_offset
+            new_doc = fitz.open()
+            
+            # Copy pages starting from page_offset
+            for page_num in range(page_offset, len(doc)):
+                page = doc[page_num]
+                new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
+                new_page.show_pdf_page(new_page.rect, doc, page_num)
+            
+            # Save to a temporary file
+            import tempfile
+            temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            out_path = temp_dir / f"{pdf_path.stem}_from_page{page_offset + 1}.pdf"
+            
+            new_doc.save(str(out_path))
+            new_doc.close()
+            doc.close()
+            
+            self.logger.info(f"Created PDF starting from page {page_offset + 1}: {out_path.name}")
+            return out_path
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create PDF from page offset {page_offset + 1}: {e}")
+            # Ensure both documents are closed to prevent resource leaks
+            if new_doc is not None:
+                try:
+                    new_doc.close()
+                except Exception:
+                    pass
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
             return None
     
     def _delete_first_page_from_pdf(self, pdf_path: Path) -> Optional[Path]:
@@ -5847,9 +6007,9 @@ class PaperProcessorDaemon:
             True if note was added successfully or skipped, False if cancelled
         """
         print("\n" + "="*70)
-        print("ADD HANDWRITTEN NOTE")
+        print("WRITE A NOTE")
         print("="*70)
-        print("You can add a sentence or two from your handwritten notes on the paper folder.")
+        print("You can add a sentence or two from your notes on the paper folder.")
         print("  (Enter) Skip - don't add a note")
         print("  (n) Add a note")
         print("  (z) Cancel and go back")
@@ -6079,10 +6239,11 @@ class PaperProcessorDaemon:
         print(f"Scan: {pdf_path.name} ({scan_size_mb:.1f} MB)")
         print()
         print("Will perform:")
-        print(f"  1. Generate filename: {target_filename}")
-        print(f"  2. Copy to publications: {self.publications_dir.name}/")
-        print(f"  3. Attach as linked file in Zotero")
-        print(f"  4. Move scan to: done/")
+        print(f"  1. Edit metadata: tags, notes, authors, titles etc")
+        print(f"  2. Generate filename: {target_filename}")
+        print(f"  3. Copy to publications: {self.publications_dir.name}/")
+        print(f"  4. Attach as linked file in Zotero")
+        print(f"  5. Move scan to: done/")
         print("="*70)
         print()
         print("  (y/Enter) Proceed with all actions")
@@ -6092,7 +6253,7 @@ class PaperProcessorDaemon:
         print()
         
         # Ask for confirmation
-        confirm = input("Proceed with these actions? [y/n/skip/z]: ").strip().lower()
+        confirm = input("Proceed with these actions? [Y/n/skip/z]: ").strip().lower()
         
         # Enter (empty string) always proceeds (acts as 'y')
         if not confirm:
