@@ -4378,8 +4378,15 @@ class PaperProcessorDaemon:
         has_pdf = zotero_item.get('hasAttachment', False)
         
         if has_pdf:
-            print("⚠️  This Zotero item already has a PDF attachment")
-            print("\nWhat would you like to do?")
+            # Enriched comparison before choice
+            try:
+                existing_info = self._locate_existing_attachment_for_item(item_key, zotero_item, metadata)
+                scan_info = self._summarize_pdf_for_compare(pdf_path)
+                self._display_enhanced_pdf_comparison(scan_info, existing_info)
+            except Exception as e:
+                self.logger.debug(f"Enhanced comparison failed: {e}")
+            
+            print("What would you like to do?")
             print("[1] Keep both (add scanned version)")
             print("[2] Replace existing PDF with scan")
             print("[3] Skip attaching and finish")
@@ -4400,6 +4407,17 @@ class PaperProcessorDaemon:
             # For options 1 and 2, we'll proceed with attachment
             attach_type = "additional" if pdf_choice == '1' else "replacement"
             print(f"📎 Adding as {attach_type} attachment...")
+            
+            # If replacing, try to delete old attachment in Zotero and move old file to Recycle Bin (Windows)
+            if pdf_choice == '2':
+                try:
+                    if existing_info and existing_info.get('attachment_key'):
+                        old_attach_key = existing_info['attachment_key']
+                        self.zotero_processor.delete_item(old_attach_key)
+                    if existing_info and existing_info.get('windows_path'):
+                        self._move_to_recycle_bin_windows(existing_info['windows_path'])
+                except Exception as e:
+                    self.logger.warning(f"Failed to remove old attachment/file: {e}")
         
         # Before anything: try to reuse an identical file already in publications
         reuse_path = self._find_identical_in_publications(pdf_path)
@@ -4439,7 +4457,7 @@ class PaperProcessorDaemon:
         base_path = self.publications_dir / proposed_filename
         stem = base_path.stem
         suffix = base_path.suffix
-        scanned_path = self.publications_dir / f"{stem}_scanned{suffix}"
+        scanned_path = self.publications_dir / f"{stem}_scan{suffix}"
         final_path = base_path
         
         if base_path.exists():
@@ -5635,6 +5653,12 @@ class PaperProcessorDaemon:
                 if zotero_result['success']:
                     print(f"✅ Created Zotero item (key: {zotero_result.get('item_key', 'N/A')})")
                     print("⚠️  Item created without attachment (skipped by user)")
+                    
+                    # Offer to add a handwritten note
+                    item_key = zotero_result.get('item_key')
+                    if item_key:
+                        self._prompt_for_note(item_key)
+                    
                     self.move_to_done(pdf_path)
                     print("✅ Processing complete!")
                     return True
@@ -5664,6 +5688,12 @@ class PaperProcessorDaemon:
                         print("✅ PDF attached to new Zotero item")
                     elif action == 'added_without_pdf':
                         print("⚠️  Item created without attachment")
+                    
+                    # Offer to add a handwritten note
+                    item_key = zotero_result.get('item_key')
+                    if item_key:
+                        self._prompt_for_note(item_key)
+                    
                     self.move_to_done(pdf_path)
                     print("✅ Processing complete!")
                     return True
@@ -5783,6 +5813,11 @@ class PaperProcessorDaemon:
                     else:
                         print("⚠️  Item created without attachment (file copy failed)")
                 
+                # Offer to add a handwritten note
+                item_key = zotero_result.get('item_key')
+                if item_key:
+                    self._prompt_for_note(item_key)
+                
                 # Move original to done/
                 self.move_to_done(pdf_path)
                 print("✅ Processing complete!")
@@ -5796,6 +5831,45 @@ class PaperProcessorDaemon:
             self.logger.error(f"Error creating item: {e}")
             print(f"❌ Error: {e}")
             return False
+    
+    def _prompt_for_note(self, item_key: str):
+        """Prompt user to add a handwritten note to a Zotero item.
+        
+        Args:
+            item_key: Zotero item key
+        """
+        print("\n" + "="*70)
+        print("ADD HANDWRITTEN NOTE")
+        print("="*70)
+        print("You can add a sentence or two from your handwritten notes on the paper folder.")
+        print("  (Enter) Skip - don't add a note")
+        print("  (n) Add a note")
+        print("="*70)
+        note_choice = input("\nAdd a note? [Enter/n]: ").strip().lower()
+        
+        if note_choice == 'n':
+            print("\n📝 Enter your note (press Enter on a blank line when finished):")
+            note_lines = []
+            while True:
+                try:
+                    line = input()
+                    if not line.strip():
+                        break
+                    note_lines.append(line)
+                except (KeyboardInterrupt, EOFError):
+                    break
+            
+            if note_lines:
+                note_text = '\n'.join(note_lines)
+                print(f"\n💾 Adding note to Zotero item...")
+                if self.zotero_processor.add_note_to_item(item_key, note_text):
+                    print("✅ Note added successfully!")
+                else:
+                    print("⚠️  Failed to add note, continuing...")
+            else:
+                print("ℹ️  No note text entered, skipping note...")
+        else:
+            print("ℹ️  Skipping note...")
     
     def handle_item_selected(self, pdf_path: Path, metadata: dict, selected_item: dict):
         """Handle user selecting a Zotero item.
@@ -6009,6 +6083,11 @@ class PaperProcessorDaemon:
             confirm = 'y'
         
         if confirm == 'y' or confirm == 'yes':
+            # Offer to add a handwritten note before proceeding
+            item_key = selected_item.get('key') or selected_item.get('item_key')
+            if item_key:
+                self._prompt_for_note(item_key)
+            
             # Execute the actions
             self._process_selected_item(pdf_path, selected_item, target_filename, metadata)
         elif confirm == 'skip' or confirm == 's':
@@ -6364,6 +6443,184 @@ class PaperProcessorDaemon:
         
         print("="*70)
         print()
+
+    def _windows_to_wsl_path(self, win_path: str) -> str:
+        """Convert Windows path like G:\\My Drive\\... to WSL /mnt/g/My Drive/..."""
+        if not win_path:
+            return win_path
+        # already WSL
+        if win_path.startswith('/'):
+            return win_path
+        # normalize slashes
+        p = win_path.replace('\\', '/').replace(':/', ':\\').replace('\\', '/')
+        p = win_path.replace('\\', '/')
+        if ":" in p:
+            drive = p.split(':', 1)[0].lower()
+            rest = p.split(':', 1)[1].lstrip('/')
+            return f"/mnt/{drive}/{rest}"
+        return p
+
+    def _locate_existing_attachment_for_item(self, item_key: str, zotero_item: dict, metadata: dict) -> dict:
+        """Find existing attachment path via Zotero DB; fallback to publications fuzzy match.
+        Returns dict with: path (Path), filename, size_mb, modified, windows_path, attachment_key
+        """
+        try:
+            # Use local Zotero DB if available
+            if getattr(self, 'local_zotero', None) and self.local_zotero.db_connection:
+                cur = self.local_zotero.db_connection.cursor()
+                cur.execute("SELECT itemID FROM items WHERE key = ?", (item_key,))
+                row = cur.fetchone()
+                if row:
+                    parent_id = row[0]
+                    q = (
+                        "SELECT items.key, itemAttachments.path "
+                        "FROM itemAttachments "
+                        "JOIN items ON itemAttachments.itemID = items.itemID "
+                        "WHERE itemAttachments.parentItemID = ? "
+                        "AND itemAttachments.contentType = 'application/pdf' "
+                        "AND items.itemID NOT IN (SELECT itemID FROM deletedItems)"
+                    )
+                    cur.execute(q, (parent_id,))
+                    for akey, apath in cur.fetchall() or []:
+                        if not apath:
+                            continue
+                        wsl_path = Path(self._windows_to_wsl_path(apath))
+                        if wsl_path.exists():
+                            st = wsl_path.stat()
+                            return {
+                                'path': wsl_path,
+                                'filename': wsl_path.name,
+                                'size_mb': st.st_size / 1024 / 1024,
+                                'modified': st.st_mtime,
+                                'windows_path': apath,
+                                'attachment_key': akey
+                            }
+        except Exception as e:
+            self.logger.debug(f"Attachment lookup failed: {e}")
+        
+        # Fallback to fuzzy publications match
+        info = self._get_existing_pdf_info(zotero_item)
+        return info or {}
+
+    def _summarize_pdf_for_compare(self, path: Path) -> dict:
+        """Gather page count, times, OCR snippet, and border detection summary for a PDF."""
+        out = {
+            'path': path,
+            'filename': path.name,
+            'size_mb': 0.0,
+            'modified': None,
+            'created': None,
+            'pages': None,
+            'snippet': None,
+            'borders_summary': None
+        }
+        try:
+            st = path.stat()
+            out['size_mb'] = st.st_size / 1024 / 1024
+            out['modified'] = st.st_mtime
+            out['created'] = st.st_ctime
+        except Exception:
+            pass
+        # Page count and OCR snippet
+        try:
+            import fitz
+            with fitz.open(str(path)) as doc:
+                out['pages'] = len(doc)
+                if len(doc) > 0:
+                    txt = (doc[0].get_text("text") or "").strip()
+                    oneline = " ".join(txt.split())
+                    out['snippet'] = oneline[:80]
+        except Exception as e:
+            self.logger.debug(f"PDF open/text failed for {path.name}: {e}")
+        # Border detection on first up to 4 pages
+        try:
+            import fitz, numpy as np, cv2  # noqa: F401
+            from shared_tools.pdf.border_remover import BorderRemover
+            detected = 0
+            total = 0
+            with fitz.open(str(path)) as doc:
+                check_n = min(len(doc), 4)
+                remover = BorderRemover()
+                for i in range(check_n):
+                    page = doc[i]
+                    pix = page.get_pixmap(alpha=False)
+                    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
+                    edges = remover.detect_page_edges_center_out(img)
+                    if any(v > 0 for v in edges.values()):
+                        detected += 1
+                    total += 1
+            if total:
+                out['borders_summary'] = f"Dark borders on {detected} of {total} pages checked"
+        except Exception as e:
+            self.logger.debug(f"Border detection failed for {path.name}: {e}")
+        return out
+
+    def _display_enhanced_pdf_comparison(self, scan_info: dict, existing_info: dict):
+        """Print enhanced comparison panel with details for both PDFs."""
+        import time
+        print("\n" + "="*70)
+        print("📊 PDF COMPARISON:")
+        print("="*70)
+        if existing_info:
+            print(f"Existing: {existing_info.get('filename','(unknown)')}")
+            if existing_info.get('size_mb') is not None:
+                print(f"  Size: {existing_info['size_mb']:.1f} MB")
+            if existing_info.get('modified'):
+                print(f"  Modified: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(existing_info['modified']))}")
+        else:
+            print("⚠️  Zotero item has PDF but file not found in publications directory")
+        print()
+        print(f"Your Scan: {scan_info.get('filename')}")
+        if scan_info.get('size_mb') is not None:
+            print(f"  Size: {scan_info['size_mb']:.1f} MB")
+        if scan_info.get('modified'):
+            print(f"  Modified: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(scan_info['modified']))}")
+        # Page counts
+        ex_pages = existing_info.get('pages') if existing_info else None
+        if ex_pages is None and existing_info and existing_info.get('path'):
+            # lazy summarize to fill pages/snippet/borders if needed
+            try:
+                enriched = self._summarize_pdf_for_compare(existing_info['path'])
+                existing_info.update({k: enriched.get(k) for k in ('pages','snippet','borders_summary')})
+                ex_pages = existing_info.get('pages')
+            except Exception:
+                pass
+        if ex_pages is not None:
+            print(f"  Pages: {ex_pages}")
+        if existing_info and existing_info.get('borders_summary'):
+            print(f"  Borders: {existing_info['borders_summary']}")
+        if existing_info and existing_info.get('snippet'):
+            print(f"  OCR1: {existing_info['snippet']}")
+        print()
+        if scan_info.get('pages') is not None:
+            print(f"Scan Pages: {scan_info['pages']}")
+        if scan_info.get('borders_summary'):
+            print(f"Scan Borders: {scan_info['borders_summary']}")
+        if scan_info.get('snippet'):
+            print(f"Scan OCR1: {scan_info['snippet']}")
+        print("="*70)
+        print()
+
+    def _move_to_recycle_bin_windows(self, windows_path: str) -> bool:
+        """Send a Windows file to Recycle Bin using PowerShell script."""
+        try:
+            script_dir = Path(__file__).parent
+            ps_script = script_dir / 'move_to_recycle_bin.ps1'
+            # Convert script path to Windows
+            ps_script_win = subprocess.check_output(
+                ['wslpath', '-w', str(ps_script)], text=True
+            ).strip()
+            result = subprocess.run(
+                ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps_script_win, windows_path],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                return True
+            self.logger.warning(f"Recycle Bin script failed ({result.returncode}): {result.stdout or result.stderr}")
+            return False
+        except Exception as e:
+            self.logger.warning(f"Recycle Bin move failed: {e}")
+            return False
 
 class PaperFileHandler(FileSystemEventHandler):
     """File system event handler for watchdog."""

@@ -538,6 +538,42 @@ class ZoteroPaperProcessor:
         # If not recognized format, return as-is (might be relative path)
         return path_str
     
+    def add_note_to_item(self, item_key: str, note_text: str) -> bool:
+        """Add a note to an existing Zotero item as a child note.
+        
+        Args:
+            item_key: Zotero item key (parent item)
+            note_text: Text content of the note
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Create note item with parent reference
+            note_item = {
+                'itemType': 'note',
+                'parentItem': item_key,
+                'note': note_text
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/items",
+                headers=self.headers,
+                json=[note_item],
+                timeout=10
+            )
+            
+            if response.status_code in (200, 201):
+                return True
+            else:
+                print(f"❌ Failed to add note: {response.status_code}")
+                print(f"Response: {response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"Error adding note: {e}")
+            return False
+    
     def attach_pdf_to_existing(self, item_key: str, pdf_path: Union[str, Path]) -> bool:
         """Attach PDF to existing Zotero item.
         
@@ -585,6 +621,26 @@ class ZoteroPaperProcessor:
                 
         except Exception as e:
             print(f"Error attaching PDF: {e}")
+            return False
+
+    def delete_item(self, item_key: str) -> bool:
+        """Delete a Zotero item (e.g., an attachment) by key via Zotero API.
+        
+        Args:
+            item_key: Zotero item key to delete
+        
+        Returns:
+            True if deleted successfully
+        """
+        try:
+            response = requests.delete(
+                f"{self.base_url}/items/{item_key}",
+                headers=self.headers,
+                timeout=10
+            )
+            return response.status_code in (200, 204)
+        except Exception as e:
+            print(f"Error deleting Zotero item {item_key}: {e}")
             return False
 
 
