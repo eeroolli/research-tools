@@ -42,6 +42,9 @@ from add_or_remove_books_zotero import DetailedISBNLookupService
 # Import national library manager for thesis, book chapter, and book searches
 from shared_tools.api.config_driven_manager import ConfigDrivenNationalLibraryManager
 
+# Import border remover for scanned documents
+from shared_tools.pdf.border_remover import BorderRemover
+
 
 class PaperProcessorDaemon:
     """Main daemon class."""
@@ -72,6 +75,9 @@ class PaperProcessorDaemon:
         
         # Initialize national library manager (for thesis, book chapters, books)
         self.national_library_manager = ConfigDrivenNationalLibraryManager()
+        
+        # Initialize border remover (for dark border removal from scanned PDFs)
+        self.border_remover = BorderRemover()
         
         # Initialize services
         self.ollama_process = None
@@ -1017,6 +1023,19 @@ class PaperProcessorDaemon:
             if field_key in metadata:
                 value = metadata[field_key]
                 if self._is_non_empty_value(value):
+                    # Adjust label based on document type for ambiguous fields
+                    if field_key == 'journal':
+                        doc_type = metadata.get('document_type', '').lower()
+                        item_type = metadata.get('item_type', '').lower()
+                        
+                        # Check both document_type and item_type for books
+                        if (doc_type in ['book', 'book_section', 'book_chapter'] or 
+                            item_type in ['book', 'bookSection']):
+                            field_label = 'Book Title'
+                        elif doc_type == 'conference_paper' or item_type == 'conferencePaper':
+                            field_label = 'Conference'
+                        # Otherwise keep 'Journal' for articles/papers
+                    
                     group_fields[field_label] = value
         
         return group_fields
@@ -1518,7 +1537,7 @@ class PaperProcessorDaemon:
             ).strip()
             
             # Call PowerShell script
-            self.logger.info(f"Copying via PowerShell: {source_win} → {target_win}")
+            self.logger.debug(f"Copying via PowerShell: {source_win} → {target_win}")
             
             result = subprocess.run(
                 ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-File', ps_script_win, source_win, target_win],
@@ -1530,7 +1549,7 @@ class PaperProcessorDaemon:
             if result.returncode == 0:
                 # Success - target is in publications directory
                 target_path = self.publications_dir / target_filename
-                self.logger.info(f"Copy successful: {target_path}")
+                self.logger.debug(f"Copy successful: {target_path}")
                 return (True, target_path, None)
             else:
                 # Failed
@@ -2681,22 +2700,24 @@ class PaperProcessorDaemon:
         
         # Check if we have add: or remove: prefixes
         if 'add:' in value or 'remove:' in value:
-            # Parse enhanced syntax
-            parts = value.split()
+            # Parse enhanced syntax - split by add: and remove: markers
+            import re
+            
+            # Split on 'add:' or 'remove:' while keeping the delimiters
+            # This handles tags with spaces properly
+            parts = re.split(r'(add:|remove:)', value)
+            
             current_operation = None
             
             for part in parts:
-                if part.startswith('add:'):
+                part = part.strip()
+                if part == 'add:':
                     current_operation = 'add'
-                    tags_str = part[4:]  # Remove "add:" prefix
-                    # Parse comma-separated tags
-                    tags = [tag.strip() for tag in tags_str.split(',') if tag.strip()]
-                    operations[current_operation].extend(tags)
-                elif part.startswith('remove:'):
+                elif part == 'remove:':
                     current_operation = 'remove'
-                    tags_str = part[7:]  # Remove "remove:" prefix
+                elif part and current_operation:
                     # Parse comma-separated tags
-                    tags = [tag.strip() for tag in tags_str.split(',') if tag.strip()]
+                    tags = [tag.strip() for tag in part.split(',') if tag.strip()]
                     operations[current_operation].extend(tags)
         else:
             # Simple syntax: just comma-separated tags
@@ -2746,7 +2767,8 @@ class PaperProcessorDaemon:
             print("  6. Add custom tag")
             print("  7. Remove specific tag")
             print("  8. Clear all tags")
-            print("  9. Show tag group details")
+            print("  9. Edit all tags at once")
+            print("  10. Show tag group details")
             print("  (w) Write (apply) and return")
             print("  (s) Skip (return without changes)")
             print("=" * 60)
@@ -2775,6 +2797,8 @@ class PaperProcessorDaemon:
             elif choice == '8':
                 working_tags = self._clear_all_tags(working_tags)
             elif choice == '9':
+                working_tags = self._edit_all_tags_at_once(working_tags)
+            elif choice == '10':
                 self._show_tag_group_details()
             else:
                 print("❌ Invalid choice. Please try again.")
@@ -2816,7 +2840,10 @@ class PaperProcessorDaemon:
         
         parts = []
         if add_tags:
-            parts.append(', '.join(add_tags))
+            if remove_tags:
+                parts.append(f"add: {', '.join(add_tags)}")
+            else:
+                parts.append(', '.join(add_tags))
         if remove_tags:
             parts.append(f"remove: {', '.join(remove_tags)}")
         
@@ -2921,6 +2948,34 @@ class PaperProcessorDaemon:
         else:
             print("❌ Tags not cleared")
             return working_tags
+    
+    def _edit_all_tags_at_once(self, working_tags: list) -> list:
+        """Edit all tags at once by showing them on a line for direct editing."""
+        print(f"\n📝 CURRENT TAGS: {', '.join(working_tags) if working_tags else '(none)'}")
+        print("\n💡 Tip: You can add, remove, or reorder tags. Type 'cancel' to abort.")
+        print("   Example: tag1, tag2, tag3")
+        
+        new_tags_str = input("\nEnter all tags (comma-separated): ").strip()
+        
+        if new_tags_str.lower() == 'cancel':
+            print("❌ Tag editing cancelled")
+            return working_tags
+        
+        if not new_tags_str:
+            print("⚠️  Empty input - clearing all tags")
+            confirm = input("Confirm clear all tags? (y/n): ").strip().lower()
+            if confirm == 'y':
+                print("✅ All tags cleared")
+                return []
+            else:
+                print("❌ Tags not cleared")
+                return working_tags
+        
+        # Parse comma-separated tags
+        new_tags = [tag.strip() for tag in new_tags_str.split(',') if tag.strip()]
+        
+        print(f"✅ Updated tags: {', '.join(new_tags) if new_tags else '(none)'}")
+        return new_tags
     
     def _show_tag_group_details(self):
         """Show details of all configured tag groups."""
@@ -3814,6 +3869,119 @@ class PaperProcessorDaemon:
                     pass  # Ignore errors during cleanup
             return None
     
+    def _check_and_remove_dark_borders(self, pdf_path: Path) -> Optional[Path]:
+        """Check for dark borders and optionally remove them.
+        
+        Checks first 4 pages for borders. If borders detected, prompts user
+        to confirm removal. Returns path to cleaned PDF or None if no action taken.
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            Path to cleaned PDF if borders removed, None if skipped
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            self.logger.error("PyMuPDF (fitz) not available - cannot check borders")
+            return None
+        
+        print("\n🔍 Checking for dark borders (pages 1-4)...")
+        
+        # Check first 4 pages for borders
+        borders_detected = False
+        pages_with_borders = []
+        all_borders_info = []
+        
+        try:
+            doc = fitz.open(str(pdf_path))
+            pages_to_check = min(4, len(doc))
+            
+            for page_num in range(pages_to_check):
+                try:
+                    processed_image, borders = self.border_remover.process_pdf_page(
+                        pdf_path, page_num, zoom=2.0
+                    )
+                    
+                    # Check if any borders were detected
+                    if any(borders.values()):
+                        borders_detected = True
+                        pages_with_borders.append(page_num + 1)
+                        all_borders_info.append((page_num + 1, borders))
+                        
+                        # Format border description
+                        border_desc = []
+                        if borders['top'] > 0:
+                            border_desc.append(f"top: {borders['top']}px")
+                        if borders['bottom'] > 0:
+                            border_desc.append(f"bottom: {borders['bottom']}px")
+                        if borders['left'] > 0:
+                            border_desc.append(f"left: {borders['left']}px")
+                        if borders['right'] > 0:
+                            border_desc.append(f"right: {borders['right']}px")
+                        
+                        desc = ", ".join(border_desc) if border_desc else "detected"
+                        print(f"  ✓ Page {page_num + 1}: borders detected ({desc})")
+                        self.logger.debug(f"Page {page_num + 1}: borders detected {borders}")
+                    else:
+                        print(f"  ✓ Page {page_num + 1}: no borders")
+                except Exception as e:
+                    self.logger.debug(f"Error checking page {page_num + 1}: {e}")
+                    print(f"  ⚠️  Page {page_num + 1}: error checking borders")
+                    continue
+            
+            doc.close()
+            
+            if not borders_detected:
+                print("\nℹ️  No dark borders detected - skipping removal")
+                return None
+            
+            # Report to user
+            pages_str = ", ".join(str(p) for p in pages_with_borders)
+            print(f"\n📊 Summary: Dark borders found on {len(pages_with_borders)} of {pages_to_check} pages checked")
+            
+            choice = input("Remove dark borders from the whole PDF? [Y/n]: ").strip().lower()
+            if choice == 'n':
+                print("Skipping border removal")
+                return None
+            
+            # Process entire PDF with border removal
+            print("\n🔄 Processing all pages...")
+            
+            # Create output path
+            import tempfile
+            temp_dir = Path(tempfile.gettempdir()) / 'pdf_borders_removed'
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            out_path = temp_dir / f"{pdf_path.stem}_no_borders.pdf"
+            
+            stats = self.border_remover.process_entire_pdf(pdf_path, out_path, zoom=2.0)
+            
+            if stats['pages_processed'] > 0:
+                pixel_count = stats.get('total_border_pixels', 0)
+                if pixel_count > 0:
+                    # Format pixel count nicely
+                    if pixel_count > 1_000_000:
+                        pixel_str = f"{pixel_count/1_000_000:.1f}M"
+                    elif pixel_count > 1_000:
+                        pixel_str = f"{pixel_count/1_000:.0f}K"
+                    else:
+                        pixel_str = str(pixel_count)
+                    
+                    print(f"✅ Borders removed from {stats['pages_processed']} pages ({pixel_str} pixels)")
+                else:
+                    print(f"✅ Borders removed from {stats['pages_processed']} pages")
+                self.logger.debug(f"Created PDF without borders: {out_path.name}")
+                return out_path
+            else:
+                print("⚠️  No pages were processed")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Error during border removal: {e}")
+            print(f"⚠️  Border removal failed: {e}")
+            return None
+    
     def start(self):
         """Start the daemon."""
         # Single-instance guard
@@ -4585,7 +4753,7 @@ class PaperProcessorDaemon:
         
         print(f"\n✅ Found {len(matches)} potential match(es) {search_info}:")
         print()
-        print("NOTE: All items shown below already exist in your Zotero library.")
+        print("These items exist in your Zotero library.")
         print()
         
         # Display items with letter labels
@@ -5931,6 +6099,12 @@ class PaperProcessorDaemon:
                 else:
                     print("⚠️  Failed to delete page 1 - using original split PDF")
         
+        # Step 1c: Check and optionally remove dark borders
+        border_removed_pdf = self._check_and_remove_dark_borders(pdf_to_copy)
+        if border_removed_pdf:
+            pdf_to_copy = border_removed_pdf
+            self.logger.debug(f"Using PDF without borders: {border_removed_pdf.name}")
+        
         # Step 2: Copy to publications directory via PowerShell
         print(f"2/4 Copying to publications directory...")
         success, target_path, error = self._copy_to_publications_via_windows(pdf_to_copy, target_filename)
@@ -5941,11 +6115,11 @@ class PaperProcessorDaemon:
             self.move_to_manual_review(pdf_path)
             return
         
-        print(f"✅ Copied to: {target_path.name}")
+        print(f"✅ Copied")
         
         # Step 3: Attach to Zotero as linked file
         print(f"3/4 Attaching to Zotero item...")
-        self.logger.info(f"Attaching {target_path.name} to Zotero item {item_key}")
+        self.logger.debug(f"Attaching {target_path.name} to Zotero item {item_key}")
         
         try:
             result = self.zotero_processor.attach_pdf_to_existing(item_key, target_path)
@@ -5985,8 +6159,8 @@ class PaperProcessorDaemon:
             dest = done_dir / pdf_path.name
             
             pdf_path.rename(dest)
-            self.logger.info(f"Moved to done: {dest}")
-            print(f"✅ Moved to: done/{pdf_path.name}")
+            self.logger.debug(f"Moved to done: {dest}")
+            print(f"✅ Moved to done/")
             
         except Exception as e:
             print(f"⚠️  Failed to move to done/: {e}")
