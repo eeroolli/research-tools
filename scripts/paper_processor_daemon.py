@@ -3063,6 +3063,11 @@ class PaperProcessorDaemon:
         Args:
             pdf_path: Path to PDF file
         """
+        # Check if file exists before processing
+        if not pdf_path.exists():
+            self.logger.warning(f"File no longer exists, cannot process: {pdf_path}")
+            return
+        
         self.logger.info(f"New scan: {pdf_path.name}")
         # Remember the original scan path for final move operations
         self._original_scan_path = Path(pdf_path)
@@ -3646,6 +3651,12 @@ class PaperProcessorDaemon:
         src = getattr(self, '_original_scan_path', None)
         if src is None or not Path(src).exists():
             src = pdf_path
+        
+        # Check if source file exists before attempting to move
+        if not Path(src).exists():
+            self.logger.warning(f"Cannot move to done/: file no longer exists: {src}")
+            return
+        
         done_dir = self.watch_dir / "done"
         done_dir.mkdir(exist_ok=True)
         
@@ -3663,6 +3674,12 @@ class PaperProcessorDaemon:
         src = getattr(self, '_original_scan_path', None)
         if src is None or not Path(src).exists():
             src = pdf_path
+        
+        # Check if source file exists before attempting to move
+        if not Path(src).exists():
+            self.logger.warning(f"Cannot move to failed/: file no longer exists: {src}")
+            return
+        
         failed_dir = self.watch_dir / "failed"
         failed_dir.mkdir(exist_ok=True)
         
@@ -3680,6 +3697,12 @@ class PaperProcessorDaemon:
         src = getattr(self, '_original_scan_path', None)
         if src is None or not Path(src).exists():
             src = pdf_path
+        
+        # Check if source file exists before attempting to move
+        if not Path(src).exists():
+            self.logger.warning(f"Cannot move to skipped/: file no longer exists: {src}")
+            return
+        
         skipped_dir = self.watch_dir / "skipped"
         skipped_dir.mkdir(exist_ok=True)
         
@@ -4714,6 +4737,12 @@ class PaperProcessorDaemon:
         src = getattr(self, '_original_scan_path', None)
         if src is None or not Path(src).exists():
             src = pdf_path
+        
+        # Check if source file exists before attempting to move
+        if not Path(src).exists():
+            self.logger.warning(f"Cannot move to manual review: file no longer exists: {src}")
+            return
+        
         manual_dir = self.watch_dir / "manual_review"
         manual_dir.mkdir(exist_ok=True)
         
@@ -6838,6 +6867,11 @@ class PaperFileHandler(FileSystemEventHandler):
         
         # Small delay to ensure file is fully written
         time.sleep(2)
+        
+        # Check if file still exists (may have been moved/deleted by another process)
+        if not file_path.exists():
+            self.daemon.logger.warning(f"File no longer exists, skipping: {file_path.name}")
+            return
         
         # Process the paper
         self.daemon.logger.info("")
