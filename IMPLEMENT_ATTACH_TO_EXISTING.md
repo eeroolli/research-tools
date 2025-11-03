@@ -260,18 +260,13 @@ This feature is complete and stable. Future enhancements (e.g., persistent hash 
    → Show error, PDF stays in publications/, scan to manual/
 
 5. What about duplicate PDF detection?
-   → Future enhancement (hash comparison)
+   → ✅ **IMPLEMENTED** (Oct 2025) - Size-then-hash comparison for identical files in publications directory
 
 ---
 
 ## Next Steps
 
-1. Test current daemon with sample scan
-2. Identify exact point where filename becomes "P_et_al"
-3. Fix author extraction from Zotero 'creators' field
-4. Add confirmation step for authors
-5. Test end-to-end workflow
-6. Document any additional issues found
+All implementation complete. Future enhancements below.
 
 ---
 

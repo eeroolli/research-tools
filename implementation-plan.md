@@ -28,11 +28,11 @@ Notes:
 - Start with CLI stop/status for immediate operability; others can follow incrementally.
 # Research-Tools Implementation Plan
 
-Last updated: 2025-10-30
+Last updated: 2025-11-03
 Related spec: `IMPLEMENT_ATTACH_TO_EXISTING.md` (feature behavior)
 
 At a glance:
-- Completed: Paper daemon end-to-end, attach workflows, publications-first reuse, linked-path normalization, skip-attach, metadata editing workflow, config path normalization, JSTOR support, arXiv URL fixes, enhanced UX (Nov 30, 2025)
+- Completed: Paper daemon end-to-end, attach workflows, publications-first reuse, linked-path normalization, skip-attach, metadata editing workflow, config path normalization, JSTOR support, arXiv URL fixes, enhanced UX (Nov 30, 2025), PDF border removal and rotation (Nov 3, 2025)
 - In Progress: Smart preprocessing/classification, sampling/validation, document profiler
 - Next: OpenAlex/PubMed integration, unified metadata manager, test harness expansion
 - Backlog: Local Zotero DB integration, advanced caching, hybrid photo pipeline, auto document-type detection (low priority)
@@ -99,6 +99,7 @@ At a glance:
 - **Enhanced Metadata Extraction** - Keywords, publisher, volume, issue, pages, language, conference info
 - **Automatic Language Detection** - Detects language from filename prefix (NO_, EN_, DE_, FI_, SE_) and automatically adds to Zotero items (new items and updates existing items if language field is missing)
 - **Author Validation System** - Recognizes all authors in user's Zotero via lastname matching with alternatives
+- **Journal Validation System** - `JournalValidator` recognizes and validates journals against Zotero collection with OCR correction, integrated into paper processor daemon
 
 ### 🚧 **In Progress:**
 - Smart preprocessing and evidence-based classification for Ollama optimization
@@ -108,7 +109,7 @@ At a glance:
 ### ▶️ **Next:**
 - Unified metadata manager scaffolding and tests
 - End-to-end sampling harness (20 PDFs per type)
-- Curated journals/publishers normalization from local Zotero (dictionary + alias + fuzzy suggest)
+- Publisher normalization from local Zotero (dictionary + alias + fuzzy suggest)
 
 ### 🗂️ **Backlog (Ideas/Future):**
 - Local Zotero SQLite performance integration with schema guardrails
@@ -116,37 +117,38 @@ At a glance:
 - Batch local lookups for speed and prefetching
 - CI test data fixtures and baseline performance metrics
 - Automatic document type detection (low priority; manual selection in UX suffices)
-- **Black border removal from PDFs** (Low Priority)
-  - Remove black borders from scanned book chapter PDFs that often appear when scanning copies
-  - Implementation options:
-    1. Integrate into splitting workflow (offer after splitting book chapters)
-    2. Create separate batch tool to process all PDFs in publications/ directory
-  - Technology: Use existing tools (PyMuPDF for PDF→image conversion, OpenCV for edge detection/border cropping, PIL for image processing)
-  - Note: Not needed immediately; can be implemented later as standalone tool or workflow enhancement
 
-### 📌 **Recently Completed (Oct 2025):**
-- Hash-based duplicate detection during copy/name collisions
-- Global publications-first identical reuse before copy
-- Robust attach path handling and messaging
-- Ability to create item without attaching a PDF
-- Metadata editing workflow fully wired to menu actions
-- Config path normalization - supports both WSL (/mnt/g/...) and Windows (G:\...) path formats
-- File copy functions handle both WSL and Windows path formats seamlessly
-- OpenAlex API integration - DOI lookup and metadata search with CrossRef fallback
-- PubMed API integration - Complete with DOI lookup and metadata search
-- Config-driven API priority system - Users can customize API order in config.personal.conf
-- **Extraction flow optimization** - GREP-first approach (fast identifier extraction + API lookup) before GROBID fallback (2-4 seconds vs 5-10+ seconds for papers with DOIs)
-- **Centralized DOI normalization** - `IdentifierValidator.normalize_doi()` used by all API clients for consistent DOI cleaning
-- **Manual DOI entry in metadata editor** - Always available, independent of Zotero items, with validation and optional metadata fetching
-- **Tags display enhancement** - Tags fetched from Zotero database and displayed first when selecting existing items
-- **DOI OCR error handling** - Handles OCR variants like "DO!", "DO1", "DOl" in identifier extraction
-- **ISSN preference** - Online ISSN preferred over print ISSN when both exist
-- **JSTOR identifier extraction** - JSTOR stable URL IDs now extracted separately from generic URLs, automatically classified as journal articles
-- **arXiv URL misclassification fix** - Enhanced arXiv extraction with proximity checks and subject whitelist to prevent false positives (e.g., JSTOR URLs)
-- **Improved identifier separation** - JSTOR URLs excluded from generic URL extraction to prevent confusion and double-counting
-- **Enhanced Zotero item selection UX** - Added metadata review step before attachment with options to edit, proceed, or go back
-- **UX flow optimization** - Eliminated duplicate code in item selection, streamlined metadata display
-- **Automatic language detection from filenames** - Detects language prefix (NO_, EN_, DE_, FI_, SE_) and automatically adds to Zotero items when creating new items or updating existing ones with missing language field
+### 📌 **Recently Completed:**
+- **PDF Border Removal and Rotation** (Nov 3, 2025)
+  - `BorderRemover` class for removing dark borders from scanned PDFs using projection profile analysis
+  - `PDFRotationHandler` for detecting and correcting PDF rotation (90°, 180°, 270°)
+  - Integrated with `paper_processor_daemon.py` and GROBID client
+  - Performance: 5-8x faster than unpaper with similar quality
+  - Clean production structure: `shared_tools/pdf/` with archived development docs in `archive/pdf/`
+
+- **October 2025:**
+  - Hash-based duplicate detection during copy/name collisions
+  - Global publications-first identical reuse before copy
+  - Robust attach path handling and messaging
+  - Ability to create item without attaching a PDF
+  - Metadata editing workflow fully wired to menu actions
+  - Config path normalization - supports both WSL (/mnt/g/...) and Windows (G:\...) path formats
+  - File copy functions handle both WSL and Windows path formats seamlessly
+  - OpenAlex API integration - DOI lookup and metadata search with CrossRef fallback
+  - PubMed API integration - Complete with DOI lookup and metadata search
+  - Config-driven API priority system - Users can customize API order in config.personal.conf
+  - **Extraction flow optimization** - GREP-first approach (fast identifier extraction + API lookup) before GROBID fallback (2-4 seconds vs 5-10+ seconds for papers with DOIs)
+  - **Centralized DOI normalization** - `IdentifierValidator.normalize_doi()` used by all API clients for consistent DOI cleaning
+  - **Manual DOI entry in metadata editor** - Always available, independent of Zotero items, with validation and optional metadata fetching
+  - **Tags display enhancement** - Tags fetched from Zotero database and displayed first when selecting existing items
+  - **DOI OCR error handling** - Handles OCR variants like "DO!", "DO1", "DOl" in identifier extraction
+  - **ISSN preference** - Online ISSN preferred over print ISSN when both exist
+  - **JSTOR identifier extraction** - JSTOR stable URL IDs now extracted separately from generic URLs, automatically classified as journal articles
+  - **arXiv URL misclassification fix** - Enhanced arXiv extraction with proximity checks and subject whitelist to prevent false positives (e.g., JSTOR URLs)
+  - **Improved identifier separation** - JSTOR URLs excluded from generic URL extraction to prevent confusion and double-counting
+  - **Enhanced Zotero item selection UX** - Added metadata review step before attachment with options to edit, proceed, or go back
+  - **UX flow optimization** - Eliminated duplicate code in item selection, streamlined metadata display
+  - **Automatic language detection from filenames** - Detects language prefix (NO_, EN_, DE_, FI_, SE_) and automatically adds to Zotero items when creating new items or updating existing ones with missing language field
 
 ### ❌ **Not Completed:**
 - Detailed migration tasks from `archive/AI_CHAT_DOCUMENTS.md` (Phases 2-4)
@@ -314,6 +316,9 @@ shared_tools/
 │   └── isbn_extractor.py
 ├── processors/
 │   └── smart_integrated_processor_v3.py
+├── pdf/
+│   ├── border_remover.py
+│   └── pdf_rotation_handler.py
 └── utils/
     ├── file_manager.py
     ├── thread_pool_manager.py
@@ -323,9 +328,16 @@ shared_tools/
     └── identifier_validator.py
 ```
 
+**Phase 0.4C: PDF Module Cleanup** ✅ COMPLETED (November 3, 2025)
+- [x] **Border removal implementation** - Clean, production-ready `BorderRemover` class
+- [x] **Rotation handler** - `PDFRotationHandler` for GROBID integration
+- [x] **Archive consolidation** - Moved all development docs to `archive/pdf/border_removal/`
+- [x] **Clean structure** - 4 production files in `shared_tools/pdf/` matching `utils/` pattern
+- [x] **Production verification** - All imports and functionality tested
+
 **Impact:** Better module organization, clearer architecture, easier maintenance
 
-**Phase 0.4C: Testing Infrastructure** 🚧 PLANNED
+**Phase 0.4D: Testing Infrastructure** 🚧 PLANNED
 - [ ] **Create pytest configuration** - Set up proper test framework
 - [ ] **Add test fixtures** - Sample PDFs, images, API responses
 - [ ] **Core unit tests** - ISBN extraction, matching, file management
@@ -446,7 +458,6 @@ Note: Largely covered by GROBID already (title/authors/venue/year from first pag
 - [x] **Folder structure defined** - `I:\FraScanner\papers\` with done/failed subdirectories
 - [x] **Integration points identified** - Reuses existing `PaperMetadataProcessor` and config system
 - [x] **Shared utilities planned** - Common OCR, file management, logging functions
-- [ ] **Implementation in progress** - See `daemon_implementation_spec.md` for details
 
 #### 4.2 Daemon System Design ✅
 - [x] **Smart launcher** - `scripts/start_paper_processor.py` (idempotent, Epson-triggered)
@@ -470,8 +481,8 @@ Note: Largely covered by GROBID already (title/authors/venue/year from first pag
 - [x] **File renaming** - `Author_Year_Title.pdf` format (implemented in process_scanned_papers.py)
 - [x] **Directory organization** - Store in `G:\my Drive\publications\` (single folder for now)
 - [x] **Original preservation** - Move to `done/` folder with scanner filename (also after identical reuse or skip-attach)
+- [x] **Border removal** - `BorderRemover` integrated into paper processor daemon with interactive detection and removal workflow (Nov 3, 2025)
 - [ ] **Extraction to shared module** - Move common functions to `shared_tools/papers/file_manager.py`
-- [ ] **Black border removal** (Low Priority) - Optional enhancement for scanned book chapters with black borders; could be integrated into splitting workflow or implemented as separate batch processing tool
 
 #### 4.5 Workflow Integration 🚧
 - [x] **Separate workflows** - Books and papers use same underlying systems but different entry points
@@ -508,18 +519,24 @@ Note: Largely covered by GROBID already (title/authors/venue/year from first pag
 #### 4.7 Interactive Menu System ✅ COMPLETE
 **Status:** ✅ **COMPLETE** - Full interactive workflow implemented (Oct 29, 2025)
 
+**Complete UX Flow:**
+- ✅ **Year Confirmation Page**: Conflict detection, multi-source validation (GREP, GROBID/API), manual entry
+- ✅ **Document Type Selection**: Auto-detection with confirmation, comprehensive type menu
 - ✅ **Universal Metadata Display**: Smart field grouping and intelligent formatting for any document type
 - ✅ **Document Type Awareness**: Shows relevant fields for journal articles, book chapters, conference papers, books, legal docs, etc.
+- ✅ **Author Selection Page**: Interactive selection with letters, Zotero recognition, paper counts, edit/delete/add
 - ✅ **Metadata Source Flexibility**: Works with Zotero local, CrossRef API, arXiv, national libraries, OCR extraction, manual entry
 - ✅ **Future-Proof Design**: Automatically displays new fields without code changes
 - ✅ **Enhanced User Experience**: Grouped, formatted, intelligent display with proper field labeling
 - ✅ **Interactive Menu**: Complete menu system with user choices (use as-is, edit, search Zotero, skip, manual processing)
 - ✅ **Failed Extraction Workflow**: Guided manual metadata entry for failed extractions
-- ✅ **Metadata Editing**: ✅ **COMPLETE** (Oct 29, 2025) - Fully wired to edit menu action with re-search capability
+- ✅ **Metadata Editing**: ✅ **COMPLETE** (Oct 29, 2025) - Fully wired to edit menu action with re-search capability, OCR correction
+- ✅ **Online Search Integration**: CrossRef, arXiv, PubMed, OpenAlex search during metadata editing and item attachment
 - ✅ **3-Step Zotero Workflow**: Enhanced workflow for attaching PDFs to existing Zotero items
 - ✅ **Metadata Comparison**: Side-by-side comparison with 6 user options
 - ✅ **Tags Integration**: Full integration with existing tag system
 - ✅ **PDF Attachment**: Complete PDF handling with conflict resolution, publications-first reuse, and optional skip-attach
+- ✅ **Navigation**: Back, restart, quit options throughout workflow
 
 **Completed Implementation:**
 - ✅ **Task 7**: Complete Zotero match selection with 3-step UX flow
@@ -527,6 +544,7 @@ Note: Largely covered by GROBID already (title/authors/venue/year from first pag
 - ✅ **Enhanced UX**: 6 options for metadata handling including manual processing
 - ✅ **Production Ready**: Full error handling and file management
 - ✅ **Oct 29, 2025**: Connected edit metadata action to edit_metadata_interactively method
+- ✅ **Nov 3, 2025**: Comprehensive UX flow documented in PAPER_PROCESSOR_UX_FLOW.md
 
 #### 4.8 Enhanced 3-Step Zotero Workflow ✅ COMPLETE
 **Status:** ✅ **COMPLETE** - Full 3-step UX workflow implemented (Oct 14, 2025)
