@@ -6163,122 +6163,124 @@ class PaperProcessorDaemon:
                     print("⚠️  Invalid choice, going back...")
                     continue
             elif choice == 'y':
-                # Continue with attachment
-                break
+                # Continue to PROPOSED ACTIONS - prepare metadata and filename
+                print()
+                
+                # Get scan file info
+                scan_size_mb = pdf_path.stat().st_size / 1024 / 1024
+                
+                # CRITICAL: Use ONLY Zotero metadata for filename generation
+                # When attaching to existing Zotero item, Zotero metadata is canonical
+                # Fallback to scan metadata only causes incorrect filenames like "P_et_al_Unknown_..."
+                
+                # Extract metadata from Zotero item (authors already extracted in _display_zotero_item_details)
+                zotero_authors = selected_item.get('authors', [])
+                zotero_title = selected_item.get('title', '')
+                zotero_year = selected_item.get('year', selected_item.get('date', ''))
+                zotero_item_type = selected_item.get('itemType', 'journalArticle')
+                
+                # Validate critical fields
+                missing_fields = []
+                if not zotero_title:
+                    missing_fields.append('title')
+                if not zotero_authors:
+                    missing_fields.append('authors')
+                
+                # Show warning if critical fields missing
+                if missing_fields:
+                    print(f"⚠️  WARNING: Zotero item missing: {', '.join(missing_fields)}")
+                    print("   Cannot generate proper filename without this information.")
+                    print("   Please edit Zotero item metadata or choose manual processing.")
+                    confirm_anyway = input("Proceed anyway with placeholder values? [y/n]: ").strip().lower()
+                    if confirm_anyway != 'y':
+                        print("⬅️  Going back to review...")
+                        continue
+                    # Set placeholders
+                    if 'title' in missing_fields:
+                        zotero_title = 'Unknown_Title'
+                    if 'authors' in missing_fields:
+                        zotero_authors = ['Unknown_Author']
+                
+                # Build metadata using ONLY Zotero data
+                merged_metadata = {
+                    'title': zotero_title,
+                    'authors': zotero_authors,
+                    'year': zotero_year if zotero_year else 'Unknown',
+                    'document_type': zotero_item_type
+                }
+                
+                # Generate target filename with _scan suffix
+                filename_gen = FilenameGenerator()
+                target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
+                
+                # Show what authors will be used in filename
+                if zotero_authors:
+                    author_display = '_'.join([a.split()[-1] if ' ' in a else a for a in zotero_authors[:2]])
+                    print(f"📝 Filename will use authors: {author_display}")
+                    print()
+                
+                # Show filename preview before confirmation
+                print(f"📄 Generated filename: {target_filename}")
+                print()
+                
+                # Show PDF comparison if item already has PDF
+                if has_pdf:
+                    existing_pdf_info = self._get_existing_pdf_info(selected_item)
+                    self._display_pdf_comparison(pdf_path, scan_size_mb, existing_pdf_info)
+                
+                # PROPOSED ACTIONS loop
+                while True:
+                    # Show proposed actions
+                    print("="*70)
+                    print("PROPOSED ACTIONS:")
+                    print("="*70)
+                    print(f"Scan: {pdf_path.name} ({scan_size_mb:.1f} MB)")
+                    print()
+                    print("Will perform:")
+                    print(f"  1. Generate filename: {target_filename}")
+                    print(f"  2. Copy to publications: {self.publications_dir.name}/")
+                    print(f"  3. Attach as linked file in Zotero")
+                    print(f"  4. Move scan to: done/")
+                    print("="*70)
+                    print()
+                    print("  (y/Enter) Proceed with all actions")
+                    print("  (z) Go back to review")
+                    print("  (q) Quit - move to manual review")
+                    print()
+                    
+                    # Ask for confirmation
+                    confirm = input("Proceed with these actions? [Y/z/q]: ").strip().lower()
+                    
+                    # Enter (empty string) always proceeds (acts as 'y')
+                    if not confirm:
+                        confirm = 'y'
+                    
+                    if confirm == 'y' or confirm == 'yes':
+                        # Offer to add a handwritten note before proceeding
+                        item_key = selected_item.get('key') or selected_item.get('item_key')
+                        if item_key:
+                            note_result = self._prompt_for_note(item_key)
+                            if not note_result:
+                                # User cancelled note addition, go back to PROPOSED ACTIONS
+                                continue
+                        
+                        # Execute the actions
+                        self._process_selected_item(pdf_path, selected_item, target_filename, metadata)
+                        return  # Exit successfully
+                    elif confirm == 'z':
+                        print("⬅️  Going back to review...")
+                        break  # Break out of PROPOSED ACTIONS loop, back to REVIEW & PROCEED
+                    elif confirm == 'q':
+                        print("📝 Moving to manual review")
+                        self.move_to_manual_review(pdf_path)
+                        return
+                    else:
+                        print("⚠️  Invalid choice. Please enter 'y' to proceed, 'z' to go back, or 'q' to quit.")
+                
+                # After breaking from PROPOSED ACTIONS, continue loop to show REVIEW & PROCEED again
+                continue
             else:
                 print("⚠️  Invalid choice. Please enter 'y' to proceed, 'e' to edit, or 'z' to go back.")
-        
-        print()
-        
-        # Get scan file info
-        scan_size_mb = pdf_path.stat().st_size / 1024 / 1024
-        
-        # CRITICAL: Use ONLY Zotero metadata for filename generation
-        # When attaching to existing Zotero item, Zotero metadata is canonical
-        # Fallback to scan metadata only causes incorrect filenames like "P_et_al_Unknown_..."
-        
-        # Extract metadata from Zotero item (authors already extracted in _display_zotero_item_details)
-        zotero_authors = selected_item.get('authors', [])
-        zotero_title = selected_item.get('title', '')
-        zotero_year = selected_item.get('year', selected_item.get('date', ''))
-        zotero_item_type = selected_item.get('itemType', 'journalArticle')
-        
-        # Validate critical fields
-        missing_fields = []
-        if not zotero_title:
-            missing_fields.append('title')
-        if not zotero_authors:
-            missing_fields.append('authors')
-        
-        # Show warning if critical fields missing
-        if missing_fields:
-            print(f"⚠️  WARNING: Zotero item missing: {', '.join(missing_fields)}")
-            print("   Cannot generate proper filename without this information.")
-            print("   Please edit Zotero item metadata or choose manual processing.")
-            confirm_anyway = input("Proceed anyway with placeholder values? [y/n]: ").strip().lower()
-            if confirm_anyway != 'y':
-                self.move_to_manual_review(pdf_path)
-                return
-            # Set placeholders
-            if 'title' in missing_fields:
-                zotero_title = 'Unknown_Title'
-            if 'authors' in missing_fields:
-                zotero_authors = ['Unknown_Author']
-        
-        # Build metadata using ONLY Zotero data
-        merged_metadata = {
-            'title': zotero_title,
-            'authors': zotero_authors,
-            'year': zotero_year if zotero_year else 'Unknown',
-            'document_type': zotero_item_type
-        }
-        
-        # Generate target filename with _scan suffix
-        filename_gen = FilenameGenerator()
-        target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
-        
-        # Show what authors will be used in filename
-        if zotero_authors:
-            author_display = '_'.join([a.split()[-1] if ' ' in a else a for a in zotero_authors[:2]])
-            print(f"📝 Filename will use authors: {author_display}")
-            print()
-        
-        # Show filename preview before confirmation
-        print(f"📄 Generated filename: {target_filename}")
-        print()
-        
-        # Show PDF comparison if item already has PDF
-        if has_pdf:
-            existing_pdf_info = self._get_existing_pdf_info(selected_item)
-            self._display_pdf_comparison(pdf_path, scan_size_mb, existing_pdf_info)
-        
-        # Show proposed actions
-        print("="*70)
-        print("PROPOSED ACTIONS:")
-        print("="*70)
-        print(f"Scan: {pdf_path.name} ({scan_size_mb:.1f} MB)")
-        print()
-        print("Will perform:")
-        print(f"  1. Edit metadata: tags, notes, authors, titles etc")
-        print(f"  2. Generate filename: {target_filename}")
-        print(f"  3. Copy to publications: {self.publications_dir.name}/")
-        print(f"  4. Attach as linked file in Zotero")
-        print(f"  5. Move scan to: done/")
-        print("="*70)
-        print()
-        print("  (y/Enter) Proceed with all actions")
-        print("  (n) Cancel - move to manual review")
-        print("  (skip) Move to manual review")
-        print("  (z) Go back to item selection")
-        print()
-        
-        # Ask for confirmation
-        confirm = input("Proceed with these actions? [Y/n/skip/z]: ").strip().lower()
-        
-        # Enter (empty string) always proceeds (acts as 'y')
-        if not confirm:
-            confirm = 'y'
-        
-        if confirm == 'y' or confirm == 'yes':
-            # Offer to add a handwritten note before proceeding
-            item_key = selected_item.get('key') or selected_item.get('item_key')
-            if item_key:
-                note_result = self._prompt_for_note(item_key)
-                if not note_result:
-                    # User cancelled note addition, go back
-                    return
-            
-            # Execute the actions
-            self._process_selected_item(pdf_path, selected_item, target_filename, metadata)
-        elif confirm == 'skip' or confirm == 's':
-            print("📝 Moving to manual review")
-            self.move_to_manual_review(pdf_path)
-        elif confirm == 'z':
-            print("⬅️  Going back to item selection")
-            self.move_to_manual_review(pdf_path)
-        else:
-            print("❌ Cancelled - moving to manual review")
-            self.move_to_manual_review(pdf_path)
     
     def _process_selected_item(self, pdf_path: Path, zotero_item: dict, target_filename: str, metadata: dict = None):
         """Process selected Zotero item: copy PDF and attach.
