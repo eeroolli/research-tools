@@ -20,7 +20,8 @@ import logging
 import shutil
 import configparser
 import os
-from typing import Optional
+import json
+from typing import Optional, Tuple, List, Dict
 import subprocess
 import socket
 import threading
@@ -41,6 +42,7 @@ from add_or_remove_books_zotero import DetailedISBNLookupService
 
 # Import national library manager for thesis, book chapter, and book searches
 from shared_tools.api.config_driven_manager import ConfigDrivenNationalLibraryManager
+from shared_tools.utils.isbn_matcher import ISBNMatcher
 
 # Import border remover for scanned documents
 from shared_tools.pdf.border_remover import BorderRemover
@@ -77,7 +79,8 @@ class PaperProcessorDaemon:
         self.national_library_manager = ConfigDrivenNationalLibraryManager()
         
         # Initialize border remover (for dark border removal from scanned PDFs)
-        self.border_remover = BorderRemover()
+        # Note: border_max_width is set in load_config() which is called before this
+        self.border_remover = BorderRemover({'max_border_width': self.border_max_width})
         
         # Initialize services
         self.ollama_process = None
@@ -99,7 +102,7 @@ class PaperProcessorDaemon:
         try:
             from shared_tools.utils.author_validator import AuthorValidator
             self.author_validator = AuthorValidator()
-            self.author_validator.refresh_if_needed(max_age_hours=24, silent=True)
+            # Refresh is now handled in __init__ if needed
             self.logger.info("✅ Author validator ready")
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize author validator: {e}")
@@ -109,7 +112,7 @@ class PaperProcessorDaemon:
         try:
             from shared_tools.utils.journal_validator import JournalValidator
             self.journal_validator = JournalValidator()
-            self.journal_validator.refresh_if_needed(max_age_hours=24, silent=True)
+            # Refresh is now handled in __init__ if needed
             self.logger.info("✅ Journal validator ready")
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize journal validator: {e}")
@@ -154,6 +157,9 @@ class PaperProcessorDaemon:
         self.grobid_container_name = self.config.get('GROBID', 'container_name', fallback='grobid')
         self.grobid_port = self.config.getint('GROBID', 'port', fallback=8070)
         self.grobid_max_pages = self.config.getint('GROBID', 'max_pages', fallback=2)
+        
+        # Get border detection configuration
+        self.border_max_width = self.config.getint('BORDER', 'max_border_width', fallback=600)
         
         # Check if publications directory is accessible
         self._validate_publications_directory()
@@ -204,8 +210,30 @@ class PaperProcessorDaemon:
         return path_str
     
     def _validate_publications_directory(self):
-        """Validate that publications directory is accessible and handle setup."""
+        """Validate that publications directory is accessible and handle setup.
+        
+        For cloud drives (accessed via PowerShell), we only validate that the path
+        can be normalized. Actual file operations will use PowerShell which handles
+        cloud drive access properly.
+        """
         try:
+            # Check if this is a cloud drive path (G: drive or other cloud drives)
+            # Cloud drives are accessed via PowerShell, not directly from WSL
+            path_str = str(self.publications_dir)
+            is_cloud_drive = path_str.startswith('/mnt/g/') or 'My Drive' in path_str
+            
+            if is_cloud_drive:
+                # For cloud drives, just verify the path can be normalized
+                # Actual operations will use PowerShell which handles cloud access
+                normalized = self._normalize_path(str(self.publications_dir))
+                if normalized:
+                    print(f"✅ Publications directory configured (cloud drive, will use PowerShell): {self.publications_dir}")
+                    return
+                else:
+                    self._handle_missing_publications_directory()
+                    return
+            
+            # For local paths, do full validation
             # Try to access the parent directory first
             parent_dir = self.publications_dir.parent
             if not parent_dir.exists():
@@ -234,6 +262,12 @@ class PaperProcessorDaemon:
                 self._handle_unwritable_publications_directory()
                 
         except Exception as e:
+            # If it's a cloud drive, don't fail on WSL access errors
+            path_str = str(self.publications_dir)
+            is_cloud_drive = path_str.startswith('/mnt/g/') or 'My Drive' in path_str
+            if is_cloud_drive:
+                print(f"✅ Publications directory configured (cloud drive, will use PowerShell): {self.publications_dir}")
+                return
             self._handle_missing_publications_directory()
     
     def _handle_missing_publications_directory(self):
@@ -1280,139 +1314,121 @@ class PaperProcessorDaemon:
                 else:
                     # "Schultz" -> "Schultz"
                     lastname = author
+                
+                # Normalize lastname: remove OCR error characters (bullets, unusual punctuation)
+                # Keep alphanumeric, spaces, hyphens, apostrophes, and periods
+                lastname = re.sub(r'[^\w\s\-\'\.]', '', lastname).strip()
+                
                 author_lastnames.append(lastname)
             
             # Show search query before executing
             # Arrow indicates author order: first → second → third, etc.
             author_display = ' & '.join(author_lastnames)
             year_str = f" (year: {year})" if year else " (any year)"
-            doc_type_str = f" [type: {metadata.get('document_type', 'any')}]" if metadata.get('document_type') else ""
+            doc_type = metadata.get('document_type')
+            doc_type_str = f" [type: {doc_type}]" if doc_type else ""
             print(f"\n🔍 Searching Zotero database for authors (in order): {author_display}{year_str}{doc_type_str}")
             
-            matches = self.local_zotero.search_by_authors_ordered(
-                author_lastnames, 
-                year=year,
-                limit=10,
-                document_type=metadata.get('document_type')
-            )
+            attempt_specs = [
+                {'year': year, 'document_type': doc_type, 'notice': None}
+            ]
+            if doc_type:
+                attempt_specs.append({
+                    'year': year,
+                    'document_type': None,
+                    'notice': "ℹ️  No matches with document type filter; including all Zotero item types."
+                })
+            if year:
+                attempt_specs.append({
+                    'year': None,
+                    'document_type': doc_type,
+                    'notice': "ℹ️  No matches with year filter; showing any publication year."
+                })
+            if doc_type and year:
+                attempt_specs.append({
+                    'year': None,
+                    'document_type': None,
+                    'notice': "ℹ️  No matches with year/type filters; showing any publication year and item type."
+                })
             
-            # Normalize results
-            normalized_matches = []
-            for item in matches:
-                normalized = self._normalize_search_result(item)
-                normalized_matches.append(normalized)
+            # Remove duplicate attempts while preserving order
+            seen_attempts = set()
+            attempts: List[Dict] = []
+            for spec in attempt_specs:
+                key = (spec['year'], spec['document_type'])
+                if key in seen_attempts:
+                    continue
+                seen_attempts.add(key)
+                attempts.append(spec)
             
-            if not normalized_matches:
-                # Show what was searched (reuse author_display computed above)
-                year_str = f" in {year}" if year else ""
-                print(f"\n❌ No matches found in Zotero for: {author_display}{year_str}")
-                print()
+            author_arrow_str = ' → '.join([a.split()[-1] for a in selected_authors])
+            
+            for spec in attempts:
+                target_year = spec['year']
+                target_type = spec['document_type']
+                if spec['notice']:
+                    print(f"\n{spec['notice']}")
                 
-                # Offer options to user
-                print("Options (enter a number):")
-                print("[1] Search again without year filter")
-                if year:
-                    print("[2] Search again with different year")
-                    print("[3] Proceed to create new Zotero item")
-                    print("[4] Move to manual review")
-                    print("  (z) Back to previous step")
-                else:
-                    print("[2] Proceed to create new Zotero item")
-                    print("[3] Move to manual review")
-                    print("  (z) Back to previous step")
-                print()
+                matches = self.local_zotero.search_by_authors_ordered(
+                    author_lastnames,
+                    year=target_year,
+                    limit=10,
+                    document_type=target_type
+                )
+                normalized_matches = [self._normalize_search_result(item) for item in matches]
                 
-                while True:
-                    choice = input("Enter your choice (1-4 or 'z' to go back): ").strip().lower()
+                if normalized_matches:
+                    search_info = f"by {author_arrow_str}"
+                    if target_year:
+                        search_info += f" in {target_year}"
+                    elif year:
+                        search_info += " (any year)"
+                    if target_type and target_type != doc_type:
+                        search_info += f" [{target_type}]"
+                    elif target_type is None and doc_type:
+                        search_info += " [all types]"
                     
-                    if choice == '1':
-                        # Retry without year filter
-                        print("\n🔄 Searching without year filter...")
-                        matches_no_year = self.local_zotero.search_by_authors_ordered(
-                            author_lastnames,
-                            year=None,
-                            limit=10,
-                            document_type=metadata.get('document_type')
-                        )
-                        normalized_matches = [self._normalize_search_result(item) for item in matches_no_year]
-                        
-                        if normalized_matches:
-                            search_info = f"by {author_display} (any year)"
-                            action, item = self.display_and_select_zotero_matches(normalized_matches, search_info)
-                            return (action, item, metadata)
-                        else:
-                            print(f"❌ Still no matches found for {author_display}")
-                            # Fall through to other options
-                            break
-                    
-                    elif choice == '2' and year:
-                        # Retry with different year
-                        new_year = input(f"Enter different year (currently {year}): ").strip()
-                        if new_year and new_year.isdigit():
-                            metadata['year'] = new_year  # Update metadata with new year
-                            print(f"\n🔄 Searching with year {new_year}...")
-                            matches_new_year = self.local_zotero.search_by_authors_ordered(
-                                author_lastnames,
-                                year=new_year,
-                                limit=10,
-                                document_type=metadata.get('document_type')
-                            )
-                            normalized_matches = [self._normalize_search_result(item) for item in matches_new_year]
-                            
-                            if normalized_matches:
-                                search_info = f"by {author_display} in {new_year}"
-                                action, item = self.display_and_select_zotero_matches(normalized_matches, search_info)
-                                return (action, item, metadata)
-                            else:
-                                print(f"❌ No matches found for {author_display} in {new_year}")
-                                break
-                        else:
-                            print("⚠️  Invalid year, keeping original search")
-                            break
-                    
-                    elif (choice == '2' and not year) or (choice == '3' and year):
-                        # Create new item
-                        return ('create', None, metadata)
-                    
-                    elif (choice == '3' and not year) or (choice == '4' and year):
-                        # Move to manual review
-                        return ('none', None, metadata)
-                    
-                    elif choice == 'z':
-                        # Back/go back
-                        return ('back', None, metadata)
-                    
-                    else:
-                        if year:
-                            print("⚠️  Invalid choice. Please enter 1-4 or 'z' to go back.")
-                        else:
-                            print("⚠️  Invalid choice. Please enter 1-3 or 'z' to go back.")
-                        continue
-                
-                # If we get here, no matches after retry - offer final options
-                print("\nOptions:")
-                print("[1] Proceed to create new Zotero item")
-                print("[2] Move to manual review")
-                print("  (z) Back to previous step")
-                print()
-                
+                    action, item = self.display_and_select_zotero_matches(normalized_matches, search_info)
+                    return (action, item, metadata)
+            
+            # Fallback: search broadly by first author's last name
+            if author_lastnames:
+                broad_name = author_lastnames[0]
+                print(f"\nℹ️  No ordered matches; searching broadly for last name '{broad_name}'...")
+                broad_matches = self.local_zotero.search_by_author(broad_name, limit=10)
+                normalized_broad = [self._normalize_search_result(item) for item in broad_matches]
+                if normalized_broad:
+                    search_info = f"by last name {broad_name}"
+                    action, item = self.display_and_select_zotero_matches(normalized_broad, search_info)
+                    return (action, item, metadata)
+            
+            # No matches after all fallbacks
+            print(f"\n❌ No matches found in Zotero after trying relaxed filters for: {author_display}")
+            print()
+            print("Options:")
+            print("[1] Enter a different year and search again")
+            print("[2] Proceed to create new Zotero item")
+            print("[3] Move to manual review")
+            print("  (z) Back to previous step")
+            print()
+            
+            while True:
                 final_choice = input("Enter your choice: ").strip().lower()
                 if final_choice == '1':
+                    new_year = input("Enter different year (blank to clear): ").strip()
+                    if new_year:
+                        metadata['year'] = new_year
+                    else:
+                        metadata.pop('year', None)
+                    return ('search', None, metadata)
+                elif final_choice == '2':
                     return ('create', None, metadata)
+                elif final_choice == '3':
+                    return ('none', None, metadata)
                 elif final_choice == 'z':
                     return ('back', None, metadata)
                 else:
-                    # Default to manual review
-                    return ('none', None, metadata)
-            
-            # Step 5: Display and let user select
-            author_str = ' → '.join([a.split()[-1] for a in selected_authors])
-            search_info = f"by {author_str}"
-            if year:
-                search_info += f" in {year}"
-            
-            action, item = self.display_and_select_zotero_matches(normalized_matches, search_info)
-            return (action, item, metadata)
+                    print("⚠️  Invalid choice. Please enter 1-3 or 'z' to go back.")
             
         except Exception as e:
             self.logger.error(f"Error searching Zotero database: {e}")
@@ -1492,78 +1508,306 @@ class PaperProcessorDaemon:
         
         return normalized
     
-    def _copy_to_publications_via_windows(self, pdf_path: Path, target_filename: str) -> tuple:
-        """Copy PDF to publications directory using Windows PowerShell.
+    def _get_script_path_win(self, script_name: str) -> str:
+        """Get the Windows path to any PowerShell script in scripts directory.
         
-        This avoids WSL→Google Drive sync issues by using native Windows file operations.
+        Args:
+            script_name: Name of PowerShell script (e.g., 'path_utils.ps1', 'move_to_recycle_bin.ps1')
+            
+        Returns:
+            Windows path to the PowerShell script
+            
+        Raises:
+            Exception if script path cannot be converted
+        """
+        script_dir = Path(__file__).parent
+        ps_script = script_dir / script_name
+        
+        # Convert script path to Windows format
+        try:
+            ps_script_win = subprocess.check_output(
+                ['wslpath', '-w', str(ps_script)],
+                text=True,
+                stderr=subprocess.DEVNULL
+            ).strip()
+        except:
+            # If wslpath fails, try direct conversion for script path
+            if str(ps_script).startswith('/mnt/'):
+                ps_script_win = str(ps_script).replace('/mnt/', '').replace('/', '\\')
+                parts = ps_script_win.split('\\', 1)
+                if len(parts) == 2:
+                    drive = parts[0][0].upper()
+                    ps_script_win = f"{drive}:\\{parts[1]}"
+            else:
+                raise Exception(f"Cannot convert script path: {ps_script}")
+        
+        return ps_script_win
+    
+    def _get_path_utils_script_win(self) -> str:
+        """Get the Windows path to path_utils.ps1 script."""
+        return self._get_script_path_win('path_utils.ps1')
+    
+    def _convert_wsl_to_windows_path(self, wsl_path: str) -> str:
+        """Convert WSL path to Windows path using PowerShell utility.
+        
+        This avoids wslpath failures with cloud drives that aren't accessible from WSL.
+        
+        Args:
+            wsl_path: WSL path (e.g., /mnt/g/My Drive/publications)
+            
+        Returns:
+            Windows path (e.g., G:\My Drive\publications)
+            
+        Raises:
+            Exception if conversion fails
+        """
+        # Get script path
+        ps_script_win = self._get_path_utils_script_win()
+        
+        # Use PowerShell to convert path
+        result = subprocess.run(
+            ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-File', ps_script_win, 
+             'convert-wsl-to-windows', wsl_path],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            raise Exception(f"Path conversion failed: {result.stderr}")
+        
+        return result.stdout.strip()
+    
+    def _validate_path_via_powershell(self, path: str, is_directory: bool = True) -> Tuple[bool, Optional[str]]:
+        """Validate that a path exists and is accessible using PowerShell.
+        
+        This works for cloud drives that may not be accessible from WSL.
+        
+        Args:
+            path: Path to validate (Windows or WSL format)
+            is_directory: If True, validate as directory; if False, validate as file
+            
+        Returns:
+            Tuple of (is_valid: bool, error_message: Optional[str])
+        """
+        
+        # Get script path
+        try:
+            ps_script_win = self._get_path_utils_script_win()
+        except Exception as e:
+            return (False, f"Cannot get script path: {e}")
+        
+        # Convert path to Windows format if needed
+        if path.startswith('/'):
+            try:
+                path = self._convert_wsl_to_windows_path(path)
+            except Exception as e:
+                return (False, f"Path conversion failed: {e}")
+        
+        # Use PowerShell to validate path
+        command = 'test-directory' if is_directory else 'test-path'
+        result = subprocess.run(
+            ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-File', ps_script_win, 
+             command, path],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            return (False, f"Validation failed: {result.stderr}")
+        
+        try:
+            result_data = json.loads(result.stdout.strip())
+            if is_directory:
+                return (result_data.get('exists', False) and result_data.get('accessible', False), 
+                       result_data.get('error'))
+            else:
+                return (result_data.get('exists', False) and result_data.get('accessible', False),
+                       result_data.get('error'))
+        except json.JSONDecodeError:
+            return (False, f"Invalid JSON response: {result.stdout}")
+    
+    def _copy_file_universal(self, source_path: Path, target_path: Path, replace_existing: bool = False) -> tuple:
+        """Universal file copy method that tries native Python first, falls back to PowerShell.
+        
+        This method intelligently chooses the best copy method:
+        1. Tries native Python shutil.copy2 (fast, works for WSL-accessible paths)
+        2. Falls back to PowerShell if native copy fails (for cloud drives not accessible from WSL)
+        
+        Args:
+            source_path: Path to source file (WSL or Windows path)
+            target_path: Full target path including filename
+            replace_existing: If True, replace existing file if it differs (default: False)
+            
+        Returns:
+            Tuple of (success: bool, error_msg: Optional[str])
+        """
+        # First, verify source file exists
+        if not source_path.exists():
+            return (False, f"Source file not found: {source_path}")
+        
+        # First, try native Python copy (fastest, works for most paths)
+        try:
+            # Ensure target directory exists
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Check if target exists and handle replacement
+            if target_path.exists():
+                if not replace_existing:
+                    # Check if files are identical
+                    try:
+                        source_size = source_path.stat().st_size
+                        target_size = target_path.stat().st_size
+                        if source_size == target_size:
+                            # Files might be identical - could check hash, but for now assume OK
+                            self.logger.debug(f"Target already exists with same size: {target_path}")
+                            return (True, None)
+                    except Exception:
+                        pass
+                    return (False, f"Target file already exists: {target_path}")
+                else:
+                    # Remove existing file for replacement
+                    target_path.unlink()
+            
+            # Perform native copy
+            shutil.copy2(source_path, target_path)
+            
+            # Verify copy
+            if not target_path.exists():
+                return (False, "Target file not found after copy")
+            
+            source_size = source_path.stat().st_size
+            target_size = target_path.stat().st_size
+            if source_size != target_size:
+                target_path.unlink()  # Clean up bad copy
+                return (False, f"Size mismatch (source: {source_size}, target: {target_size})")
+            
+            self.logger.debug(f"Native copy successful: {source_path} → {target_path}")
+            return (True, None)
+            
+        except (OSError, PermissionError, FileNotFoundError) as e:
+            # Native copy failed - likely a cloud drive not accessible from WSL
+            # Fall back to PowerShell
+            self.logger.debug(f"Native copy failed ({e}), trying PowerShell fallback...")
+            return self._copy_file_via_powershell(source_path, target_path, replace_existing)
+        except Exception as e:
+            # Other errors - try PowerShell as fallback
+            self.logger.debug(f"Unexpected error in native copy ({e}), trying PowerShell fallback...")
+            return self._copy_file_via_powershell(source_path, target_path, replace_existing)
+    
+    def _copy_file_via_powershell(self, source_path: Path, target_path: Path, replace_existing: bool = False) -> tuple:
+        """Copy file using PowerShell (for cloud drives not accessible from WSL).
+        
+        Args:
+            source_path: Path to source file
+            target_path: Full target path including filename
+            replace_existing: If True, replace existing file if it differs
+            
+        Returns:
+            Tuple of (success: bool, error_msg: Optional[str])
+        """
+        try:
+            # Normalize source path to WSL format first
+            source_str = str(source_path)
+            if ':' in source_str and not source_str.startswith('/'):
+                source_str = self._normalize_path(source_str)
+            
+            # Validate source file exists using existing helper method
+            is_valid, error = self._validate_path_via_powershell(source_str, is_directory=False)
+            if not is_valid:
+                return (False, f"Source file not found or not accessible: {error or 'Unknown error'}")
+            
+            # Convert source WSL path to Windows path using PowerShell utility
+            try:
+                source_win = self._convert_wsl_to_windows_path(source_str)
+            except Exception as e:
+                return (False, f"Failed to convert source path {source_path}: {e}")
+            
+            # Convert target path
+            target_str = str(target_path)
+            if ':' in target_str and not target_str.startswith('/'):
+                target_str = self._normalize_path(target_str)
+            
+            try:
+                target_win = self._convert_wsl_to_windows_path(target_str)
+            except Exception as e:
+                return (False, f"Failed to convert target path: {e}")
+            
+            # Get script path
+            try:
+                ps_script_win = self._get_path_utils_script_win()
+            except Exception as e:
+                return (False, f"Failed to get script path: {e}")
+            
+            # Copy file using path_utils.ps1
+            self.logger.debug(f"Copying via PowerShell: {source_win} → {target_win}")
+            
+            # Build command with optional replace flag
+            cmd = ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-File', ps_script_win, 
+                   'copy-file', source_win, target_win]
+            if replace_existing:
+                cmd.append('-Replace')
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120  # 120 second timeout for large files
+            )
+            
+            if result.returncode == 0:
+                # Parse JSON response
+                try:
+                    result_data = json.loads(result.stdout.strip())
+                    if result_data.get('success', False):
+                        self.logger.debug(f"PowerShell copy successful: {target_path}")
+                        return (True, None)
+                    else:
+                        return (False, result_data.get('error', 'Unknown error'))
+                except json.JSONDecodeError:
+                    # If JSON parsing fails, check if copy actually succeeded
+                    if 'SUCCESS' in result.stdout or 'success' in result.stdout.lower():
+                        return (True, None)
+                    return (False, f"Invalid response: {result.stdout}")
+            else:
+                # Try to parse error from JSON
+                try:
+                    result_data = json.loads(result.stdout.strip())
+                    error_msg = result_data.get('error', f'PowerShell copy failed with code {result.returncode}')
+                except:
+                    error_msg = result.stdout + result.stderr
+                    if not error_msg:
+                        error_msg = f"PowerShell copy failed with code {result.returncode}"
+                return (False, error_msg)
+                
+        except subprocess.TimeoutExpired:
+            return (False, "Copy timeout (file too large or network issue)")
+        except Exception as e:
+            return (False, f"Copy error: {e}")
+    
+    def _copy_to_publications_via_windows(self, pdf_path: Path, target_filename: str, replace_existing: bool = False) -> tuple:
+        """Copy PDF to publications directory using universal copy method.
+        
+        This method uses intelligent copy that tries native Python first,
+        then falls back to PowerShell for cloud drives not accessible from WSL.
         
         Args:
             pdf_path: Path to source PDF (WSL or Windows path)
             target_filename: Target filename (just the name, not full path)
+            replace_existing: If True, replace existing file if it differs (default: False)
             
         Returns:
             Tuple of (success: bool, target_path: Path or None, error_msg: str)
         """
-        try:
-            # Normalize source path to WSL format first, then convert to Windows for PowerShell
-            source_str = str(pdf_path)
-            if ':' in source_str and not source_str.startswith('/'):
-                # Convert Windows path to WSL format first
-                source_str = self._normalize_path(source_str)
-            
-            # Convert source WSL path to Windows path for PowerShell
-            source_win = subprocess.check_output(
-                ['wslpath', '-w', source_str],
-                text=True
-            ).strip()
-            
-            # Get target directory - already normalized in load_config
-            target_dir_str = str(self.publications_dir)
-            
-            # Convert target WSL path to Windows path
-            target_dir_win = subprocess.check_output(
-                ['wslpath', '-w', target_dir_str],
-                text=True
-            ).strip()
-            
-            target_win = f"{target_dir_win}\\{target_filename}"
-            
-            # Get path to PowerShell script
-            script_dir = Path(__file__).parent
-            ps_script = script_dir / 'copy_to_publications.ps1'
-            ps_script_win = subprocess.check_output(
-                ['wslpath', '-w', str(ps_script)],
-                text=True
-            ).strip()
-            
-            # Call PowerShell script
-            self.logger.debug(f"Copying via PowerShell: {source_win} → {target_win}")
-            
-            result = subprocess.run(
-                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-File', ps_script_win, source_win, target_win],
-                capture_output=True,
-                text=True,
-                timeout=60  # 60 second timeout for large files
-            )
-            
-            if result.returncode == 0:
-                # Success - target is in publications directory
-                target_path = self.publications_dir / target_filename
-                self.logger.debug(f"Copy successful: {target_path}")
-                return (True, target_path, None)
-            else:
-                # Failed
-                error_msg = result.stdout + result.stderr
-                self.logger.error(f"PowerShell copy failed (code {result.returncode}): {error_msg}")
-                return (False, None, error_msg)
-                
-        except subprocess.TimeoutExpired:
-            error_msg = "Copy timeout (file too large or network issue)"
-            self.logger.error(error_msg)
-            return (False, None, error_msg)
-        except Exception as e:
-            error_msg = f"Copy error: {e}"
-            self.logger.error(error_msg)
+        target_path = self.publications_dir / target_filename
+        
+        # Use universal copy method
+        success, error_msg = self._copy_file_universal(pdf_path, target_path, replace_existing)
+        
+        if success:
+            return (True, target_path, None)
+        else:
             return (False, None, error_msg)
     
     def handle_failed_extraction(self, pdf_path: Path) -> dict:
@@ -1826,7 +2070,12 @@ class PaperProcessorDaemon:
         
         # Copy to publications
         try:
-            shutil.copy2(str(pdf_path), str(final_path))
+            success, error_msg = self._copy_file_universal(pdf_path, final_path, replace_existing=False)
+            if not success:
+                self.logger.error(f"Error copying file: {error_msg}")
+                print(f"❌ Error: {error_msg}")
+                return False
+            
             print(f"✅ Copied to: {final_path}")
             
             # Check if we should add to Zotero
@@ -3088,10 +3337,16 @@ class PaperProcessorDaemon:
             if temp_pdf_path:
                 pdf_to_use = temp_pdf_path
                 effective_page_offset = 0  # Temp PDF already starts at correct page
+                # Store temp PDF path for later use in _process_selected_item
+                self._temp_pdf_path = temp_pdf_path
                 self.logger.info(f"Using temporary PDF starting from page {page_offset + 1}")
             else:
                 effective_page_offset = page_offset  # Use offset parameter if temp PDF creation failed
                 self.logger.warning(f"Failed to create temporary PDF, using original with page offset {page_offset + 1}")
+                self._temp_pdf_path = None
+        else:
+            # No page offset, clear any previous temp PDF
+            self._temp_pdf_path = None
         
         try:
             # Step 1: Extract metadata
@@ -3101,6 +3356,7 @@ class PaperProcessorDaemon:
             # This is much faster (2-4 seconds) when identifiers are found
             self.logger.info("Step 1: Trying fast GREP identifier extraction + API lookup...")
             result = self.metadata_processor.process_pdf(pdf_to_use, use_ollama_fallback=False, page_offset=effective_page_offset)
+            result = self._handle_isbn_lookup_result(result)
             
             # Check if we got metadata with authors from GREP + API
             has_metadata = result.get('success') and result.get('metadata')
@@ -3169,77 +3425,92 @@ class PaperProcessorDaemon:
                 # Filter garbage authors (keeps only known authors when extraction is poor)
                 metadata = self.filter_garbage_authors(metadata)
 
-                # Always prompt user to confirm or enter year manually
-                # First, check what year sources we have
+                # Check if we should skip year prompt (valid DOI + successful API lookup)
                 identifiers = result.get('identifiers_found', {})
-                grep_year = identifiers.get('best_year')
-                grobid_year = metadata.get('year')
+                method = result.get('method', '')
+                has_valid_doi = bool(identifiers.get('dois'))
+                api_succeeded = method.endswith('_api')  # crossref_api, openalex_api, pubmed_api, arxiv_api
                 
-                # Build year sources list for display
-                year_sources = []
-                if grep_year:
-                    year_sources.append(('GREP (scan)', grep_year))
-                if grobid_year:
-                    year_sources.append(('GROBID/API', grobid_year))
-                
-                # Always prompt user to confirm or enter year
-                if year_sources:
-                    # Show all year sources that were found
-                    if len(year_sources) > 1:
-                        # Multiple sources - check for conflicts
-                        years = [source[1] for source in year_sources]
-                        if len(set(years)) > 1:
-                            # Conflict detected - show both and pick first as default
-                            print(f"\n⚠️  Year conflict detected:")
-                            for source_name, year_val in year_sources:
-                                print(f"   {source_name}:      {year_val}")
-                            # Use first year as suggested default
-                            suggested_year = years[0]
-                            suggested_source = year_sources[0][0]
-                        else:
-                            # No conflict - both sources agree
-                            print(f"\n📅 Year found by multiple sources:")
-                            for source_name, _ in year_sources:
-                                print(f"   {source_name}:      {years[0]}")
-                            suggested_year = years[0]
-                            suggested_source = 'consensus'
-                    else:
-                        # Single source
-                        suggested_source, suggested_year = year_sources[0]
-                        print(f"\n📅 Year found by {suggested_source}: {suggested_year}")
+                # Skip year prompt if valid DOI was found and API lookup succeeded
+                # The API-provided year is reliable and doesn't need confirmation
+                if has_valid_doi and api_succeeded and metadata.get('year'):
+                    # Use year from API metadata directly
+                    metadata['year'] = metadata.get('year')
+                    metadata['_year_source'] = 'api'
+                    metadata['_year_confirmed'] = True
+                    self.logger.info(f"Using year from API ({method}): {metadata.get('year')}")
+                    print(f"✅ Using year from API: {metadata.get('year')}")
+                else:
+                    # Prompt user to confirm or enter year manually
+                    # First, check what year sources we have
+                    grep_year = identifiers.get('best_year')
+                    grobid_year = metadata.get('year')
                     
-                    # Simple prompt: press Enter to confirm or type a different year
-                    while True:
-                        try:
-                            year_input = input(f"Press Enter to confirm ({suggested_year}) or type a different year (or 'r' to restart): ").strip()
-                        except (KeyboardInterrupt, EOFError):
-                            print("\n❌ Cancelled")
-                            self.move_to_failed(pdf_path)
-                            return
-                        
-                        if not year_input:
-                            # User pressed Enter - use suggested year
-                            metadata['year'] = suggested_year
-                            metadata['_year_source'] = suggested_source
-                            print(f"✅ Using {suggested_source}: {suggested_year}")
-                            self.logger.info(f"User confirmed year from {suggested_source}: {suggested_year}")
-                            metadata['_year_confirmed'] = True
-                            break
-                        elif year_input.lower() == 'r':
-                            # User wants to restart
-                            print("🔄 Restarting from beginning...")
-                            self.process_paper(pdf_path)
-                            return
-                        elif year_input.isdigit() and len(year_input) == 4:
-                            # User entered a different year
-                            metadata['year'] = year_input
-                            metadata['_year_source'] = 'manual'
-                            print(f"✅ Using manual year: {year_input}")
-                            self.logger.info(f"User entered manual year: {year_input}")
-                            metadata['_year_confirmed'] = True
-                            break
+                    # Build year sources list for display
+                    year_sources = []
+                    if grep_year:
+                        year_sources.append(('GREP (scan)', grep_year))
+                    if grobid_year:
+                        year_sources.append(('GROBID/API', grobid_year))
+                    
+                    # Prompt user to confirm or enter year
+                    if year_sources:
+                        # Show all year sources that were found
+                        if len(year_sources) > 1:
+                            # Multiple sources - check for conflicts
+                            years = [source[1] for source in year_sources]
+                            if len(set(years)) > 1:
+                                # Conflict detected - show both and pick first as default
+                                print(f"\n⚠️  Year conflict detected:")
+                                for source_name, year_val in year_sources:
+                                    print(f"   {source_name}:      {year_val}")
+                                # Use first year as suggested default
+                                suggested_year = years[0]
+                                suggested_source = year_sources[0][0]
+                            else:
+                                # No conflict - both sources agree
+                                print(f"\n📅 Year found by multiple sources:")
+                                for source_name, _ in year_sources:
+                                    print(f"   {source_name}:      {years[0]}")
+                                suggested_year = years[0]
+                                suggested_source = 'consensus'
                         else:
-                            print("⚠️  Invalid year format (expected 4 digits, press Enter, or 'r' to restart)")
+                            # Single source
+                            suggested_source, suggested_year = year_sources[0]
+                            print(f"\n📅 Year found by {suggested_source}: {suggested_year}")
+                        
+                        # Simple prompt: press Enter to confirm or type a different year
+                        while True:
+                            try:
+                                year_input = input(f"Press Enter to confirm ({suggested_year}) or type a different year (or 'r' to restart): ").strip()
+                            except (KeyboardInterrupt, EOFError):
+                                print("\n❌ Cancelled")
+                                self.move_to_failed(pdf_path)
+                                return
+                            
+                            if not year_input:
+                                # User pressed Enter - use suggested year
+                                metadata['year'] = suggested_year
+                                metadata['_year_source'] = suggested_source
+                                print(f"✅ Using {suggested_source}: {suggested_year}")
+                                self.logger.info(f"User confirmed year from {suggested_source}: {suggested_year}")
+                                metadata['_year_confirmed'] = True
+                                break
+                            elif year_input.lower() == 'r':
+                                # User wants to restart
+                                print("🔄 Restarting from beginning...")
+                                self.process_paper(pdf_path)
+                                return
+                            elif year_input.isdigit() and len(year_input) == 4:
+                                # User entered a different year
+                                metadata['year'] = year_input
+                                metadata['_year_source'] = 'manual'
+                                print(f"✅ Using manual year: {year_input}")
+                                self.logger.info(f"User entered manual year: {year_input}")
+                                metadata['_year_confirmed'] = True
+                                break
+                            else:
+                                print("⚠️  Invalid year format (expected 4 digits, press Enter, or 'r' to restart)")
                 
                 # Prompt for year BEFORE document type, so numeric input isn't misrouted
                 # (This will only prompt if no year was found by any source)
@@ -3373,12 +3644,15 @@ class PaperProcessorDaemon:
             self.move_to_failed(pdf_path)
         finally:
             # Clean up temporary PDF if created
-            if temp_pdf_path and temp_pdf_path.exists():
+            temp_to_cleanup = temp_pdf_path if 'temp_pdf_path' in locals() else getattr(self, '_temp_pdf_path', None)
+            if temp_to_cleanup and temp_to_cleanup.exists():
                 try:
-                    temp_pdf_path.unlink()
-                    self.logger.info(f"Cleaned up temporary PDF: {temp_pdf_path.name}")
+                    temp_to_cleanup.unlink()
+                    self.logger.info(f"Cleaned up temporary PDF: {temp_to_cleanup.name}")
                 except Exception as e:
-                    self.logger.warning(f"Failed to clean up temporary PDF {temp_pdf_path}: {e}")
+                    self.logger.warning(f"Failed to clean up temporary PDF {temp_to_cleanup}: {e}")
+            # Clear the instance variable
+            self._temp_pdf_path = None
     
     def handle_user_choice(self, choice: str, pdf_path: Path, metadata: dict, 
                           local_matches: list, result: dict):
@@ -3633,12 +3907,12 @@ class PaperProcessorDaemon:
                 final_path = self.publications_dir / f"{stem}{counter}{suffix}"
                 counter += 1
         
-        try:
-            shutil.copy2(source, final_path)
+        success, error_msg = self._copy_file_universal(source, final_path, replace_existing=False)
+        if success:
             self.logger.debug(f"Copied to: {final_path}")
             return final_path
-        except Exception as e:
-            self.logger.error(f"Copy failed: {e}")
+        else:
+            self.logger.error(f"Copy failed: {error_msg}")
             return None
     
     def move_to_done(self, pdf_path: Path):
@@ -3993,6 +4267,114 @@ class PaperProcessorDaemon:
                     pass
             return None
     
+    def _extract_page_preview_text(self, pdf_path: Path, page_offset: int, max_chars: int = 180) -> Tuple[Optional[str], Optional[int]]:
+        """Extract a short preview of text from the page at page_offset.
+        
+        Args:
+            pdf_path: Path to PDF file
+            page_offset: Zero-based page offset to preview after trimming
+            max_chars: Maximum characters to include in preview
+        
+        Returns:
+            Tuple of (preview_text, total_pages). preview_text may be None if text unavailable.
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            self.logger.warning("PyMuPDF (fitz) not available - cannot preview trimmed page text")
+            return None, None
+        
+        try:
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+            if page_offset >= total_pages:
+                doc.close()
+                return None, total_pages
+            
+            page = doc[page_offset]
+            raw_text = page.get_text("text") or ""
+            doc.close()
+            
+            preview = " ".join(raw_text.split())
+            if preview and len(preview) > max_chars:
+                preview = preview[: max_chars - 3].rstrip() + "..."
+            return preview or None, total_pages
+        except Exception as e:
+            self.logger.debug(f"Failed to extract preview text for page {page_offset + 1}: {e}")
+            return None, None
+    
+    def _prompt_trim_leading_pages_for_attachment(self, pdf_path: Path) -> Tuple[Path, bool]:
+        """Prompt user to optionally trim leading pages before attachment.
+        
+        Args:
+            pdf_path: Current working PDF path (after any splitting)
+        
+        Returns:
+            Tuple of (path_to_use, trimmed_flag). If trimmed_flag is True, path_to_use
+            points to a temporary PDF starting from the desired page.
+        """
+        if not pdf_path.exists():
+            return pdf_path, False
+        
+        print("\n" + "=" * 70)
+        print("OPTIONAL: TRIM LEADING PAGES")
+        print("=" * 70)
+        print("Press Enter to keep the PDF exactly as it is.")
+        print("Enter a number to drop that many leading scan page(s) after split.")
+        print("We'll show you the first page of the trimmed PDF before anything is changed.")
+        print("=" * 70)
+        
+        while True:
+            try:
+                response = input("Trim leading pages? [Enter=keep all / number=pages to drop]: ").strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Trim cancelled - keeping all pages")
+                return pdf_path, False
+            
+            if response in ("", "0", "n", "no"):
+                print("ℹ️  Keeping all pages.")
+                return pdf_path, False
+            
+            if not response.isdigit():
+                print("⚠️  Please enter a whole number or press Enter to keep everything.")
+                continue
+            
+            pages_to_drop = int(response)
+            if pages_to_drop <= 0:
+                print("ℹ️  Keeping all pages.")
+                return pdf_path, False
+            
+            preview_text, total_pages = self._extract_page_preview_text(pdf_path, pages_to_drop)
+            if total_pages is not None and pages_to_drop >= total_pages:
+                print(f"⚠️  This PDF has {total_pages} page(s); you cannot drop {pages_to_drop}.")
+                continue
+            
+            print("\nThe first page in your new PDF will start with:")
+            if preview_text:
+                print(f'  "{preview_text}"')
+            else:
+                print("  [No text detected on that page]")
+            print()
+            
+            try:
+                confirm = input(f"Type 'trim' to drop the first {pages_to_drop} page(s), or press Enter to keep everything: ").strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Trim cancelled - keeping all pages")
+                return pdf_path, False
+            
+            if confirm != "trim":
+                print("ℹ️  Keeping all pages.")
+                return pdf_path, False
+            
+            trimmed_pdf = self._create_pdf_from_page_offset(pdf_path, pages_to_drop)
+            if not trimmed_pdf:
+                print("⚠️  Failed to create trimmed PDF. Keeping original pages.")
+                return pdf_path, False
+            
+            print(f"✅ Trimmed first {pages_to_drop} page(s) for Zotero attachment")
+            self.logger.info(f"Trimmed first {pages_to_drop} page(s) before attachment: {trimmed_pdf.name}")
+            return trimmed_pdf, True
+    
     def _delete_first_page_from_pdf(self, pdf_path: Path) -> Optional[Path]:
         """Delete the first page from a PDF and return path to the modified file.
         
@@ -4218,10 +4600,6 @@ class PaperProcessorDaemon:
         self.logger.info(f"Found {len(existing_files)} existing PDF file(s) to process:")
         for i, file_path in enumerate(existing_files, 1):
             self.logger.info(f"  {i}. {file_path.name}")
-        
-        print(f"\n📄 Found {len(existing_files)} existing PDF file(s) to process:")
-        for i, file_path in enumerate(existing_files, 1):
-            print(f"  {i}. {file_path.name}")
         
         choice = input(f"\nProcess existing files? [y/n]: ").strip().lower()
         if choice != 'y':
@@ -4528,10 +4906,39 @@ class PaperProcessorDaemon:
         
         # STEP 2: Tags Comparison
         print("\n🔄 Step 2: Tags Comparison")
+        # Get current tags from Zotero item (local search returns tags as strings)
+        current_tags_raw = zotero_item.get('tags', [])
+        # Convert to dict format for edit_tags_interactively
+        current_tags = [{'tag': tag} if isinstance(tag, str) else tag for tag in current_tags_raw]
+        
         final_tags = self.edit_tags_interactively(
-            current_tags=metadata.get('tags', []),
-            local_tags=self._extract_zotero_tags(zotero_item)
+            current_tags=current_tags,
+            local_tags=current_tags  # Use current Zotero tags as local tags
         )
+        
+        # Save tags to Zotero if they changed
+        if item_key:
+            # Extract tag names from both lists for comparison
+            current_tag_names = [tag['tag'] if isinstance(tag, dict) else str(tag) for tag in current_tags]
+            updated_tag_names = [tag['tag'] if isinstance(tag, dict) else str(tag) for tag in final_tags]
+            
+            # Calculate what to add and remove
+            add_tags = [tag for tag in updated_tag_names if tag not in current_tag_names]
+            remove_tags = [tag for tag in current_tag_names if tag not in updated_tag_names]
+            
+            if add_tags or remove_tags:
+                print(f"\n💾 Saving tag changes to Zotero...")
+                success = self.zotero_processor.update_item_tags(
+                    item_key,
+                    add_tags=add_tags if add_tags else None,
+                    remove_tags=remove_tags if remove_tags else None
+                )
+                if success:
+                    print("✅ Tags updated successfully!")
+                else:
+                    print("⚠️  Failed to update tags in Zotero")
+            else:
+                print("ℹ️  No tag changes to save")
         
         # STEP 3: PDF Attachment (from Task 7 specification)
         print("\n🔄 Step 3: PDF Attachment")
@@ -4699,13 +5106,12 @@ class PaperProcessorDaemon:
                     else:
                         print("⚠️  Invalid choice. Please enter 1-3 or 'z'.")
         
-        copied_ok = False
-        try:
-            shutil.copy2(str(pdf_path), str(final_path))
+        success, error_msg = self._copy_file_universal(pdf_path, final_path, replace_existing=False)
+        copied_ok = success
+        if success:
             print(f"✅ Copied to: {final_path}")
-            copied_ok = True
-        except Exception as e:
-            print(f"❌ File copy failed: {e}")
+        else:
+            print(f"❌ File copy failed: {error_msg}")
             print("Proceeding to attach without copying...")
         
         # Attach to Zotero (linked file if possible)
@@ -5035,8 +5441,8 @@ class PaperProcessorDaemon:
         # Show action menu
         print("ACTIONS:")
         print("  [A-Z] Select item from list above")
-        print("[1]   🔍 Search again (different authors/year)")
-        print("[2]   ✏️  Edit metadata")
+        print("[1]   🔍 Change author/year search parameters")
+        print("[2]   🔍 Change all search parameters")
         print("[3]   None of these items - create new")
         print("[4]   ❌ Skip document")
         print("  (z) ⬅️  Back to author selection")
@@ -5560,6 +5966,319 @@ class PaperProcessorDaemon:
         
         return normalized
     
+    def _map_zotero_item_type(self, item_type: Optional[str]) -> Optional[str]:
+        """Map Zotero item types to internal document_type values."""
+        if not item_type:
+            return None
+        mapping = {
+            'book': 'book',
+            'bookSection': 'book_chapter',
+            'journalArticle': 'journal_article',
+            'conferencePaper': 'conference_paper',
+            'presentation': 'conference_paper',
+            'report': 'report',
+            'manuscript': 'report',
+            'thesis': 'thesis',
+            'dissertation': 'thesis',
+            'preprint': 'preprint',
+            'magazineArticle': 'news_article',
+            'newspaperArticle': 'news_article'
+        }
+        return mapping.get(item_type)
+    
+    def _normalize_isbn_lookup_metadata(self, lookup_result: dict, isbn: str) -> dict:
+        """Normalize metadata returned from DetailedISBNLookupService.lookup_isbn()."""
+        normalized: Dict[str, str] = {}
+        
+        title = (lookup_result.get('title') or '').strip()
+        if title:
+            normalized['title'] = title
+        
+        creators = lookup_result.get('creators', []) or []
+        authors: List[str] = []
+        editors: List[str] = []
+        for creator in creators:
+            if not isinstance(creator, dict):
+                continue
+            first = (creator.get('firstName') or '').strip()
+            last = (creator.get('lastName') or '').strip()
+            if not first and not last:
+                continue
+            name = f"{last}, {first}" if first and last else (last or first)
+            creator_type = (creator.get('creatorType') or 'author').lower()
+            if creator_type == 'editor':
+                editors.append(name)
+            else:
+                authors.append(name)
+        if authors:
+            normalized['authors'] = authors
+        if editors:
+            normalized['editors'] = editors
+        
+        date_value = (
+            lookup_result.get('date')
+            or lookup_result.get('issued')
+            or lookup_result.get('year')
+        )
+        if date_value:
+            year_match = re.search(r'\d{4}', str(date_value))
+            if year_match:
+                normalized['year'] = year_match.group(0)
+        
+        normalized['isbn'] = isbn
+        
+        publisher = (lookup_result.get('publisher') or '').strip()
+        if publisher:
+            normalized['publisher'] = publisher
+        
+        num_pages = lookup_result.get('numPages') or lookup_result.get('num_pages')
+        if num_pages:
+            normalized['num_pages'] = str(num_pages)
+        
+        language = lookup_result.get('language') or lookup_result.get('languageCode')
+        if language:
+            normalized['language'] = language
+        
+        tags = lookup_result.get('tags') or []
+        tag_values: List[str] = []
+        for tag in tags:
+            if isinstance(tag, dict):
+                tag_name = tag.get('tag') or tag.get('name') or ''
+            else:
+                tag_name = str(tag)
+            if tag_name:
+                tag_values.append(tag_name)
+        if tag_values:
+            normalized['tags'] = tag_values
+        tag_flags = {tag.lower() for tag in tag_values}
+        
+        abstract = lookup_result.get('abstractNote') or lookup_result.get('abstract')
+        if abstract:
+            normalized['abstract'] = abstract
+        
+        place = lookup_result.get('place') or lookup_result.get('placeOfPublication')
+        if place:
+            normalized['place'] = place
+        
+        item_type = (lookup_result.get('itemType') or '').replace('_', '').lower()
+        type_map = {
+            'book': 'book',
+            'booksection': 'book_chapter',
+            'report': 'report',
+            'governmentdocument': 'report',
+            'manuscript': 'report'
+        }
+        document_type = type_map.get(item_type)
+        if not document_type and {'report', 'rapport', 'notat'} & tag_flags:
+            document_type = 'report'
+        if not document_type:
+            # Default to book for ISBN lookups unless caller overrides later
+            document_type = 'book'
+        normalized['document_type'] = document_type
+        
+        data_source = lookup_result.get('extra') or lookup_result.get('source') or 'ISBN lookup'
+        normalized['source'] = data_source
+        normalized['data_source'] = data_source
+        normalized['extraction_method'] = 'isbn_lookup'
+        
+        return normalized
+    
+    def _handle_isbn_lookup_result(self, extraction_result: Dict) -> Dict:
+        """Resolve ISBN hits via DetailedISBNLookupService before falling back."""
+        if extraction_result.get('method') != 'isbn_found':
+            return extraction_result
+        
+        identifiers = extraction_result.get('identifiers_found', {}) or {}
+        raw_isbns = identifiers.get('isbns') or []
+        
+        validator = getattr(self.metadata_processor, 'validator', None)
+        cleaned_isbns: List[str] = []
+        for candidate in raw_isbns:
+            normalized_candidate = None
+            if validator:
+                try:
+                    is_valid, cleaned, _ = validator.validate_isbn(candidate)
+                except Exception:
+                    is_valid, cleaned = False, None
+                if is_valid and cleaned:
+                    normalized_candidate = cleaned
+            if not normalized_candidate and candidate:
+                normalized_candidate = re.sub(r'[^0-9Xx]', '', candidate)
+            if normalized_candidate and len(normalized_candidate) in (10, 13):
+                cleaned_isbns.append(normalized_candidate.upper())
+        
+        # Deduplicate while preserving order
+        cleaned_isbns = list(dict.fromkeys(cleaned_isbns))
+        if not cleaned_isbns:
+            self.logger.info("ISBN detected but failed to normalize value; continuing with fallback workflow.")
+            return extraction_result
+        
+        def isbn10_to_isbn13(isbn10: str) -> Optional[str]:
+            if len(isbn10) != 10:
+                return None
+            core = isbn10[:-1]
+            if not core.isdigit():
+                return None
+            prefix = '978' + core
+            total = 0
+            for i, digit in enumerate(prefix):
+                weight = 1 if i % 2 == 0 else 3
+                total += int(digit) * weight
+            check = (10 - (total % 10)) % 10
+            return prefix + str(check)
+        
+        def isbn13_to_isbn10(isbn13: str) -> Optional[str]:
+            if len(isbn13) != 13 or not isbn13.isdigit():
+                return None
+            if not isbn13.startswith(('978', '979')):
+                return None
+            core = isbn13[3:-1]
+            if len(core) != 9:
+                return None
+            total = 0
+            for idx, digit in enumerate(core):
+                weight = 10 - idx
+                total += int(digit) * weight
+            remainder = total % 11
+            check_val = (11 - remainder) % 11
+            if check_val == 10:
+                check = 'X'
+            else:
+                check = str(check_val)
+            return core + check
+        
+        possible_isbns: List[str] = []
+        for isbn in cleaned_isbns:
+            possible_isbns.append(isbn)
+            if len(isbn) == 10:
+                converted = isbn10_to_isbn13(isbn.replace('X', '0') if 'X' in isbn[:-1] else isbn)
+                if converted:
+                    possible_isbns.append(converted)
+            elif len(isbn) == 13:
+                converted = isbn13_to_isbn10(isbn)
+                if converted:
+                    possible_isbns.append(converted)
+        
+        # Deduplicate possible ISBNs while preserving order
+        possible_isbns = list(dict.fromkeys([isbn for isbn in possible_isbns if isbn]))
+        if not possible_isbns:
+            possible_isbns = cleaned_isbns[:]
+        
+        base_time = extraction_result.get('processing_time_seconds', 0)
+        lookup_start = time.time()
+        
+        for isbn in possible_isbns:
+            try:
+                print(f"\n📚 Step 3: Resolving ISBN {isbn} via configured lookup services...")
+                lookup_result = self.book_lookup_service.lookup_isbn(isbn)
+                if lookup_result:
+                    normalized_metadata = self._normalize_isbn_lookup_metadata(lookup_result, isbn)
+                    elapsed = base_time + (time.time() - lookup_start)
+                    print("✅ ISBN lookup succeeded")
+                    return {
+                        'success': True,
+                        'metadata': normalized_metadata,
+                        'method': 'isbn_lookup',
+                        'processing_time_seconds': elapsed,
+                        'identifiers_found': extraction_result.get('identifiers_found', {}),
+                        'isbn_lookup_source': normalized_metadata.get('data_source')
+                    }
+            except Exception as exc:
+                self.logger.warning(f"ISBN lookup failed for {isbn}: {exc}")
+        
+        # Try local Zotero database as a fallback
+        if self.local_zotero:
+            for isbn in possible_isbns:
+                try:
+                    local_matches = self.local_zotero.search_by_isbn(isbn, limit=1)
+                except Exception as exc:
+                    self.logger.warning(f"Local Zotero ISBN search failed for {isbn}: {exc}")
+                    continue
+                
+                if local_matches:
+                    item = local_matches[0]
+                    normalized_item = self._normalize_search_result(item)
+                    doc_type = self._map_zotero_item_type(normalized_item.get('item_type'))
+                    metadata = {
+                        'title': normalized_item.get('title', ''),
+                        'authors': normalized_item.get('authors', []),
+                        'year': str(normalized_item['year']) if normalized_item.get('year') else None,
+                        'document_type': doc_type or 'report',
+                        'isbn': isbn,
+                        'source': 'zotero_local',
+                        'data_source': 'Zotero local database',
+                        'extraction_method': 'isbn_lookup_local',
+                        'zotero_item_key': normalized_item.get('key')
+                    }
+                    if normalized_item.get('tags'):
+                        metadata['tags'] = normalized_item['tags']
+                    if normalized_item.get('journal'):
+                        metadata['container'] = normalized_item['journal']
+                    if normalized_item.get('abstract'):
+                        metadata['abstract'] = normalized_item['abstract']
+                    if normalized_item.get('year') is None:
+                        metadata.pop('year', None)
+                    elapsed = base_time + (time.time() - lookup_start)
+                    print("✅ Found existing Zotero item by ISBN")
+                    return {
+                        'success': True,
+                        'metadata': metadata,
+                        'method': 'isbn_lookup_local',
+                        'processing_time_seconds': elapsed,
+                        'identifiers_found': extraction_result.get('identifiers_found', {}),
+                        'isbn_lookup_source': 'zotero_local'
+                    }
+        
+        # Try national library lookup using configuration manager
+        for isbn in possible_isbns:
+            clean_isbn = ISBNMatcher.extract_clean_isbn(isbn)
+            if not clean_isbn:
+                continue
+            prefix2, prefix3 = ISBNMatcher.extract_isbn_prefix(clean_isbn)
+            nat_client = None
+            if prefix3:
+                nat_client = self.national_library_manager.get_client_by_isbn_prefix(prefix3)
+            if not nat_client and prefix2:
+                nat_client = self.national_library_manager.get_client_by_isbn_prefix(prefix2)
+            if not nat_client:
+                continue
+            
+            query_candidates = [f"isbn:{clean_isbn}", clean_isbn]
+            if len(clean_isbn) == 13 and clean_isbn.startswith(('978', '979')):
+                query_candidates.append(clean_isbn[3:-1])
+            
+            for query_string in query_candidates:
+                try:
+                    search_result = nat_client.search(query_string, item_type='books')
+                except Exception as exc:
+                    self.logger.warning(f"National library ISBN search failed for {query_string}: {exc}")
+                    continue
+                
+                books = search_result.get('books') or search_result.get('papers') or []
+                for book in books:
+                    normalized_book = self._normalize_national_library_result(book, item_type='books')
+                    if not normalized_book:
+                        continue
+                    metadata = normalized_book
+                    metadata['isbn'] = metadata.get('isbn') or clean_isbn
+                    metadata['document_type'] = metadata.get('document_type') or 'report'
+                    metadata['source'] = search_result.get('source', 'national_library')
+                    metadata['data_source'] = metadata.get('source')
+                    metadata['extraction_method'] = 'isbn_lookup_national'
+                    elapsed = base_time + (time.time() - lookup_start)
+                    print("✅ Found metadata via national library ISBN search")
+                    return {
+                        'success': True,
+                        'metadata': metadata,
+                        'method': 'isbn_lookup_national',
+                        'processing_time_seconds': elapsed,
+                        'identifiers_found': extraction_result.get('identifiers_found', {}),
+                        'isbn_lookup_source': metadata.get('source')
+                    }
+        
+        print("⚠️  ISBN lookup did not return metadata; continuing with fallback workflow.")
+        return extraction_result
+    
     def _detect_language_from_filename(self, pdf_path: Path) -> Optional[str]:
         """Detect language from filename prefix (NO_, EN_, DE_, etc.)
         
@@ -5707,6 +6426,11 @@ class PaperProcessorDaemon:
             if expected_editor:
                 normalized['book_title'] = title
                 # Chapter title would be in original metadata
+            
+            if item_type == 'books':
+                normalized['document_type'] = 'book'
+            elif item_type == 'papers':
+                normalized['document_type'] = 'report'
             
             return normalized
         
@@ -5973,13 +6697,12 @@ class PaperProcessorDaemon:
                     else:
                         print("⚠️  Invalid choice. Please enter 1-3 or 'z'.")
         
-        copied_ok = False
-        try:
-            shutil.copy2(str(pdf_path), str(final_path))
+        success, error_msg = self._copy_file_universal(pdf_path, final_path, replace_existing=False)
+        copied_ok = success
+        if success:
             print(f"✅ Copied to: {final_path}")
-            copied_ok = True
-        except Exception as e:
-            print(f"❌ File copy failed: {e}")
+        else:
+            print(f"❌ File copy failed: {error_msg}")
             print("Proceeding to create item without attachment...")
         
         # Ensure language is detected from filename and added to metadata if not already present
@@ -6080,12 +6803,16 @@ class PaperProcessorDaemon:
         """Handle user selecting a Zotero item.
         
         Shows metadata review, then PDF comparison (if existing), proposed actions, and asks for confirmation.
+        Uses page-based navigation system for clean flow management.
         
         Args:
             pdf_path: Path to scanned PDF
             metadata: Extracted metadata
             selected_item: The Zotero item dict that was selected
         """
+        from shared_tools.ui.navigation import NavigationEngine, ItemSelectedContext
+        from handle_item_selected_pages import create_all_pages
+        
         title = selected_item.get('title', 'Unknown')
         has_pdf = selected_item.get('has_attachment', selected_item.get('hasAttachment', False))
         
@@ -6094,222 +6821,58 @@ class PaperProcessorDaemon:
         # Show detailed metadata and give option to review/edit before proceeding
         self._display_zotero_item_details(selected_item)
         
-        # Ask if user wants to review/approve or go back
-        print("\n" + "="*70)
-        print("REVIEW & PROCEED")
-        print("="*70)
-        print("  (y/Enter) Proceed with attaching PDF to this item")
-        print("  (e) Edit metadata in Zotero first")
-        print("  (z) Go back to item selection")
-        print("="*70)
+        # Create context
+        context = ItemSelectedContext(
+            pdf_path=pdf_path,
+            metadata=metadata,
+            selected_item=selected_item,
+            item_key=selected_item.get('key') or selected_item.get('item_key'),
+            has_pdf=has_pdf
+        )
         
-        while True:
-            choice = input("\nProceed or edit? [y/e/z]: ").strip().lower()
-            
-            # Enter (empty string) always proceeds (acts as 'y')
-            if not choice:
-                choice = 'y'
-            
-            if choice == 'z':
-                print("⬅️  Going back to item selection")
-                return
-            elif choice == 'e':
-                # User wants to edit tags - offer interactive tag editing
-                item_key = selected_item.get('key') or selected_item.get('item_key')
-                if not item_key:
-                    print("❌ No item key found - cannot edit tags")
-                    print("ℹ️  Please edit this item in Zotero, then process the scan again")
-                    self.move_to_manual_review(pdf_path)
-                    return
-                
-                # Get current tags from the item (local search returns tags as strings)
-                current_tags_raw = selected_item.get('tags', [])
-                # Convert to dict format for edit_tags_interactively if needed
-                # edit_tags_interactively expects dict format, but returns dict format
-                current_tags = [{'tag': tag} if isinstance(tag, str) else tag for tag in current_tags_raw]
-                
-                # Offer tag editing
-                print("\n🏷️  EDIT TAGS")
-                print("="*70)
-                print("You can edit tags for this Zotero item.")
-                print("  (t) Edit tags interactively")
-                print("  (z) Go back (don't edit)")
-                print("  (m) Move to manual review (edit in Zotero directly)")
-                print("="*70)
-                
-                edit_choice = input("\nChoose edit option [t/z/m]: ").strip().lower()
-                
-                if edit_choice == 'z':
-                    # Go back to proceed/edit menu
-                    continue
-                elif edit_choice == 'm':
-                    # User wants to edit in Zotero directly
-                    print("ℹ️  Please edit this item in Zotero, then process the scan again")
-                    self.move_to_manual_review(pdf_path)
-                    return
-                elif edit_choice == 't':
-                    # Edit tags interactively
-                    print("\n✏️  Editing tags...")
-                    updated_tags = self.edit_tags_interactively(current_tags=current_tags)
-                    
-                    # Extract tag names from both lists for comparison
-                    # Both should be in dict format now
-                    current_tag_names = [tag['tag'] if isinstance(tag, dict) else str(tag) for tag in current_tags]
-                    updated_tag_names = [tag['tag'] if isinstance(tag, dict) else str(tag) for tag in updated_tags]
-                    
-                    # Calculate what to add and remove
-                    add_tags = [tag for tag in updated_tag_names if tag not in current_tag_names]
-                    remove_tags = [tag for tag in current_tag_names if tag not in updated_tag_names]
-                    
-                    if add_tags or remove_tags:
-                        print(f"\n💾 Saving tag changes to Zotero...")
-                        success = self.zotero_processor.update_item_tags(
-                            item_key, 
-                            add_tags=add_tags if add_tags else None,
-                            remove_tags=remove_tags if remove_tags else None
-                        )
-                        if success:
-                            print("✅ Tags updated successfully!")
-                            # Update selected_item with new tags for display
-                            selected_item['tags'] = updated_tags
-                        else:
-                            print("⚠️  Failed to update tags in Zotero")
-                            retry = input("Continue anyway? [y/N]: ").strip().lower()
-                            if retry != 'y':
-                                return
-                    else:
-                        print("ℹ️  No tag changes to save")
-                    
-                    # After editing tags, ask if they want to proceed
-                    print("\n" + "="*70)
-                    proceed = input("Proceed with PDF attachment? [Y/n]: ").strip().lower()
-                    if proceed == 'n':
-                        print("⬅️  Going back...")
-                        continue
-                    # Otherwise break and continue with attachment
-                    break
-                else:
-                    print("⚠️  Invalid choice, going back...")
-                    continue
-            elif choice == 'y':
-                # Continue to PROPOSED ACTIONS - prepare metadata and filename
-                print()
-                
-                # Get scan file info
-                scan_size_mb = pdf_path.stat().st_size / 1024 / 1024
-                
-                # CRITICAL: Use ONLY Zotero metadata for filename generation
-                # When attaching to existing Zotero item, Zotero metadata is canonical
-                # Fallback to scan metadata only causes incorrect filenames like "P_et_al_Unknown_..."
-                
-                # Extract metadata from Zotero item (authors already extracted in _display_zotero_item_details)
+        # Add daemon instance to context dict for page handlers
+        ctx_dict = context.to_dict()
+        ctx_dict['daemon'] = self
+        
+        # Create pages and navigation engine
+        pages = create_all_pages(self)
+        engine = NavigationEngine(pages)
+        
+        # Run page flow starting from REVIEW & PROCEED
+        result = engine.run_page_flow('review_and_proceed', ctx_dict)
+        
+        # Handle navigation results
+        if result.type == result.Type.RETURN_TO_CALLER:
+            return
+        elif result.type == result.Type.QUIT_SCAN:
+            if result.move_to_manual:
+                self.move_to_manual_review(pdf_path)
+            return
+        elif result.type == result.Type.PROCESS_PDF:
+            # Process the PDF
+            target_filename = ctx_dict.get('target_filename')
+            if not target_filename:
+                # Fallback: generate filename if not set
+                from shared_tools.utils.filename_generator import FilenameGenerator
                 zotero_authors = selected_item.get('authors', [])
                 zotero_title = selected_item.get('title', '')
                 zotero_year = selected_item.get('year', selected_item.get('date', ''))
                 zotero_item_type = selected_item.get('itemType', 'journalArticle')
-                
-                # Validate critical fields
-                missing_fields = []
-                if not zotero_title:
-                    missing_fields.append('title')
-                if not zotero_authors:
-                    missing_fields.append('authors')
-                
-                # Show warning if critical fields missing
-                if missing_fields:
-                    print(f"⚠️  WARNING: Zotero item missing: {', '.join(missing_fields)}")
-                    print("   Cannot generate proper filename without this information.")
-                    print("   Please edit Zotero item metadata or choose manual processing.")
-                    confirm_anyway = input("Proceed anyway with placeholder values? [y/n]: ").strip().lower()
-                    if confirm_anyway != 'y':
-                        print("⬅️  Going back to review...")
-                        continue
-                    # Set placeholders
-                    if 'title' in missing_fields:
-                        zotero_title = 'Unknown_Title'
-                    if 'authors' in missing_fields:
-                        zotero_authors = ['Unknown_Author']
-                
-                # Build metadata using ONLY Zotero data
                 merged_metadata = {
                     'title': zotero_title,
                     'authors': zotero_authors,
                     'year': zotero_year if zotero_year else 'Unknown',
                     'document_type': zotero_item_type
                 }
-                
-                # Generate target filename with _scan suffix
                 filename_gen = FilenameGenerator()
                 target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
-                
-                # Show what authors will be used in filename
-                if zotero_authors:
-                    author_display = '_'.join([a.split()[-1] if ' ' in a else a for a in zotero_authors[:2]])
-                    print(f"📝 Filename will use authors: {author_display}")
-                    print()
-                
-                # Show filename preview before confirmation
-                print(f"📄 Generated filename: {target_filename}")
-                print()
-                
-                # Show PDF comparison if item already has PDF
-                if has_pdf:
-                    existing_pdf_info = self._get_existing_pdf_info(selected_item)
-                    self._display_pdf_comparison(pdf_path, scan_size_mb, existing_pdf_info)
-                
-                # PROPOSED ACTIONS loop
-                while True:
-                    # Show proposed actions
-                    print("="*70)
-                    print("PROPOSED ACTIONS:")
-                    print("="*70)
-                    print(f"Scan: {pdf_path.name} ({scan_size_mb:.1f} MB)")
-                    print()
-                    print("Will perform:")
-                    print(f"  1. Generate filename: {target_filename}")
-                    print(f"  2. Copy to publications: {self.publications_dir.name}/")
-                    print(f"  3. Attach as linked file in Zotero")
-                    print(f"  4. Move scan to: done/")
-                    print("="*70)
-                    print()
-                    print("  (y/Enter) Proceed with all actions")
-                    print("  (z) Go back to review")
-                    print("  (q) Quit - move to manual review")
-                    print()
-                    
-                    # Ask for confirmation
-                    confirm = input("Proceed with these actions? [Y/z/q]: ").strip().lower()
-                    
-                    # Enter (empty string) always proceeds (acts as 'y')
-                    if not confirm:
-                        confirm = 'y'
-                    
-                    if confirm == 'y' or confirm == 'yes':
-                        # Offer to add a handwritten note before proceeding
-                        item_key = selected_item.get('key') or selected_item.get('item_key')
-                        if item_key:
-                            note_result = self._prompt_for_note(item_key)
-                            if not note_result:
-                                # User cancelled note addition, go back to PROPOSED ACTIONS
-                                continue
-                        
-                        # Execute the actions
-                        self._process_selected_item(pdf_path, selected_item, target_filename, metadata)
-                        return  # Exit successfully
-                    elif confirm == 'z':
-                        print("⬅️  Going back to review...")
-                        break  # Break out of PROPOSED ACTIONS loop, back to REVIEW & PROCEED
-                    elif confirm == 'q':
-                        print("📝 Moving to manual review")
-                        self.move_to_manual_review(pdf_path)
-                        return
-                    else:
-                        print("⚠️  Invalid choice. Please enter 'y' to proceed, 'z' to go back, or 'q' to quit.")
-                
-                # After breaking from PROPOSED ACTIONS, continue loop to show REVIEW & PROCEED again
-                continue
-            else:
-                print("⚠️  Invalid choice. Please enter 'y' to proceed, 'e' to edit, or 'z' to go back.")
+            
+            self._process_selected_item(pdf_path, selected_item, target_filename, metadata)
+            return
+        
+        # Should not reach here
+        print("⚠️  Unexpected navigation result")
+        return
     
     def _process_selected_item(self, pdf_path: Path, zotero_item: dict, target_filename: str, metadata: dict = None):
         """Process selected Zotero item: copy PDF and attach.
@@ -6335,59 +6898,68 @@ class PaperProcessorDaemon:
         
         print("\n📋 Executing actions...")
         
-        # Step 1: Determine which PDF to use (original or split)
-        pdf_to_copy = pdf_path
-        name_lower = pdf_path.name.lower()
-        split_result = None
+        # Step 1: Determine which PDF to use (original, page-offset temp, or split)
+        # Check if there's a temporary PDF created from page offset
+        pdf_to_copy = getattr(self, '_temp_pdf_path', None)
+        if pdf_to_copy is None or not pdf_to_copy.exists():
+            # No temp PDF, use original
+            pdf_to_copy = pdf_path
+        else:
+            self.logger.info(f"Using temporary PDF from page offset: {pdf_to_copy.name}")
+        
+        name_lower = pdf_to_copy.name.lower()
+        split_attempted = False
+        split_success = False
         
         if name_lower.endswith('_double.pdf'):
             # Always split on _double.pdf
             print(f"1/4 Preparing split for two-up file...")
-            split_result = self._split_with_mutool(pdf_path)
-            if split_result:
-                pdf_to_copy = split_result
-                self.logger.info(f"Using split version for Zotero: {split_result.name}")
+            split_attempted = True
+            split_path = self._split_with_mutool(pdf_to_copy)
+            if split_path:
+                pdf_to_copy = split_path
+                name_lower = pdf_to_copy.name.lower()
+                self.logger.info(f"Using split version for Zotero: {pdf_to_copy.name}")
+                split_success = True
             else:
                 print("⚠️  Splitting the PDF did fail. Using the original in landscape format.")
         else:
             # Check if we should prompt for split on wide pages
             try:
                 import pdfplumber
-                with pdfplumber.open(str(pdf_path)) as pdf:
+                with pdfplumber.open(str(pdf_to_copy)) as pdf:
                     if len(pdf.pages) > 0:
                         first = pdf.pages[0]
                         width, height = first.width, first.height
                         if width and height and width / max(1.0, height) > 1.3:
-                            is_two_up, score, mode = self._detect_two_up_page(pdf_path)
+                            is_two_up, score, mode = self._detect_two_up_page(pdf_to_copy)
                             if is_two_up:
                                 print("\nTwo-up candidate detected:")
                                 print(f"  Aspect ratio: {width/height:.2f}")
                                 print(f"  Center structure: {mode} score={score:.2f}")
                                 choice = input("Split this file into single pages before attaching to Zotero? [y/N]: ").strip().lower()
                                 if choice == 'y':
-                                    split_result = self._split_with_mutool(pdf_path, width=width, height=height)
-                                    if split_result:
-                                        pdf_to_copy = split_result
-                                        self.logger.info(f"Using split version for Zotero: {split_result.name}")
+                                    split_attempted = True
+                                    split_path = self._split_with_mutool(pdf_to_copy, width=width, height=height)
+                                    if split_path:
+                                        pdf_to_copy = split_path
+                                        name_lower = pdf_to_copy.name.lower()
+                                        self.logger.info(f"Using split version for Zotero: {pdf_to_copy.name}")
+                                        split_success = True
                                     else:
                                         print("⚠️  Splitting the PDF did fail. Using the original in landscape format.")
             except Exception as e:
                 self.logger.debug(f"Two-up detection skipped: {e}")
                 pass
         
-        # Step 1b: For book chapters, offer to delete page 1 after splitting
-        if split_result and metadata and metadata.get('document_type', '').lower() == 'book_chapter':
-            print("\nThis is a book chapter. After splitting, page 1 is typically blank.")
-            print("For book chapters, the first content page is usually page 2.")
-            choice = input("Delete page 1 from the split PDF? [y/N]: ").strip().lower()
-            if choice == 'y':
-                modified_pdf = self._delete_first_page_from_pdf(pdf_to_copy)
-                if modified_pdf:
-                    pdf_to_copy = modified_pdf
-                    self.logger.info(f"Using PDF without page 1: {modified_pdf.name}")
-                    print("✅ Page 1 deleted from split PDF")
-                else:
-                    print("⚠️  Failed to delete page 1 - using original split PDF")
+        # Step 1b: Optional trimming of leading pages
+        if split_attempted and not split_success:
+            print("ℹ️  Split failed; skipping trimming to avoid shifting the wrong pages.")
+        else:
+            trimmed_pdf, trimmed = self._prompt_trim_leading_pages_for_attachment(pdf_to_copy)
+            if trimmed:
+                pdf_to_copy = trimmed_pdf
+                name_lower = pdf_to_copy.name.lower()
         
         # Step 1c: Check and optionally remove dark borders
         border_removed_pdf = self._check_and_remove_dark_borders(pdf_to_copy)
@@ -6395,9 +6967,68 @@ class PaperProcessorDaemon:
             pdf_to_copy = border_removed_pdf
             self.logger.debug(f"Using PDF without borders: {border_removed_pdf.name}")
         
+        # Step 2: Check if target file exists and show comparison/choice if needed
+        target_path_full = self.publications_dir / target_filename
+        replace_existing = False
+        
+        # Try to check if file exists, but handle case where cloud drive isn't accessible from WSL
+        target_exists = False
+        try:
+            target_exists = target_path_full.exists()
+        except OSError as e:
+            # Cloud drives (like Google Drive) may not be accessible from WSL
+            # PowerShell will handle the existence check during copy
+            self.logger.debug(f"Could not check if target exists from WSL (cloud drive?): {e}")
+            target_exists = False
+        
+        if target_exists:
+            # File exists - show comparison and get user choice
+            try:
+                existing_info = self._summarize_pdf_for_compare(target_path_full)
+                scan_info = self._summarize_pdf_for_compare(pdf_to_copy)
+                self._display_enhanced_pdf_comparison(scan_info, existing_info)
+            except Exception as e:
+                self.logger.debug(f"Enhanced comparison failed: {e}")
+                # Fallback to basic info
+                existing_info = {'filename': target_filename, 'path': target_path_full}
+                scan_info = {'filename': pdf_to_copy.name}
+            
+            print("What would you like to do?")
+            print("[1] Keep both (add scanned version with _scan suffix)")
+            print("[2] Replace existing PDF with scan")
+            print("[3] Skip attaching and finish")
+            print("  (z) Cancel (keep original)")
+            print()
+            
+            pdf_choice = input("Enter your choice: ").strip().lower()
+            
+            if pdf_choice == 'z':
+                self.move_to_done(pdf_path)
+                print("✅ Cancelled - kept original PDF")
+                return
+            if pdf_choice == '3':
+                self.move_to_done(pdf_path)
+                print("✅ Skipped attachment and finished")
+                return
+            
+            if pdf_choice == '2':
+                replace_existing = True
+            elif pdf_choice == '1':
+                # Rename with _scan suffix
+                stem = target_path_full.stem
+                suffix = target_path_full.suffix
+                target_filename = f"{stem}_scan{suffix}"
+                target_path_full = self.publications_dir / target_filename
+            else:
+                # Default to keep both if invalid choice
+                stem = target_path_full.stem
+                suffix = target_path_full.suffix
+                target_filename = f"{stem}_scan{suffix}"
+                target_path_full = self.publications_dir / target_filename
+        
         # Step 2: Copy to publications directory via PowerShell
         print(f"2/4 Copying to publications directory...")
-        success, target_path, error = self._copy_to_publications_via_windows(pdf_to_copy, target_filename)
+        success, target_path, error = self._copy_to_publications_via_windows(pdf_to_copy, target_filename, replace_existing=replace_existing)
         
         if not success:
             print(f"❌ Copy failed: {error}")
@@ -6751,7 +7382,7 @@ class PaperProcessorDaemon:
             total = 0
             with fitz.open(str(path)) as doc:
                 check_n = min(len(doc), 4)
-                remover = BorderRemover()
+                remover = BorderRemover({'max_border_width': self.border_max_width})
                 for i in range(check_n):
                     page = doc[i]
                     pix = page.get_pixmap(alpha=False)
@@ -6815,12 +7446,7 @@ class PaperProcessorDaemon:
     def _move_to_recycle_bin_windows(self, windows_path: str) -> bool:
         """Send a Windows file to Recycle Bin using PowerShell script."""
         try:
-            script_dir = Path(__file__).parent
-            ps_script = script_dir / 'move_to_recycle_bin.ps1'
-            # Convert script path to Windows
-            ps_script_win = subprocess.check_output(
-                ['wslpath', '-w', str(ps_script)], text=True
-            ).strip()
+            ps_script_win = self._get_script_path_win('move_to_recycle_bin.ps1')
             result = subprocess.run(
                 ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps_script_win, windows_path],
                 capture_output=True, text=True
