@@ -28,6 +28,10 @@ class IdentifierExtractor:
         r'\bDO[!1lI]\s*:\s*(10\.\d{4,}/[^\s\)]+)',
         # Raw DOI (no prefix)
         r'\b(10\.\d{4,}/[^\s\)]+)',
+        # OCR error: / misread as ) - with doi: prefix
+        r'doi:\s*(10\.\d{4,}\)[^\s\)]+)',
+        # OCR error: / misread as ) - raw DOI
+        r'\b(10\.\d{4,}\)[^\s\)]+)',
     ]
     
     # ISSN pattern: 1234-5678 or 1234-567X
@@ -89,6 +93,13 @@ class IdentifierExtractor:
                 # Clean any remaining prefixes (including OCR errors)
                 doi = re.sub(r'^(doi:|DO[!1lI]:|https?://.*?/)', '', doi, flags=re.IGNORECASE)
                 doi = doi.strip()
+                
+                # Normalize OCR errors in the DOI itself
+                # Replace ) with / when it appears after the prefix (common OCR error)
+                # Pattern: 10.1016)something -> 10.1016/something
+                # Only replace if it looks like a DOI structure (number)number)
+                if re.match(r'10\.\d{4,}\)', doi):
+                    doi = doi.replace(')', '/', 1)  # Replace first ) with /
                 
                 # Normalize any OCR artifacts in the DOI itself
                 # Replace common OCR errors: "O" misread as "0" or "o", "I" as "1" or "l", etc.
@@ -519,12 +530,12 @@ class IdentifierExtractor:
         # You can't cite something from the future, so most recent year gets bonus
         max_year = max(candidate[3] for candidate in candidates) if candidates else None
         
-        # Add recency bonus: most recent year gets +5 bonus
+        # Add recency bonus: most recent year gets +10 bonus
         # Format: (year_str, score, position, year_int)
         updated_candidates = []
         for year_str, score, position, year_int in candidates:
             if year_int == max_year:
-                score += 5  # Bonus for most recent year
+                score += 10  # Bonus for most recent year
             updated_candidates.append((year_str, score, position))
         
         # Sort by score (descending), then by position (ascending) as tiebreaker
@@ -555,13 +566,14 @@ class IdentifierExtractor:
         }
     
     @classmethod
-    def extract_first_page_identifiers(cls, pdf_path, document_type: Optional[str] = None) -> dict:
+    def extract_first_page_identifiers(cls, pdf_path, document_type: Optional[str] = None, page_offset: int = 0) -> dict:
         """Extract identifiers from first page of PDF.
         
         Args:
             pdf_path: Path to PDF file
             document_type: Optional document type (e.g., 'book_chapter') for type-specific handling
                           - 'book_chapter': Handles landscape pages by ignoring left side if right has more content
+            page_offset: 0-indexed page offset (0 = page 1, 1 = page 2, etc.) to skip pages before document starts
                           
         Returns:
             Dictionary with found identifiers
@@ -580,14 +592,18 @@ class IdentifierExtractor:
                 if len(pdf.pages) == 0:
                     return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}
                 
-                # Extract text from first page
-                first_page = pdf.pages[0]
+                # Check if page_offset is valid
+                if page_offset >= len(pdf.pages):
+                    return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}
+                
+                # Extract text from page at offset (or first page if offset is 0)
+                target_page = pdf.pages[page_offset]
                 
                 # For book chapters, handle landscape pages (left side might be previous chapter)
                 if document_type == 'book_chapter':
-                    text = cls._extract_text_for_book_chapter(first_page)
+                    text = cls._extract_text_for_book_chapter(target_page)
                 else:
-                    text = first_page.extract_text()
+                    text = target_page.extract_text()
                 
                 if not text:
                     return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}

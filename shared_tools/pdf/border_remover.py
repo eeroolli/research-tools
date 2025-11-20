@@ -110,47 +110,74 @@ class BorderRemover:
         candidate_borders = self._detect_borders_projection(gray, h, w)
         
         # Verify borders actually contain dark pixels (scanner bed)
+        # Skip outer portion of borders to avoid white strips at edges (copier masks)
         dark_threshold = float(self.dark_threshold)
         verified_borders = {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}
         
-        # Sample pixels in border regions - require at least some dark pixels
-        min_dark_fraction = 0.15  # At least 15% of border region should be dark
+        # Sample pixels in inner portion of border regions - require at least some dark pixels
+        min_dark_fraction = 0.15  # At least 15% of checked region should be dark
+        skip_outer_percent = 0.20  # Skip outer 20% of detected border
+        min_skip_pixels = 50  # Minimum pixels to skip (handles small borders)
         
         # Top border
         if candidate_borders['top'] > 0:
-            border_region = gray[0:candidate_borders['top'], :]
-            if border_region.size > 0:
-                dark_pixels = np.sum(border_region <= dark_threshold)
-                dark_fraction = dark_pixels / border_region.size
-                if dark_fraction >= min_dark_fraction:
-                    verified_borders['top'] = candidate_borders['top']
+            border_width = candidate_borders['top']
+            # Skip outer portion, check inner part
+            skip_pixels = max(int(border_width * skip_outer_percent), min_skip_pixels)
+            inner_start = skip_pixels
+            inner_end = border_width
+            if inner_end > inner_start:
+                inner_region = gray[inner_start:inner_end, :]
+                if inner_region.size > 0:
+                    dark_pixels = np.sum(inner_region <= dark_threshold)
+                    dark_fraction = dark_pixels / inner_region.size
+                    if dark_fraction >= min_dark_fraction:
+                        verified_borders['top'] = candidate_borders['top']
         
         # Bottom border
         if candidate_borders['bottom'] > 0:
-            border_region = gray[h-candidate_borders['bottom']:h, :]
-            if border_region.size > 0:
-                dark_pixels = np.sum(border_region <= dark_threshold)
-                dark_fraction = dark_pixels / border_region.size
-                if dark_fraction >= min_dark_fraction:
-                    verified_borders['bottom'] = candidate_borders['bottom']
+            border_width = candidate_borders['bottom']
+            # Skip outer portion (from edge), check inner part
+            skip_pixels = max(int(border_width * skip_outer_percent), min_skip_pixels)
+            inner_start = h - border_width + skip_pixels
+            inner_end = h
+            if inner_end > inner_start:
+                inner_region = gray[inner_start:inner_end, :]
+                if inner_region.size > 0:
+                    dark_pixels = np.sum(inner_region <= dark_threshold)
+                    dark_fraction = dark_pixels / inner_region.size
+                    if dark_fraction >= min_dark_fraction:
+                        verified_borders['bottom'] = candidate_borders['bottom']
         
         # Left border
         if candidate_borders['left'] > 0:
-            border_region = gray[:, 0:candidate_borders['left']]
-            if border_region.size > 0:
-                dark_pixels = np.sum(border_region <= dark_threshold)
-                dark_fraction = dark_pixels / border_region.size
-                if dark_fraction >= min_dark_fraction:
-                    verified_borders['left'] = candidate_borders['left']
+            border_width = candidate_borders['left']
+            # Skip outer portion, check inner part
+            skip_pixels = max(int(border_width * skip_outer_percent), min_skip_pixels)
+            inner_start = skip_pixels
+            inner_end = border_width
+            if inner_end > inner_start:
+                inner_region = gray[:, inner_start:inner_end]
+                if inner_region.size > 0:
+                    dark_pixels = np.sum(inner_region <= dark_threshold)
+                    dark_fraction = dark_pixels / inner_region.size
+                    if dark_fraction >= min_dark_fraction:
+                        verified_borders['left'] = candidate_borders['left']
         
         # Right border
         if candidate_borders['right'] > 0:
-            border_region = gray[:, w-candidate_borders['right']:w]
-            if border_region.size > 0:
-                dark_pixels = np.sum(border_region <= dark_threshold)
-                dark_fraction = dark_pixels / border_region.size
-                if dark_fraction >= min_dark_fraction:
-                    verified_borders['right'] = candidate_borders['right']
+            border_width = candidate_borders['right']
+            # Skip outer portion (from edge), check inner part
+            skip_pixels = max(int(border_width * skip_outer_percent), min_skip_pixels)
+            inner_start = w - border_width + skip_pixels
+            inner_end = w
+            if inner_end > inner_start:
+                inner_region = gray[:, inner_start:inner_end]
+                if inner_region.size > 0:
+                    dark_pixels = np.sum(inner_region <= dark_threshold)
+                    dark_fraction = dark_pixels / inner_region.size
+                    if dark_fraction >= min_dark_fraction:
+                        verified_borders['right'] = candidate_borders['right']
         
         return verified_borders
     

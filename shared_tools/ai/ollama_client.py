@@ -282,12 +282,14 @@ Remember: Return ONLY the JSON object. No explanatory text before or after. Use 
             return None
     
     def extract_from_pdf_first_page(self, pdf_path: Path, validate: bool = True,
-                                   document_context: str = "general") -> Optional[Dict]:
+                                   document_context: str = "general", page_offset: int = 0) -> Optional[Dict]:
         """Extract metadata from the first page of a PDF.
         
         Args:
             pdf_path: Path to PDF file
             validate: Whether to validate extracted identifiers
+            document_context: Context hint for extraction ("general", "book_chapter", etc.)
+            page_offset: 0-indexed page offset (0 = page 1, 1 = page 2, etc.) to skip pages before document starts
             
         Returns:
             Validated metadata dictionary or None if failed
@@ -304,11 +306,16 @@ Remember: Return ONLY the JSON object. No explanatory text before or after. Use 
                     print(f"Error: PDF has no pages: {pdf_path}")
                     return None
                 
-                first_page = pdf.pages[0]
-                text = first_page.extract_text()
+                # Check if page_offset is valid
+                if page_offset >= len(pdf.pages):
+                    print(f"Error: Page offset {page_offset + 1} exceeds PDF page count {len(pdf.pages)}")
+                    return None
+                
+                target_page = pdf.pages[page_offset]
+                text = target_page.extract_text()
                 
                 if not text or len(text.strip()) < 50:
-                    print(f"Warning: Very little text extracted from {pdf_path.name}")
+                    print(f"Warning: Very little text extracted from {pdf_path.name} (page {page_offset + 1})")
                     return None
                 
                 return self.extract_paper_metadata(text, validate=validate, 

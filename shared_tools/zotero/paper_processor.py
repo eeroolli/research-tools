@@ -209,9 +209,29 @@ class ZoteroPaperProcessor:
             item['ISBN'] = metadata.get('isbn', '')
         
         # Add tags from metadata
+        # Handle both 'tags' and 'keywords' fields
+        tags_to_add = []
+        
+        # Process 'tags' field (can be list of strings or list of dicts)
+        if metadata.get('tags'):
+            for tag in metadata['tags']:
+                if isinstance(tag, dict):
+                    tag_name = tag.get('tag', '')
+                else:
+                    tag_name = str(tag)
+                if tag_name:
+                    tags_to_add.append(tag_name)
+        
+        # Process 'keywords' field (for backward compatibility)
         if metadata.get('keywords'):
             for keyword in metadata['keywords']:
-                item['tags'].append({'tag': keyword})
+                keyword_str = str(keyword) if not isinstance(keyword, dict) else keyword.get('tag', '')
+                if keyword_str and keyword_str not in tags_to_add:
+                    tags_to_add.append(keyword_str)
+        
+        # Add unique tags to item
+        for tag_name in tags_to_add:
+            item['tags'].append({'tag': tag_name})
         
         return item
     

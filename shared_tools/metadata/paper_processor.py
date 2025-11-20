@@ -327,12 +327,14 @@ class PaperMetadataProcessor:
         
         return None
     
-    def process_pdf(self, pdf_path: Path, use_ollama_fallback: bool = True, progress_callback=None) -> Dict:
+    def process_pdf(self, pdf_path: Path, use_ollama_fallback: bool = True, progress_callback=None, page_offset: int = 0) -> Dict:
         """Process a PDF to extract metadata using smart workflow.
         
         Args:
             pdf_path: Path to PDF file
             use_ollama_fallback: Whether to use Ollama if no identifiers found
+            progress_callback: Optional callback for progress updates
+            page_offset: 0-indexed page offset (0 = page 1, 1 = page 2, etc.) to skip pages before document starts
             
         Returns:
             Dictionary with metadata and processing info
@@ -356,7 +358,7 @@ class PaperMetadataProcessor:
         
         # Step 1: Fast identifier extraction with regex
         print("\n📋 Step 1: Extracting identifiers with regex...")
-        identifiers = self.extractor.extract_first_page_identifiers(pdf_path)
+        identifiers = self.extractor.extract_first_page_identifiers(pdf_path, page_offset=page_offset)
         result['identifiers_found'] = identifiers
         
         print(f"  DOIs: {identifiers['dois']}")
@@ -500,7 +502,10 @@ class PaperMetadataProcessor:
             print(f"  🔍 Trying regex author extraction...")
             import pdfplumber
             with pdfplumber.open(pdf_path) as pdf:
-                text = pdf.pages[0].extract_text()
+                if len(pdf.pages) > page_offset:
+                    text = pdf.pages[page_offset].extract_text()
+                else:
+                    text = ""
             
             regex_authors = self._extract_authors_with_regex_simple(text)
             if regex_authors:
@@ -584,8 +589,11 @@ class PaperMetadataProcessor:
             print(f"  🔍 Trying regex author extraction...")
             import pdfplumber
             with pdfplumber.open(pdf_path) as pdf:
-                # Extract first page for regex
-                text_page1 = pdf.pages[0].extract_text()
+                # Extract page at offset for regex
+                if len(pdf.pages) > page_offset:
+                    text_page1 = pdf.pages[page_offset].extract_text()
+                else:
+                    text_page1 = ""
             
             regex_authors = self._extract_authors_with_regex_simple(text_page1)
             if regex_authors:
@@ -615,13 +623,14 @@ class PaperMetadataProcessor:
                 with pdfplumber.open(pdf_path) as pdf:
                     pages_text = []
                     
-                    # First page: extract everything
-                    first_page_text = pdf.pages[0].extract_text()
-                    if first_page_text:
-                        pages_text.append(f"=== PAGE 1 ===\n{first_page_text}\n")
+                    # First page at offset: extract everything
+                    if len(pdf.pages) > page_offset:
+                        first_page_text = pdf.pages[page_offset].extract_text()
+                        if first_page_text:
+                            pages_text.append(f"=== PAGE {page_offset + 1} ===\n{first_page_text}\n")
                     
                     # Next 3-4 pages: header + footer only
-                    for i in range(1, min(5, len(pdf.pages))):
+                    for i in range(page_offset + 1, min(page_offset + 5, len(pdf.pages))):
                         page_text = pdf.pages[i].extract_text()
                         if page_text:
                             # Get first 100 chars (header) and last 20 chars (footer/page number)

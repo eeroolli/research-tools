@@ -50,7 +50,18 @@ class JournalValidator:
         
         # Load ALL journals from Zotero (no thresholds)
         self.zotero_journals = []  # All journals in your Zotero collection
-        self._load_journal_list()
+        
+        # Check if refresh is needed BEFORE loading (to avoid showing stale age)
+        # This allows refresh_if_needed to be called after init without double-loading
+        needs_refresh = self.needs_refresh(max_age_hours=24)
+        
+        if needs_refresh:
+            # Extract fresh data from database
+            self._extract_from_database(silent=True)
+            self._save_cache(silent=True)
+        else:
+            # Load from cache
+            self._load_journal_list()
         
         # Build simple normalized index
         # "journal of political science" → ["Journal of Political Science"]

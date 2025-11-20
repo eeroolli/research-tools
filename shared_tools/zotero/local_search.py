@@ -14,6 +14,8 @@ from typing import List, Dict, Optional
 from difflib import SequenceMatcher
 import configparser
 
+from shared_tools.utils.isbn_matcher import ISBNMatcher
+
 
 class ZoteroLocalSearch:
     """Search local Zotero database for matching items."""
@@ -195,6 +197,161 @@ class ZoteroLocalSearch:
         except Exception as e:
             self.logger.error(f"Error searching by DOI: {e}")
         
+        return matches
+
+    def search_by_isbn(self, isbn: str, limit: int = 5) -> List[Dict]:
+        """Search Zotero database for exact ISBN matches."""
+        if not isbn:
+            return []
+
+        if not self.db_connection:
+            self.connect()
+
+        clean_search = ISBNMatcher.extract_clean_isbn(isbn)
+        if not clean_search:
+            return []
+
+        matches: List[Dict] = []
+
+        try:
+            cursor = self.db_connection.cursor()
+
+            query = """
+            SELECT i.itemID, i.key,
+                   COALESCE(fv_title.value, '') as title,
+                   COALESCE(fv_date.value, '') as date,
+                   fv_isbn.value as isbn_value,
+                   it.typeName as itemType
+            FROM items i
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            JOIN itemData id_isbn ON i.itemID = id_isbn.itemID
+                AND id_isbn.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'ISBN')
+            JOIN itemDataValues fv_isbn ON id_isbn.valueID = fv_isbn.valueID
+            LEFT JOIN itemData id_title ON i.itemID = id_title.itemID
+                AND id_title.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'title')
+            LEFT JOIN itemDataValues fv_title ON id_title.valueID = fv_title.valueID
+            LEFT JOIN itemData id_date ON i.itemID = id_date.itemID
+                AND id_date.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'date')
+            LEFT JOIN itemDataValues fv_date ON id_date.valueID = fv_date.valueID
+            WHERE i.itemID NOT IN (SELECT itemID FROM deletedItems)
+            LIMIT ?
+            """
+
+            cursor.execute(query, (limit * 10,))
+            rows = cursor.fetchall()
+
+            processed_ids = set()
+
+            for row in rows:
+                item_id, item_key, title, date_str, isbn_value, item_type = row
+                if not isbn_value:
+                    continue
+
+                if not ISBNMatcher.extract_and_match_isbn(clean_search, isbn_value):
+                    continue
+
+                authors = self._get_authors(item_id)
+                has_attachment = self._has_attachment(item_id)
+                container_info = self._get_container_info(item_id, item_type)
+                doi = self._get_doi(item_id)
+                abstract = self._get_abstract(item_id)
+                tags = self._get_tags(item_id)
+                creators = self._get_item_creators(cursor, item_id)
+                year = self._extract_year(date_str)
+
+                matches.append({
+                    'item_key': item_key,
+                    'title': title or "Unknown",
+                    'authors': authors,
+                    'year': year,
+                    'similarity': 100.0,
+                    'method': 'ISBN',
+                    'has_attachment': has_attachment,
+                    'item_type': item_type,
+                    'container_info': container_info,
+                    'journal': container_info['value'] if container_info else None,
+                    'doi': doi,
+                    'abstract': abstract,
+                    'tags': tags,
+                    'creators': creators,
+                    'isbn': isbn_value
+                })
+                processed_ids.add(item_id)
+
+                if len(matches) >= limit:
+                    break
+
+            if len(matches) < limit:
+                extra_query = """
+                SELECT i.itemID, i.key,
+                       COALESCE(fv_title.value, '') as title,
+                       COALESCE(fv_date.value, '') as date,
+                       fv_extra.value as extra_value,
+                       it.typeName as itemType
+                FROM items i
+                JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+                JOIN itemData id_extra ON i.itemID = id_extra.itemID
+                    AND id_extra.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'extra')
+                JOIN itemDataValues fv_extra ON id_extra.valueID = fv_extra.valueID
+                LEFT JOIN itemData id_title ON i.itemID = id_title.itemID
+                    AND id_title.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'title')
+                LEFT JOIN itemDataValues fv_title ON id_title.valueID = fv_title.valueID
+                LEFT JOIN itemData id_date ON i.itemID = id_date.itemID
+                    AND id_date.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'date')
+                LEFT JOIN itemDataValues fv_date ON id_date.valueID = fv_date.valueID
+                WHERE i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                  AND UPPER(fv_extra.value) LIKE ?
+                LIMIT ?
+                """
+
+                pattern = f"%{clean_search.upper()}%"
+                cursor.execute(extra_query, (pattern, limit * 10,))
+                extra_rows = cursor.fetchall()
+
+                for row in extra_rows:
+                    item_id, item_key, title, date_str, extra_value, item_type = row
+                    if item_id in processed_ids:
+                        continue
+                    if not extra_value:
+                        continue
+
+                    if not ISBNMatcher.extract_and_match_isbn(clean_search, extra_value):
+                        continue
+
+                    authors = self._get_authors(item_id)
+                    has_attachment = self._has_attachment(item_id)
+                    container_info = self._get_container_info(item_id, item_type)
+                    doi = self._get_doi(item_id)
+                    abstract = self._get_abstract(item_id)
+                    tags = self._get_tags(item_id)
+                    creators = self._get_item_creators(cursor, item_id)
+                    year = self._extract_year(date_str)
+
+                    matches.append({
+                        'item_key': item_key,
+                        'title': title or "Unknown",
+                        'authors': authors,
+                        'year': year,
+                        'similarity': 95.0,
+                        'method': 'ISBN-extra',
+                        'has_attachment': has_attachment,
+                        'item_type': item_type,
+                        'container_info': container_info,
+                        'journal': container_info['value'] if container_info else None,
+                        'doi': doi,
+                        'abstract': abstract,
+                        'tags': tags,
+                        'creators': creators,
+                        'isbn': extra_value
+                    })
+                    processed_ids.add(item_id)
+
+                    if len(matches) >= limit:
+                        break
+
+        except Exception as e:
+            self.logger.error(f"Error searching by ISBN: {e}")
+
         return matches
     
     def _search_by_title_fuzzy(self, title: str, authors: List[str] = None, 

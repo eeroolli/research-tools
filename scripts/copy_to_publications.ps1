@@ -5,12 +5,12 @@
 # using native Windows file operations for reliable sync.
 #
 # Usage:
-#   powershell.exe -File copy_to_publications.ps1 <source_path> <target_path>
+#   powershell.exe -File copy_to_publications.ps1 <source_path> <target_path> [-Replace]
 #
 # Exit codes:
 #   0 = Success
 #   1 = Source file not found
-#   2 = Target already exists
+#   2 = Target already exists (and differs, when -Replace not specified)
 #   3 = Copy failed
 #   4 = Verification failed
 
@@ -19,7 +19,10 @@ param(
     [string]$SourcePath,
     
     [Parameter(Mandatory=$true)]
-    [string]$TargetPath
+    [string]$TargetPath,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$Replace
 )
 
 # Function to get file hash
@@ -58,8 +61,14 @@ if (Test-Path $TargetPath) {
         }
     }
     
-    Write-Host "ERROR: Target exists but differs from source" -ForegroundColor Red
-    exit 2
+    # If -Replace flag is set, proceed with replacement
+    if ($Replace) {
+        Write-Host "Replacing existing file (user requested replacement)..." -ForegroundColor Yellow
+        # Continue to copy section below
+    } else {
+        Write-Host "ERROR: Target exists but differs from source" -ForegroundColor Red
+        exit 2
+    }
 }
 
 # Get source file info
