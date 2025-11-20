@@ -9,14 +9,18 @@
 ## Clarity and Robustness
 - Scripts and code should be robust, clear, and maintainable.
 - Avoid fragile hacks—prefer explicit, well-documented logic, especially for file handling and parsing (e.g., use `csvtool` for CSVs, not `awk` or `read`).
+- If there is a package, module or something similar that is well written for the purpose perhaps it is better to use that instead of writing a lot of code that needs to be tested.
 
-## Relative Paths for Critical Files
-- All important files (logs, CSVs, hash databases) should use relative paths, and relate to config to reduce ambiguity and ensure scripts work regardless of the current working directory.
+
+## Absolute Paths for Critical Files
+- All important files (logs, CSVs, hash databases) should use absolute paths, not relative ones, to avoid ambiguity and ensure scripts work regardless of the current working directory.
+- The goal is portability between different scripting languages and computers.
 
 ## Centralized Configuration
 - All scripts in one project should source a single config file. For example (`config.conf`) for paths, log locations, and other settings.
 - in some situations it is better to use [project_name].conf instead.
 - No hardcoded paths in scripts — everything should be configurable.
+- There needs to be a config file that gives the important directories, if not all paths are subdirectories of the current working directory.
 
 ## Consistent Naming and Terminology
 - Use clear, consistent terminology.
@@ -43,13 +47,17 @@
 - I run Win 11 with WSL2.
 - I use Zotero 7
 - I run bash, python and powershell scripts.
+- If the project requires many installed packages, consider creating a conda environment for it.
 
 ## Avoid Bloating
-- Do not just add new functions and more code. Perhaps the problem is better solved by changing the old code. Bigger is not better.
+- Do not just add new functions and more code. Perhaps the problem is better solved by changing the old code. 
+- Bigger is not better. Less code is usually a good thing.
+- Perhaps there is a design problem or logical problem that needs to be solved. Not everything should be fixed by adding code. 
 
 ## Commit Messages
 - Use project-wide prefixes in commit messages for consistency:
   - `fix:`, `debug:`, `feature:`, `minor:`, etc.
+- I use github for source control.
 
 ## Documentation
 - Keep documentation up to date with the codebase, especially when changing workflows, file names, or conventions. 

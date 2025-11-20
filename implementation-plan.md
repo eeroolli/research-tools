@@ -1,4 +1,66 @@
+## Daemon controls and stability (next steps)
+
+- Add CLI controls to `scripts/paper_processor_daemon.py`:
+  - `--status`: print running/not and PID; exit 0/1 accordingly
+  - `--stop`: read `.daemon.pid`, SIGTERM, wait N seconds, SIGKILL if needed; clear PID
+  - `--force-stop`: `pkill -f scripts/paper_processor_daemon.py`; clear PID
+  - `--restart`: stop + start
+
+- Harden shutdown path:
+  - Single `shutdown()` used by SIGINT/SIGTERM and menu exits
+  - Stop watcher/services, remove `.daemon.pid`, flush logs
+  - Add `atexit` fallback to remove `.daemon.pid`
+
+- Keep PID file accurate:
+  - Periodically (e.g., every 30s) rewrite `.daemon.pid` while running
+  - Log (debug) on write failure
+
+- Optional (WSL/DrvFS reliability):
+  - Auto-use `PollingObserver` when `watch_dir` is under `/mnt/*`
+  - Handle `on_moved` events as creates (common on Windows scanners)
+
+- Windows helper scripts:
+  - `scripts/start_scanner_daemon_restart.vbs` → Restart daemon (recommended before scanning session)
+  - `scripts/start_scanner_daemon_quiet.vbs` → Silent post-scan trigger (used by Epson Capture Pro)
+  - `scripts/stop_scanner_daemon.bat` → calls WSL `--stop` (future enhancement)
+
+Notes:
+- Start with CLI stop/status for immediate operability; others can follow incrementally.
 # Research-Tools Implementation Plan
+
+Last updated: 2025-11-03
+Related spec: `IMPLEMENT_ATTACH_TO_EXISTING.md` (feature behavior)
+
+At a glance:
+- Completed: Paper daemon end-to-end, attach workflows, publications-first reuse, linked-path normalization, skip-attach, metadata editing workflow, config path normalization, JSTOR support, arXiv URL fixes, enhanced UX (Nov 30, 2025), PDF border removal and rotation (Nov 3, 2025)
+- In Progress: Smart preprocessing/classification, sampling/validation, document profiler
+- Next: OpenAlex/PubMed integration, unified metadata manager, test harness expansion
+- Backlog: Local Zotero DB integration, advanced caching, hybrid photo pipeline, auto document-type detection (low priority)
+
+## User-Centric Processing Stages (Single Flow View)
+
+1) Intake & Identification — DONE
+- Extract identifiers (DOI/URL/arXiv/JSTOR) via regex; quick local Zotero search by authors/year/title.
+
+2) User Confirmation — DONE
+- User confirms document type (manual); selects/edits authors/title/year as needed.
+
+3) Metadata Enrichment — DONE
+- Online search (CrossRef, arXiv; ISBN lookup for book chapters when applicable) with Ollama fallback when needed; show all results, allow selection/merge/edit.
+  - Book chapter UX flow: confirm document type → prompt for book title/editor (allow using chapter authors as possible editors) → run ISBN/title+editor lookup via DetailedISBNLookupService → normalize to Zotero fields.
+
+4) Normalization — PARTIAL / NEXT
+- Authors: semicolon-separated display, interactive edits (DONE)
+- Journals/Publishers: curated lists derived from local Zotero, alias normalization, fuzzy-suggest in prompts (NEW – planned)
+
+5) Filenaming & Placement — DONE
+- Filenames from final metadata; publications-first identical reuse; conflict menu (`_scanned`, `_scanned2`).
+
+6) Zotero Write — DONE
+- Create or attach; linked-file paths normalized (WSL→Windows); optional skip-attach.
+
+7) Optional AI Assist — LOW PRIORITY / BACKLOG
+- First-page AI classification/OCR correction; only if needed in the future.
 
 **Date:** September 2025  
 **Purpose:** Comprehensive plan for completing research-tools system  
@@ -23,12 +85,86 @@
 - **CSV logging system** - Converted from JSON to CSV for better data analysis
 - **Environment cleanup** - Removed unused dependencies for leaner setup
 - **Data structure cleanup** - Consolidated scattered data directories and logs
+- **Complete interactive paper processing workflow** - Full daemon with metadata extraction and Zotero integration
+- **Enhanced 3-step UX workflow** - Sophisticated workflow for attaching PDFs to existing Zotero items
+- **Metadata comparison system** - Side-by-side comparison with field-by-field merging
+- **PDF attachment system** - Complete PDF handling with conflict resolution
+  - Publications-first identical reuse (size-then-hash) implemented
+  - Windows path normalization for linked files (WSL → Windows absolute paths)
+  - Attachment title uses filename for clarity in Zotero
+  - Optional skip-attachment flow (create item without attaching PDF)
+- **GROBID Integration** - Advanced academic paper metadata extraction using GROBID
+- **Smart Author Extraction** - Page-limited processing (first 2 pages) to avoid citation pollution
+- **Document Type Detection** - Automatic classification of academic documents (journal articles, books, conferences, etc.)
+- **Enhanced Metadata Extraction** - Keywords, publisher, volume, issue, pages, language, conference info
+- **Automatic Language Detection** - Detects language from filename prefix (NO_, EN_, DE_, FI_, SE_) and automatically adds to Zotero items (new items and updates existing items if language field is missing)
+- **Author Validation System** - Recognizes all authors in user's Zotero via lastname matching with alternatives
+- **Journal Validation System** - `JournalValidator` recognizes and validates journals against Zotero collection with OCR correction, integrated into paper processor daemon
+- **Path Utilities Refactoring** - Consolidated path handling methods, eliminated code duplication, improved maintainability (see `archive/REFACTORING_PLAN.md`)
+
+### 🚧 **In Progress:**
+- Smart preprocessing and evidence-based classification for Ollama optimization
+- Sample testing and validation (20 PDFs per type)
+- Document profiler implementation
+
+### ▶️ **Next:**
+- Unified metadata manager scaffolding and tests
+- End-to-end sampling harness (20 PDFs per type)
+- Publisher normalization from local Zotero (dictionary + alias + fuzzy suggest)
+
+### 🗂️ **Backlog (Ideas/Future):**
+- Local Zotero SQLite performance integration with schema guardrails
+- Persistent file hash cache for re-hash avoidance
+- Batch local lookups for speed and prefetching
+- CI test data fixtures and baseline performance metrics
+- Automatic document type detection (low priority; manual selection in UX suffices)
+
+### 📌 **Recently Completed:**
+- **Path Utilities Refactoring** (Latest)
+  - Consolidated path handling methods in `paper_processor_daemon.py`
+  - Eliminated duplicate `_windows_to_wsl_path()` method
+  - Generalized script path helper `_get_script_path_win()` for any PowerShell script
+  - Made `_normalize_path()` static method for standalone usage
+  - Updated `_to_windows_path()` to use robust PowerShell helper with fallback
+  - All changes maintain backward compatibility
+  - Comprehensive test suite: `tests/test_all_refactoring_steps.py`
+  - See `archive/REFACTORING_PLAN.md` for details
+
+- **PDF Border Removal and Rotation** (Nov 3, 2025)
+  - `BorderRemover` class for removing dark borders from scanned PDFs using projection profile analysis
+  - `PDFRotationHandler` for detecting and correcting PDF rotation (90°, 180°, 270°)
+  - Integrated with `paper_processor_daemon.py` and GROBID client
+  - Performance: 5-8x faster than unpaper with similar quality
+  - Clean production structure: `shared_tools/pdf/` with archived development docs in `archive/pdf/`
+
+- **October 2025:**
+  - Hash-based duplicate detection during copy/name collisions
+  - Global publications-first identical reuse before copy
+  - Robust attach path handling and messaging
+  - Ability to create item without attaching a PDF
+  - Metadata editing workflow fully wired to menu actions
+  - Config path normalization - supports both WSL (/mnt/g/...) and Windows (G:\...) path formats
+  - File copy functions handle both WSL and Windows path formats seamlessly
+  - OpenAlex API integration - DOI lookup and metadata search with CrossRef fallback
+  - PubMed API integration - Complete with DOI lookup and metadata search
+  - Config-driven API priority system - Users can customize API order in config.personal.conf
+  - **Extraction flow optimization** - GREP-first approach (fast identifier extraction + API lookup) before GROBID fallback (2-4 seconds vs 5-10+ seconds for papers with DOIs)
+  - **Centralized DOI normalization** - `IdentifierValidator.normalize_doi()` used by all API clients for consistent DOI cleaning
+  - **Manual DOI entry in metadata editor** - Always available, independent of Zotero items, with validation and optional metadata fetching
+  - **Tags display enhancement** - Tags fetched from Zotero database and displayed first when selecting existing items
+  - **DOI OCR error handling** - Handles OCR variants like "DO!", "DO1", "DOl" in identifier extraction
+  - **ISSN preference** - Online ISSN preferred over print ISSN when both exist
+  - **JSTOR identifier extraction** - JSTOR stable URL IDs now extracted separately from generic URLs, automatically classified as journal articles
+  - **arXiv URL misclassification fix** - Enhanced arXiv extraction with proximity checks and subject whitelist to prevent false positives (e.g., JSTOR URLs)
+  - **Improved identifier separation** - JSTOR URLs excluded from generic URL extraction to prevent confusion and double-counting
+  - **Enhanced Zotero item selection UX** - Added metadata review step before attachment with options to edit, proceed, or go back
+  - **UX flow optimization** - Eliminated duplicate code in item selection, streamlined metadata display
+  - **Automatic language detection from filenames** - Detects language prefix (NO_, EN_, DE_, FI_, SE_) and automatically adds to Zotero items when creating new items or updating existing ones with missing language field
 
 ### ❌ **Not Completed:**
 - Detailed migration tasks from `archive/AI_CHAT_DOCUMENTS.md` (Phases 2-4)
 - Unified metadata system with smart routing
-- AI-driven paper processing enhancement
-- Academic paper APIs (OpenAlex, CrossRef, PubMed, arXiv)
+- Smart preprocessing Phase C-E implementation
 
 ## Primary Use Case: Paper Scanning Workflow
 
@@ -53,11 +189,12 @@
 ### **Phase 0: Data Structure Cleanup** 🧹
 *Consolidate scattered data directories and logs*
 
-#### 0.0 Ollama Installation and Setup
-- [ ] **Install Ollama** - Local AI for privacy-sensitive processing
-- [ ] **Configure models** - llama2, codellama, mistral for different tasks
-- [ ] **Environment setup** - GPU acceleration with Intel UHD Graphics 630
-- [ ] **Integration testing** - Verify Ollama works with research-tools system
+#### 0.0 Ollama Installation and Setup ✅
+- [x] **Install Ollama** - Local AI for privacy-sensitive processing (v0.12.3)
+- [x] **Configure models** - llama2:7b installed and tested
+- [x] **Environment setup** - CPU-based (Intel GPU has limited LLM support)
+- [x] **Integration testing** - Verified Ollama works, discovered hallucination issues
+- [x] **Smart workflow** - Created optimized extraction: regex → API → Ollama fallback (60-100x faster for papers with DOI)
 
 #### 0.1 Consolidate Data Directories ✅
 - [x] **Remove duplicate data directories** - process_books/data/, process_papers/data/, scripts/data/
@@ -66,6 +203,166 @@
 - [x] **Test functionality** - Ensure all scripts work with new structure
 - [x] **Migrate legacy data** - Copied 66 book records + 25+ log files from scanpapers
 - [x] **Convert legacy data** - JSON to CSV conversion for compatibility
+
+#### 0.2 Smart Paper Processing System ✅
+*Optimized paper metadata extraction with validation*
+
+- [x] **Identifier Extraction** - Fast regex-based DOI/ISSN/ISBN/**arXiv ID**/**JSTOR ID**/URL extraction (1-2 seconds)
+- [x] **Identifier Validation** - ISSN/ISBN checksum validation, DOI/arXiv/URL format validation, hallucination detection
+- [x] **CrossRef API Client** - Full Zotero fields: title, authors, journal, volume, issue, pages, abstract, tags
+- [x] **arXiv API Client** - Preprint metadata with categories, abstracts, DOI of published versions
+- [x] **Ollama Integration** - Fallback AI for papers without identifiers (available; low priority to use — GROBID sufficient for now)
+- [x] **Smart Workflow** - Priority: DOI → arXiv → JSTOR → ISBN → URL/Ollama → Nothing/Ollama
+- [x] **Testing Framework** - pytest with 25 unit tests for validation
+- [x] **Performance** - 60-100x faster for papers with DOIs/arXiv IDs (1s vs 120-180s)
+- [x] **Code Organization** - Prototypes in `scripts/prototypes/`, production in `shared_tools/`, analysis in `scripts/analysis/`
+- [x] **Configuration Management** - CrossRef email in config files (polite pool), auto-activation of conda environment
+- [x] **Context-Aware Prompts** - Comprehensive Ollama prompts with international date formats, multilingual support
+- [x] **Book Chapter Support** - Extracts chapter + book metadata, uses repeating headers as valuable clues
+- [x] **User-Facing Script** - `scripts/process_scanned_papers.py` with done/failed directories and CSV logging
+
+#### 0.3 Evidence-Based Document Classification 🔬
+*Intelligent preprocessing and classification for Ollama optimization*
+
+##### Current Approach (Implemented):
+- Regex finds identifiers (DOI, ISBN, URL)
+- If found → Fast API lookup (1-2s)
+- If not found → Ollama fallback (120-180s)
+
+##### Optimization Strategy (Planned):
+**Problem**: Ollama searches for identifiers we know don't exist, wastes time/effort
+
+**Solution**: Preprocessing + targeted prompts based on document characteristics
+
+**Phase A: Evidence-Based Analysis** ✅
+- [x] **Analyze existing collection** - 17,490 Zotero items analyzed in 40 seconds
+- [x] **Extract patterns** - Discovered clear patterns by document type:
+  * **Journal articles**: 32.3% have DOI, 87.4% have pages field (1,600 items)
+  * **Book chapters**: 0% have DOI, 81.7% have pages field (1,052 items) 
+  * **Newspaper articles**: 50% have URL, 54.8% have PDFs (42 items)
+  * **Reports**: 56.8% have pages field, 38.2% have PDFs (838 items)
+  * **Thesis**: 12.2% have PDFs (188 items)
+- [x] **Discovered orphaned PDFs** - Only 11 out of 1,950 attachments (well-organized library!)
+- [ ] **Build classifier rules** - Evidence-based heuristics from discovered data
+
+**Phase B: Test Smaller Model**
+- [ ] **Install llama3.2:3b** - 3x faster for simple classification
+- [ ] **Compare performance** - Classification speed/accuracy vs llama2:7b
+- [ ] **Decide on model** - Speed vs accuracy tradeoff
+
+**Phase C: Smart Preprocessing**
+- [ ] **Document profiling** - Extract metadata before Ollama:
+  * Page count
+  * Word count
+  * Has URL? (from regex)
+  * Has identifiers? (from regex)
+  * Text patterns (Chapter, Abstract, Submitted, etc.)
+  * Language detection
+  * Repeating text detection (headers/footers)
+- [ ] **Classification hints** - Pass to Ollama:
+  * "Likely NEWS ARTICLE (2 pages, URL found, no DOI/ISBN)"
+  * "Likely BOOK CHAPTER (15 pages, repeating headers, no identifiers)"
+  * "Likely REPORT (45 pages, no URL, no identifiers)"
+- [ ] **Targeted prompts** - Don't ask Ollama for what can't exist:
+  * News articles: Skip DOI/ISBN search, focus on "By [Author]" pattern
+  * Book chapters: Skip DOI/URL, focus on chapter+book metadata, use headers
+  * Reports: Skip URL, focus on organization, report number, ISSN
+
+**Phase D: Multi-Page Extraction**
+- [ ] **Extract 2-3 pages** - Makes repeating headers obvious
+- [ ] **Pattern detection** - Identify what repeats (book title vs chapter title)
+- [ ] **Better context** - More data for Ollama to work with
+
+**Phase E: Iterative Testing & Validation**
+- [ ] **Move orphaned PDFs** - 11 PDFs from Zotero to scanner for testing
+- [ ] **Random sampling** - Select 20 random PDFs per document type from existing collection
+- [ ] **Process sample** - Run smart workflow on samples (~400 PDFs total)
+- [ ] **Quality validation** - Compare extracted metadata vs Zotero metadata
+  * Measure accuracy: title match, author match, year match, type detection
+  * Identify systematic errors and hallucinations
+  * Calculate success rates by document type
+- [ ] **Iterate improvements** - Fix issues, refine prompts, adjust rules
+- [ ] **Scale testing** - Once quality is good, test with 100 per type
+- [ ] **Production readiness** - Deploy when accuracy > 90% on sample
+
+**Phase F: Metadata Enrichment** (Future)
+- [ ] **Enrich existing Zotero items** - Add missing abstracts, keywords, tags
+- [ ] **Batch processing** - Process items with incomplete metadata
+- [ ] **Quality improvement** - Fill gaps in existing collection
+- [ ] **Smart updates** - Only update if new data is higher quality
+
+**Expected Results:**
+- Faster Ollama processing (60-90s vs 120-180s)
+- Higher accuracy (focused extraction)
+- Better book chapter handling (headers used correctly)
+- Validated quality through comparison with known data
+- Scalable to commercial use (evidence-based, not guesswork)
+
+#### 0.4 Repository Cleanup and Refactoring ✅
+*Clean codebase, remove unused code, and reorganize module structure*
+
+**Phase 0.4A: Deleted Unused Code** ✅ COMPLETED (January 2025)
+- [x] **Removed unused national library system** - `shared_tools/api/national_libraries.py` (467 lines - verified no imports)
+- [x] **Removed unused process_papers module** - Entire `process_papers/` directory (old paper processing structure)
+- [x] **Removed prototype scripts** - `scripts/prototypes/` directory (6 development test files)
+- [x] **Removed obsolete test files** - 3 test files for deleted modules
+- [x] **Removed temporary debug files** - `test_isbn_detection.py`, `test_ollama_startup.py`, `test_filename_patterns.py`
+- [x] **Removed old backup directory** - `data_backup_20251003_150957/`
+- [x] **Removed duplicate documentation** - `chat_about_interactive_paper_processor(000).md`
+
+**Impact:** ~30 files deleted, ~3000+ lines of code removed, cleaner repository structure
+
+**Phase 0.4B: Module Refactoring** ✅ COMPLETED (october 2025)
+- [x] **Created shared_tools/extractors/** - Moved ISBN extraction from process_books
+- [x] **Created shared_tools/processors/** - Moved image processing from process_books
+- [x] **Consolidated utilities** - Moved file_manager, thread_pool_manager, cpu_monitor to shared_tools/utils
+- [x] **Updated imports** - Fixed `scripts/find_isbn_from_photos.py` to use new paths
+- [x] **Verified functionality** - Tested all imports work correctly
+- [x] **Removed old structure** - Deleted process_books/ directory after successful migration
+
+**New Structure:**
+```
+shared_tools/
+├── extractors/
+│   └── isbn_extractor.py
+├── processors/
+│   └── smart_integrated_processor_v3.py
+├── pdf/
+│   ├── border_remover.py
+│   └── pdf_rotation_handler.py
+└── utils/
+    ├── file_manager.py
+    ├── thread_pool_manager.py
+    ├── cpu_monitor.py
+    ├── isbn_matcher.py
+    ├── identifier_extractor.py
+    └── identifier_validator.py
+```
+
+**Phase 0.4C: PDF Module Cleanup** ✅ COMPLETED (November 3, 2025)
+- [x] **Border removal implementation** - Clean, production-ready `BorderRemover` class
+- [x] **Rotation handler** - `PDFRotationHandler` for GROBID integration
+- [x] **Archive consolidation** - Moved all development docs to `archive/pdf/border_removal/`
+- [x] **Clean structure** - 4 production files in `shared_tools/pdf/` matching `utils/` pattern
+- [x] **Production verification** - All imports and functionality tested
+
+**Impact:** Better module organization, clearer architecture, easier maintenance
+
+**Phase 0.4D: Testing Infrastructure** 🚧 PLANNED
+- [ ] **Create pytest configuration** - Set up proper test framework
+- [ ] **Add test fixtures** - Sample PDFs, images, API responses
+- [ ] **Core unit tests** - ISBN extraction, matching, file management
+- [ ] **Image processing tests** - OCR strategies, rotation handling
+- [ ] **API integration tests** - CrossRef, arXiv, national libraries
+- [ ] **End-to-end workflow tests** - Complete book and paper processing
+- [ ] **Set up CI/CD** - Automated testing (optional)
+
+**Target Coverage:**
+- Core utilities: > 90%
+- ISBN processing: > 85%
+- Image processing: > 75%
+- API integration: > 70%
+- Workflows: > 60%
 
 ### **Phase 1: Complete Configuration-Driven System** 🚧
 *Extend current working system with remaining APIs*
@@ -82,10 +379,11 @@
 - [x] **Environment cleanup** - Removed unused dependencies for leaner setup
 
 #### 1.1 Add Academic Paper APIs
-- [ ] **OpenAlex API** (200M+ papers, comprehensive academic metadata)
-- [ ] **CrossRef API** (130M+ scholarly works, DOI-based)
-- [ ] **PubMed API** (35M+ biomedical papers)
-- [ ] **arXiv API** (2M+ preprints, physics/math)
+- [x] **OpenAlex API** (200M+ papers, comprehensive academic metadata) - ✅ Implemented (Oct 29, 2025) with DOI lookup and search
+- [x] **CrossRef API** (130M+ scholarly works, DOI-based) - ✅ Implemented with full Zotero fields
+- [x] **PubMed API** (35M+ biomedical papers) - ✅ Implemented (Oct 29, 2025) with DOI lookup and search
+- [x] **arXiv API** (2M+ preprints, physics/math) - ✅ Implemented with categories and abstracts
+- [x] **Config-driven API priority system** - ✅ Implemented (Oct 29, 2025) - Users can set API priorities in config
 
 #### 1.2 Enhanced Configuration
 - [ ] Split config into `books_metadata_config.yaml` and `papers_metadata_config.yaml`
@@ -108,10 +406,11 @@ def search_metadata(identifier):
         return unified_manager.search_all_sources(identifier)
 ```
 
-#### 2.2 Auto Zotero Type Detection
+#### 2.2 Auto Zotero Type Detection (Low Priority)
 - [ ] Map metadata source to appropriate Zotero item type
 - [ ] Handle edge cases (reports with ISBN+ISSN, conference proceedings)
 - [ ] Implement confidence scoring for metadata quality
+Note: Functionally covered by Stage 2 (manual confirmation). Keep as backlog optimization.
 
 #### 2.3 Unified Manager Interface
 ```python
@@ -124,96 +423,200 @@ class UnifiedMetadataManager:
         """Search all sources and rank results"""
         pass
 ```
+Note: Manager work should support Stage 3 (metadata enrichment) and Stage 4 (normalization) without duplicating UI flow logic.
 
-### **Phase 3: AI-Driven Paper Processing** 🆕
+### **Phase 3: AI-Driven Paper Processing** 🆕 (Low Priority components consolidated)
 *Enhance paper processing with AI capabilities*
 
-#### 3.1 First Page Processing (Paper Scanning Workflow)
-- [ ] OCR/AI processing of first page for paper identification
-- [ ] Extract DOI, title, authors, abstract from first page
+#### 3.1 First Page Processing (Paper Scanning Workflow) (Low Priority)
+Note: Largely covered by GROBID already (title/authors/venue/year from first pages). Additional AI here is optional.
+- [x] OCR/AI processing of first page for paper identification
+- [x] Extract DOI, title, authors, abstract from first page
 - [ ] Smart identification strategy (DOI → Title+Authors → Abstract keywords)
 - [ ] Handle multiple identification methods with confidence scoring
 - [ ] **Hybrid AI approach** - Claude for complex reasoning, Ollama for privacy-sensitive data
 - [ ] **Fallback strategy** - Use both AI systems for redundancy and accuracy
 
-#### 3.2 AI-Enhanced OCR
+#### 3.2 AI-Enhanced OCR (Low Priority)
 - [ ] LLM-based text correction for OCR errors
 - [ ] Context-aware metadata extraction
 - [ ] Language detection and processing
-- [ ] **Ollama integration** - Local AI for OCR text correction and metadata parsing
-- [ ] **Claude integration** - Cloud AI for complex reasoning and high-accuracy extraction
+  - [x] **Ollama integration (optional)** - Local AI for OCR text correction and metadata parsing (low priority)
+- [ ] **GROBID integration** 
 
-#### 3.3 Smart Annotation Processing
+#### 3.3 Smart Annotation Processing (Low Priority)
 - [ ] AI-powered annotation separation (handwritten notes, highlights)
 - [ ] Keyword extraction from annotations
 - [ ] Question and note identification
 
-#### 3.4 AI Metadata Enhancement
+#### 3.4 AI Metadata Enhancement (Low Priority)
 - [ ] Fill missing metadata fields using AI
 - [ ] Validate and correct extracted metadata
 - [ ] Suggest tags and categories based on content
-- [ ] **Dual AI validation** - Cross-check results between Claude and Ollama
+- [ ] **Dual AI validation** - Cross-check results between GROBID and Ollama
 - [ ] **Confidence scoring** - Rate metadata quality from each AI system
 
-### **Phase 4: Paper Scanning Workflow** 📄
-*New dedicated workflow for academic papers using Ollama 7B*
 
-#### 4.1 Paper Processing Architecture
-- [ ] **Create `scripts/process_scanned_papers.py`** - New paper workflow script
-- [ ] **Extend existing `DetailedISBNLookupService`** - Add academic paper APIs
-- [ ] **Reuse Zotero integration** - Leverage existing `ZoteroAPIBookProcessor` code
-- [ ] **Shared utilities** - Common OCR, file management, logging functions
+### **Phase 4: Paper Scanning Workflow** 🚧
+*New dedicated workflow for academic papers - DETAILED SPECIFICATION COMPLETE*
 
-#### 4.2 Ollama 7B Integration
-- [ ] **Identifier extraction** - Extract DOI, title, authors, journal, year from first page
-- [ ] **OCR text cleaning** - Handle messy OCR output with AI
-- [ ] **Structured output** - Return JSON with extracted identifiers
-- [ ] **Fallback strategies** - Multiple extraction approaches if primary fails
+**Status:** 🚧 **Ready for Implementation** - Detailed specification in `daemon_implementation_spec.md`
 
-#### 4.3 Academic Metadata Lookup
-- [ ] **CrossRef API integration** - DOI-based paper lookup
-- [ ] **PubMed API integration** - Medical/biological papers
-- [ ] **arXiv API integration** - Preprints and technical papers
-- [ ] **OpenAlex API integration** - Comprehensive academic database
-- [ ] **Smart routing** - Route queries to appropriate APIs based on identifiers
+**Architecture Decision:** Daemon-based real-time processing triggered by Epson scanner
 
-#### 4.4 File Management System
-- [ ] **PDF processing** - Extract first page for OCR
-- [ ] **File renaming** - `Author_Year_Title.pdf` format
-- [ ] **Directory organization** - Store in `g:/publications/` structure
-- [ ] **Zotero linking** - Attach renamed files to Zotero items
+#### 4.1 Paper Processing Architecture ✅
+- [x] **Architecture designed** - File-watching daemon with smart launcher
+- [x] **Folder structure defined** - `I:\FraScanner\papers\` with done/failed subdirectories
+- [x] **Integration points identified** - Reuses existing `PaperMetadataProcessor` and config system
+- [x] **Shared utilities planned** - Common OCR, file management, logging functions
 
-#### 4.5 Workflow Integration
-- [ ] **Separate but similar** - Books and papers use same underlying systems
-- [ ] **Configuration sharing** - Reuse existing config system
-- [ ] **Logging consistency** - Same CSV logging format
-- [ ] **User interface** - Similar interaction patterns
+#### 4.2 Daemon System Design ✅
+- [x] **Smart launcher** - `scripts/start_paper_processor.py` (idempotent, Epson-triggered)
+- [x] **File watcher daemon** - `scripts/paper_processor_daemon.py` (watchdog-based)
+- [x] **Clean shutdown** - `scripts/stop_paper_processor.py` (signal handling)
+- [x] **PID management** - Process tracking and stale file cleanup
+- [x] **Implementation complete** - All daemon components implemented (Oct 11, 2025)
+
+#### 4.3 Zotero Integration for Papers ✅
+- [x] **Zotero processor designed** - `shared_tools/zotero/paper_processor.py`
+- [x] **Duplicate detection** - By DOI and title similarity
+- [x] **Item type detection** - Journal article, conference paper, book chapter, etc.
+- [x] **PDF linking** - Linked files to `G:\my Drive\publications\` with Windows path normalization
+- [x] **Metadata mapping** - Our format → Zotero format
+- [x] **API integration complete** - paper_processor.py implemented (Oct 11, 2025)
+- [x] **Local DB search complete** - local_search.py for fast fuzzy matching (Oct 11, 2025)
+- [x] **Dual access pattern** - Read from local DB, write through API
+
+#### 4.4 File Management System ✅
+- [x] **PDF processing** - Extract first page for metadata (reuses existing code)
+- [x] **File renaming** - `Author_Year_Title.pdf` format (implemented in process_scanned_papers.py)
+- [x] **Directory organization** - Store in `G:\my Drive\publications\` (single folder for now)
+- [x] **Original preservation** - Move to `done/` folder with scanner filename (also after identical reuse or skip-attach)
+- [x] **Border removal** - `BorderRemover` integrated into paper processor daemon with interactive detection and removal workflow (Nov 3, 2025)
+- [ ] **Extraction to shared module** - Move common functions to `shared_tools/papers/file_manager.py`
+
+#### 4.5 Workflow Integration 🚧
+- [x] **Separate workflows** - Books and papers use same underlying systems but different entry points
+- [x] **Configuration sharing** - Reuse existing config system (config.personal.conf)
+- [x] **Logging consistency** - Extend CSV logging with Zotero fields
+- [x] **Scanner integration** - Epson Capture Pro jobs configured with language prefixes (NO_, EN_, DE_) and orientations (Portrait/Landscape), post-scan action triggers quiet.vbs
+- [x] **Conference detection** - conference_detector.py for presentations (Oct 11, 2025)
+- [x] **Interactive menu** - PENDING: Add to process_scanned_papers.py (NEXT SESSION)
+- [ ] **Testing** - End-to-end testing with real scanner
+
+#### 4.6 User Workflow (Target) ✅
+**Current Workflow:**
+```
+1. Start daemon (run start_scanner_daemon_restart.vbs)
+2. Turn on scanner
+3. Put paper in scanner
+4. Open Epson Capture Pro
+5. Click job (Language/Orientation)
+6. Scan document
+7. Save document (to scanner folder)
+8. Epson triggers quiet.vbs (silently)
+9. Terminal opens with PDF info
+10. Make choices & edit metadata
+11. Metadata (tags etc) saved to Zotero
+12. PDF saved to publications folder (with new name or not)
+13. PDF linked to Zotero item
+14. Done - Recycle paper, ready for next scan
+```
+
+**See SCANNER_SETUP.md for detailed configuration and workflow.**
+
+**Target timing:** 5-10 seconds for papers with DOI/arXiv, 65-130 seconds for papers needing Ollama
+
+#### 4.7 Interactive Menu System ✅ COMPLETE
+**Status:** ✅ **COMPLETE** - Full interactive workflow implemented (Oct 29, 2025)
+
+**Complete UX Flow:**
+- ✅ **Year Confirmation Page**: Conflict detection, multi-source validation (GREP, GROBID/API), manual entry
+- ✅ **Document Type Selection**: Auto-detection with confirmation, comprehensive type menu
+- ✅ **Universal Metadata Display**: Smart field grouping and intelligent formatting for any document type
+- ✅ **Document Type Awareness**: Shows relevant fields for journal articles, book chapters, conference papers, books, legal docs, etc.
+- ✅ **Author Selection Page**: Interactive selection with letters, Zotero recognition, paper counts, edit/delete/add
+- ✅ **Metadata Source Flexibility**: Works with Zotero local, CrossRef API, arXiv, national libraries, OCR extraction, manual entry
+- ✅ **Future-Proof Design**: Automatically displays new fields without code changes
+- ✅ **Enhanced User Experience**: Grouped, formatted, intelligent display with proper field labeling
+- ✅ **Interactive Menu**: Complete menu system with user choices (use as-is, edit, search Zotero, skip, manual processing)
+- ✅ **Failed Extraction Workflow**: Guided manual metadata entry for failed extractions
+- ✅ **Metadata Editing**: ✅ **COMPLETE** (Oct 29, 2025) - Fully wired to edit menu action with re-search capability, OCR correction
+- ✅ **Online Search Integration**: CrossRef, arXiv, PubMed, OpenAlex search during metadata editing and item attachment
+- ✅ **3-Step Zotero Workflow**: Enhanced workflow for attaching PDFs to existing Zotero items
+- ✅ **Metadata Comparison**: Side-by-side comparison with 6 user options
+- ✅ **Tags Integration**: Full integration with existing tag system
+- ✅ **PDF Attachment**: Complete PDF handling with conflict resolution, publications-first reuse, and optional skip-attach
+- ✅ **Navigation**: Back, restart, quit options throughout workflow
+
+**Completed Implementation:**
+- ✅ **Task 7**: Complete Zotero match selection with 3-step UX flow
+- ✅ **Task 8**: API methods for PDF attachment and author search
+- ✅ **Enhanced UX**: 6 options for metadata handling including manual processing
+- ✅ **Production Ready**: Full error handling and file management
+- ✅ **Oct 29, 2025**: Connected edit metadata action to edit_metadata_interactively method
+- ✅ **Nov 3, 2025**: Comprehensive UX flow documented in PAPER_PROCESSOR_UX_FLOW.md
+
+#### 4.8 Enhanced 3-Step Zotero Workflow ✅ COMPLETE
+**Status:** ✅ **COMPLETE** - Full 3-step UX workflow implemented (Oct 14, 2025)
+
+**Step 1: Metadata Comparison**
+- Side-by-side display of extracted vs Zotero metadata
+- Difference highlighting for key fields (title, authors, year, journal, DOI)
+- 6 user options:
+  - Use extracted metadata (replace in Zotero, keep Zotero tags)
+  - Use Zotero metadata as-is (keep existing item unchanged)
+  - Merge both (field-by-field comparison)
+  - Edit manually
+  - Manual processing later (too similar to decide)
+  - Create new Zotero item from extracted metadata
+
+**Step 2: Tags Comparison**
+- Integration with existing `edit_tags_interactively` method
+- Tag groups, online tags, local Zotero tags, custom tags
+- Full tag management with add/remove/clear capabilities
+
+**Step 3: PDF Attachment**
+- PDF conflict detection and resolution
+- User choices: keep both/replace/cancel
+- Smart filename generation using Zotero metadata
+- Duplicate file handling with `_scanned` suffix
+- Complete file management and cleanup
+- Zotero API integration for PDF attachment
+
+**Key Benefits:**
+- **Flexible Workflow**: Handles all scenarios from exact matches to ambiguous cases
+- **User Control**: Fine-grained control over metadata, tags, and PDF handling
+- **Error Prevention**: Manual processing option prevents mistakes with similar items
+- **Production Ready**: Comprehensive error handling and logging
+- **Reusable Components**: Leverages existing metadata display and tag systems
+
 
 ### **Phase 5: Detailed Migration Tasks** 📋
 *From archive/AI_CHAT_DOCUMENTS.md - migrate existing hardcoded systems*
 
 #### 5.1 Book Processing Migration
-- [ ] **File:** `process_books/scripts/enhanced_isbn_lookup_detailed.py`
-  - **Action:** Replace hardcoded national library calls with config-driven manager
-  - **Status:** Uses old hardcoded system, needs migration
-
-- [ ] **File:** `process_books/scripts/zotero_api_book_processor_enhanced.py`
-  - **Action:** Update to use new unified metadata system
-  - **Status:** Uses old hardcoded system, needs migration
-
-- [ ] **File:** `process_books/src/integrations/legacy_zotero_processor.py`
-  - **Action:** Update to use new system
-  - **Status:** Uses old hardcoded system, needs migration
+- [ ] **File:** `scripts/add_or_remove_books_zotero.py` (CURRENT ACTIVE FILE)
+  - **Action:** Replace hardcoded DetailedISBNLookupService class (lines 30-296) with config-driven manager
+  - **Status:** Uses hardcoded API calls to OpenLibrary, Google Books, Norwegian Library - needs migration to shared_tools/api/config_driven_manager.py
+  - **Note:** This is the actual active book processing script after Phase 0.4 cleanup
 
 #### 5.2 Paper Processing Migration
-- [ ] **File:** `process_papers/src/core/metadata_extractor.py`
+- [x] **File:** `process_papers/src/core/metadata_extractor.py` ✅
   - **Action:** Complete integration with config-driven system
-  - **Status:** Partially updated, needs full migration
+  - **Status:** ✅ N/A - Old process_papers/ module deleted. Current paper processing in scripts/paper_processor_daemon.py uses shared_tools/ directly
 
 #### 5.3 Cleanup Phase
-- [ ] **File:** `shared_tools/api/national_libraries.py`
+- [x] **File:** `shared_tools/api/national_libraries.py` ✅
   - **Action:** Delete after migration complete
-  - **Status:** Old hardcoded clients, still exists
+  - **Status:** ✅ DELETED in Phase 0.4A - Old hardcoded clients verified unused
+- [x] **File:** `process_papers/` (entire directory) ✅
+  - **Action:** Delete unused paper processing module
+  - **Status:** ✅ DELETED in Phase 0.4A - Not used, paper processing now in scripts/paper_processor_daemon.py
+- [x] **File:** `test_isbn_detection.py` ✅
+  - **Action:** Delete obsolete test file
+  - **Status:** ✅ DELETED in Phase 0.4A - Temporary debugging file removed
+- [x] **Reference:** See Phase 0.4 for completed cleanup details
 
 ### **Phase 6: Integration & Testing** 🧪
 *End-to-end testing and core functionality validation*
@@ -410,7 +813,165 @@ def process_document_photo(photo_path):
 7. **Paper Workflow**: Ollama 7B vs cloud AI for identifier extraction?
 8. **Hybrid Processing**: Is photo-based document classification worth the complexity?
 
-## Recent Work Completed
+## Completed Features & Current Capabilities
+
+### **Book Processing System** ✅
+*Fully functional with advanced features*
+
+#### Core Functionality
+- **ISBN Extraction**: Barcode detection (pyzbar) + OCR processing (Tesseract)
+- **Smart Image Processing**: SmartIntegratedProcessorV3 with Intel GPU optimization
+- **Multi-Strategy OCR**: 8+ different preprocessing strategies with intelligent fallback
+- **Batch Processing**: Handles multiple photos with intelligent crop detection
+- **Success Tracking**: Moves successful photos to `done/`, failed to `failed/`
+
+#### ISBN Processing Pipeline
+- **Barcode Detection**: 0.6 seconds average, 95% success rate
+- **OCR Processing**: 60-120 seconds with multiple strategies
+- **ISBN Validation**: Enhanced regex patterns with ISBN-10/ISBN-13 conversion
+- **CSV Logging**: Comprehensive logging to `data/books/book_processing_log.csv`
+
+#### Metadata Lookup System
+- **OpenLibrary API**: Books with detailed metadata, subjects, excerpts
+- **Google Books API**: Additional book information, categories
+- **Norwegian National Library API**: Norwegian-specific books, content classes
+- **Smart Scoring**: Combines results from all sources, picks best match
+- **Tag Integration**: Merges metadata tags from all sources
+
+#### Zotero Integration
+- **Multi-Digit Input System**: Combine actions like `17` (group1 tags + update metadata)
+- **Configurable Tag Groups**: group1, group2, group3 from config files
+- **Smart Item Handling**: Different workflows for existing vs new items
+- **Duplicate Detection**: Searches existing library, shows duplicates found
+- **Interactive Menu**: Enhanced menu with action descriptions and differences
+- **Metadata Comparison**: Shows differences between Zotero and online data
+- **Tag Management**: Add/remove tags, combine with metadata tags
+- **Item Updates**: Update author, title, or all metadata fields
+- **Item Removal**: Delete items with confirmation
+
+#### Configuration System
+- **Two-Tier Config**: `config.conf` (public) + `config.personal.conf` (private)
+- **Tag Groups**: Configurable tag groups for different purposes
+- **Action Definitions**: Configurable actions with descriptions
+- **Menu Options**: Configurable display options
+- **API Credentials**: Secure Zotero API key management
+
+#### File Management
+- **Photo Organization**: Automatic sorting into `done/` and `failed/` folders
+- **CSV Logging**: Standardized logging format for analysis
+- **Error Handling**: Comprehensive error logging and retry logic
+- **Path Management**: Relative paths for portability
+
+### **Shared Tools & Infrastructure** ✅
+*Common utilities and services used across the system*
+
+#### ISBN Matching System
+- **ISBNMatcher Class**: Centralized ISBN utilities in `shared_tools/utils/isbn_matcher.py`
+- **Normalization**: Converts ISBN-10 to ISBN-13, handles various formats
+- **Extraction**: Extracts clean ISBN from text with additional info like "(pbk.)"
+- **Validation**: Validates ISBN checksums and formats
+- **Matching**: Enhanced matching with substring approach and format conversion
+
+#### Configuration Management
+- **ConfigParser Integration**: Loads from multiple config files with override logic
+- **Personal Overrides**: `config.personal.conf` overrides `config.conf` settings
+- **Section Support**: TAG_GROUPS, ACTIONS, MENU_OPTIONS, APIS sections
+- **Error Handling**: Graceful fallback when config sections missing
+
+#### Data Structure
+- **Centralized Data Directory**: Single `data/` directory with organized subfolders
+- **CSV Logging**: Converted from JSON to CSV for better analysis
+- **Standardized Fields**: filename, status, isbn, method, confidence, attempts, processing_time, retry_count, timestamp, error
+- **Zotero Fields**: Extended with zotero_decision, zotero_item_key, zotero_action_taken, zotero_timestamp
+
+#### API Integration
+- **Zotero API**: Full CRUD operations (create, read, update, delete)
+- **Rate Limiting**: Built-in delays to respect API limits
+- **Error Handling**: Comprehensive error handling with user feedback
+- **Library Support**: Both user and group libraries supported
+
+### **Development Infrastructure** ✅
+*Tools and processes for development and maintenance*
+
+#### Environment Setup
+- **Conda Environment**: `research-tools` environment with all dependencies
+- **Intel GPU Optimization**: OpenVINO integration for image preprocessing
+- **CPU Throttling**: Global thread pool manager prevents system overload
+- **Dependency Management**: Cleaned up unused dependencies (EasyOCR, PaddleOCR, PyMuPDF)
+
+#### Testing & Debugging
+- **Debug Mode**: Environment variable `DEBUG=1` for verbose output
+- **Process Indicators**: Real-time feedback during processing
+- **Error Logging**: Comprehensive error tracking and reporting
+- **Success Metrics**: Performance tracking and success rate monitoring
+
+#### Code Quality
+- **Modular Design**: Shared utilities and common functions
+- **Error Handling**: Graceful failure with detailed error messages
+- **Code Refactoring**: Eliminated duplication, improved maintainability
+- **Documentation**: Inline comments and docstrings throughout
+
+### **Current Scripts & Functionality** ✅
+*Working scripts and their specific capabilities*
+
+#### `scripts/find_isbn_from_photos.py`
+- **Purpose**: Extract ISBNs from book photos using barcode detection and OCR
+- **Input**: Photos in `/mnt/i/FraMobil/Camera/Books/`
+- **Output**: CSV log with ISBNs and processing details
+- **Features**: 
+  - SmartIntegratedProcessorV3 with Intel GPU optimization
+  - 6 OCR preprocessing strategies with fallback
+  - Automatic photo organization (done/failed folders)
+  - Comprehensive error logging and retry logic
+
+#### `scripts/add_or_remove_books_zotero.py`
+- **Purpose**: Interactive Zotero integration for processed ISBNs
+- **Input**: ISBNs from `data/books/book_processing_log.csv`
+- **Output**: Books added to Zotero with rich metadata
+- **Features**:
+  - Multi-digit input system (e.g., `17` for group1 tags + update metadata)
+  - Configurable tag groups (group1, group2, group3)
+  - Smart item handling (existing vs new items)
+  - Duplicate detection and management
+  - Metadata comparison and updates
+  - Interactive menu with action descriptions
+
+#### `scripts/manual_isbn_metadata_search.py`
+- **Purpose**: Manual ISBN lookup and metadata search
+- **Input**: Single ISBN from user input
+- **Output**: Detailed metadata from multiple sources
+- **Features**:
+  - Interactive ISBN input and validation
+  - Multi-source metadata lookup (OpenLibrary, Google Books, Norwegian Library)
+  - Rich metadata display with tags and abstracts
+  - Zotero integration for adding items
+
+#### `shared_tools/utils/isbn_matcher.py`
+- **Purpose**: Centralized ISBN utilities and matching
+- **Features**:
+  - ISBN normalization (ISBN-10 ↔ ISBN-13)
+  - Clean ISBN extraction from complex text
+  - ISBN validation with checksum verification
+  - Enhanced matching with format conversion
+  - Substring matching for partial ISBNs
+
+### **Data Files & Logs** ✅
+*Current data structure and logging system*
+
+#### `data/books/book_processing_log.csv`
+- **Purpose**: Central log for all book processing activities
+- **Fields**: filename, status, isbn, method, confidence, attempts, processing_time, retry_count, timestamp, error, zotero_decision, zotero_item_key, zotero_action_taken, zotero_timestamp
+- **Usage**: Tracks processing history and Zotero decisions
+
+#### `data/logs/`
+- **Purpose**: Application logs for debugging and monitoring
+- **Content**: Processing logs, error logs, performance metrics
+- **Rotation**: Year-based log rotation for easy management
+
+#### `config.conf` & `config.personal.conf`
+- **Purpose**: Configuration management with personal overrides
+- **Sections**: TAG_GROUPS, ACTIONS, MENU_OPTIONS, APIS
+- **Security**: Personal config not committed to GitHub
 
 ### **OCR Processing Improvements** ✅
 - **CPU Throttling**: Implemented global thread pool manager with CPU monitoring
