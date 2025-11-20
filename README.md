@@ -240,6 +240,7 @@ For detailed technical architecture and development phases, see the [Implementat
 - **Smart Author Extraction** - Page-limited processing to avoid citation pollution
 - **Document Type Detection** - Automatic classification of academic documents
 - **Enhanced Metadata Extraction** - Keywords, publisher, volume, issue, pages, language
+- **Path Utilities Refactoring** - Consolidated path handling, eliminated duplication, improved maintainability
 
 ### 🚧 In Progress
 - Academic metadata APIs (Phase 4)
@@ -283,6 +284,7 @@ This project follows the coding standards defined in `programming_preferences.md
 - **[Ollama Setup](ollama-network-sharing.md)** - Ollama 7B installation and configuration
 - **[GPU Optimization](gpu-optimization-suggestions.md)** - Performance optimization options
 - **[GROBID Setup](GROBID_SETUP.md)** - GROBID integration and configuration guide
+- **[Path Utilities](scripts/PATH_UTILS_README.md)** - WSL/Windows path handling utilities documentation
 
 ## License
 

@@ -100,6 +100,7 @@ At a glance:
 - **Automatic Language Detection** - Detects language from filename prefix (NO_, EN_, DE_, FI_, SE_) and automatically adds to Zotero items (new items and updates existing items if language field is missing)
 - **Author Validation System** - Recognizes all authors in user's Zotero via lastname matching with alternatives
 - **Journal Validation System** - `JournalValidator` recognizes and validates journals against Zotero collection with OCR correction, integrated into paper processor daemon
+- **Path Utilities Refactoring** - Consolidated path handling methods, eliminated code duplication, improved maintainability (see `archive/REFACTORING_PLAN.md`)
 
 ### 🚧 **In Progress:**
 - Smart preprocessing and evidence-based classification for Ollama optimization
@@ -119,6 +120,16 @@ At a glance:
 - Automatic document type detection (low priority; manual selection in UX suffices)
 
 ### 📌 **Recently Completed:**
+- **Path Utilities Refactoring** (Latest)
+  - Consolidated path handling methods in `paper_processor_daemon.py`
+  - Eliminated duplicate `_windows_to_wsl_path()` method
+  - Generalized script path helper `_get_script_path_win()` for any PowerShell script
+  - Made `_normalize_path()` static method for standalone usage
+  - Updated `_to_windows_path()` to use robust PowerShell helper with fallback
+  - All changes maintain backward compatibility
+  - Comprehensive test suite: `tests/test_all_refactoring_steps.py`
+  - See `archive/REFACTORING_PLAN.md` for details
+
 - **PDF Border Removal and Rotation** (Nov 3, 2025)
   - `BorderRemover` class for removing dark borders from scanned PDFs using projection profile analysis
   - `PDFRotationHandler` for detecting and correcting PDF rotation (90°, 180°, 270°)

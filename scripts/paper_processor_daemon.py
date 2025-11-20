@@ -164,8 +164,9 @@ class PaperProcessorDaemon:
         # Check if publications directory is accessible
         self._validate_publications_directory()
     
-    def _normalize_path(self, path_str: str) -> str:
-        """Normalize a path string to WSL format.
+    @staticmethod
+    def _normalize_path(path_str: str) -> str:
+        """Normalize a path string to WSL format (static method).
         
         Handles both WSL paths (/mnt/c/...) and Windows paths (C:\...)
         - Windows paths like "G:\My Drive\publications" -> "/mnt/g/My Drive/publications"
@@ -3827,19 +3828,25 @@ class PaperProcessorDaemon:
         return processor._generate_filename(metadata, original_filename)
 
     def _to_windows_path(self, path: Path) -> str:
-        """Convert WSL /mnt/<drive>/... path to Windows-style X:\\... for linked files.
-        If path is already a Windows path, return as-is.
+        """Convert WSL path to Windows path for linked files.
+        
+        Uses PowerShell utility for robust conversion, handles all path types.
+        If path is already Windows format, returns as-is.
         """
         path_str = str(path)
         # Already Windows style
         if ":\\" in path_str or ":/" in path_str:
             return path_str
-        # WSL mount conversion
-        if path_str.startswith('/mnt/') and len(path_str) > 6:
-            drive_letter = path_str[5].upper()
-            rest = path_str[7:]  # skip '/mnt/<d>/'
-            return f"{drive_letter}:\\" + rest.replace('/', '\\')
-        return path_str
+        # Use helper method for conversion
+        try:
+            return self._convert_wsl_to_windows_path(path_str)
+        except Exception:
+            # Fallback to simple conversion if helper fails
+            if path_str.startswith('/mnt/') and len(path_str) > 6:
+                drive_letter = path_str[5].upper()
+                rest = path_str[7:]
+                return f"{drive_letter}:\\" + rest.replace('/', '\\')
+            return path_str
 
     def _sha256_file(self, file_path: Path, chunk_size: int = 1024 * 1024) -> str:
         """Compute SHA-256 hash of a file efficiently in chunks."""
@@ -4601,8 +4608,8 @@ class PaperProcessorDaemon:
         for i, file_path in enumerate(existing_files, 1):
             self.logger.info(f"  {i}. {file_path.name}")
         
-        choice = input(f"\nProcess existing files? [y/n]: ").strip().lower()
-        if choice != 'y':
+        choice = input(f"\nProcess existing files? [Y/n]: ").strip().lower()
+        if choice and choice != 'y':
             self.logger.info("Skipping existing files.")
             return
         
@@ -7286,22 +7293,6 @@ class PaperProcessorDaemon:
         print("="*70)
         print()
 
-    def _windows_to_wsl_path(self, win_path: str) -> str:
-        """Convert Windows path like G:\\My Drive\\... to WSL /mnt/g/My Drive/..."""
-        if not win_path:
-            return win_path
-        # already WSL
-        if win_path.startswith('/'):
-            return win_path
-        # normalize slashes
-        p = win_path.replace('\\', '/').replace(':/', ':\\').replace('\\', '/')
-        p = win_path.replace('\\', '/')
-        if ":" in p:
-            drive = p.split(':', 1)[0].lower()
-            rest = p.split(':', 1)[1].lstrip('/')
-            return f"/mnt/{drive}/{rest}"
-        return p
-
     def _locate_existing_attachment_for_item(self, item_key: str, zotero_item: dict, metadata: dict) -> dict:
         """Find existing attachment path via Zotero DB; fallback to publications fuzzy match.
         Returns dict with: path (Path), filename, size_mb, modified, windows_path, attachment_key
@@ -7326,7 +7317,7 @@ class PaperProcessorDaemon:
                     for akey, apath in cur.fetchall() or []:
                         if not apath:
                             continue
-                        wsl_path = Path(self._windows_to_wsl_path(apath))
+                        wsl_path = Path(self._normalize_path(apath))
                         if wsl_path.exists():
                             st = wsl_path.stat()
                             return {
@@ -7510,9 +7501,7 @@ class PaperFileHandler(FileSystemEventHandler):
 def normalize_path_for_wsl(path_str: str) -> str:
     """Normalize a path string to WSL format (standalone function for main).
     
-    Handles both WSL paths (/mnt/c/...) and Windows paths (C:\...)
-    - Windows paths like "G:\My Drive\publications" -> "/mnt/g/My Drive/publications"
-    - WSL paths already in correct format are returned as-is
+    This is a wrapper around the static method for backward compatibility.
     
     Args:
         path_str: Path string that may be in WSL or Windows format
@@ -7520,27 +7509,7 @@ def normalize_path_for_wsl(path_str: str) -> str:
     Returns:
         Normalized WSL path string
     """
-    # If already a WSL path (starts with /), return as-is
-    if path_str.startswith('/'):
-        return path_str
-    
-    # If Windows path (contains : or starts with letter), convert to WSL
-    if ':' in path_str or (len(path_str) > 1 and path_str[1].isalpha() and path_str[1] != ':'):
-        # Handle Windows paths like "G:\My Drive\publications" or "G:/My Drive/publications"
-        # Convert backslashes to forward slashes
-        path_str = path_str.replace('\\', '/')
-        
-        # Extract drive letter (first character before :)
-        if ':' in path_str:
-            drive_letter = path_str[0].lower()
-            # Remove drive letter and colon: "G:/My Drive/publications" -> "/My Drive/publications"
-            remainder = path_str.split(':', 1)[1].lstrip('/')
-            # Convert to WSL format: /mnt/g/My Drive/publications
-            wsl_path = f'/mnt/{drive_letter}/{remainder}'
-            return wsl_path
-    
-    # If no clear format, return as-is
-    return path_str
+    return PaperProcessorDaemon._normalize_path(path_str)
 
 
 def main():
