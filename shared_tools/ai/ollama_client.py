@@ -9,6 +9,8 @@ with validation to prevent hallucinations.
 import json
 import subprocess
 import sys
+import configparser
+import requests
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -21,16 +23,48 @@ from shared_tools.utils.identifier_validator import IdentifierValidator
 class OllamaClient:
     """Client for Ollama-based paper metadata extraction."""
     
-    def __init__(self, model_name: str = "llama2:7b", timeout: int = 180):
+    def __init__(self, model_name: str = "llama2:7b", timeout: int = 180, base_url: Optional[str] = None):
         """Initialize Ollama client.
         
         Args:
             model_name: Name of the Ollama model to use
             timeout: Timeout in seconds for Ollama requests
+            base_url: OLLAMA server URL (defaults to reading from config.conf)
         """
         self.model_name = model_name
         self.timeout = timeout
         self.validator = IdentifierValidator()
+        
+        # Read base_url from config if not provided
+        if base_url is None:
+            base_url = self._read_base_url_from_config()
+        
+        self.base_url = base_url.rstrip('/')  # Remove trailing slash if present
+    
+    def _read_base_url_from_config(self) -> str:
+        """Read OLLAMA base_url from config.conf.
+        
+        Returns:
+            Base URL for OLLAMA server (defaults to http://localhost:11434)
+        """
+        try:
+            config = configparser.ConfigParser()
+            config_path = Path(__file__).parent.parent.parent / 'config.conf'
+            
+            # Try personal config first, then default config
+            personal_config = Path(__file__).parent.parent.parent / 'config.personal.conf'
+            if personal_config.exists():
+                config.read(personal_config)
+            
+            if config_path.exists():
+                config.read(config_path)
+            
+            # Read from OLLAMA section
+            base_url = config.get('OLLAMA', 'base_url', fallback='http://localhost:11434')
+            return base_url.strip()
+        except Exception:
+            # Default fallback
+            return 'http://localhost:11434'
     
     def extract_paper_metadata(self, text: str, validate: bool = True, 
                               document_context: str = "general", language: str = None,
@@ -74,20 +108,33 @@ class OllamaClient:
                 progress_thread = threading.Thread(target=show_progress, daemon=True)
                 progress_thread.start()
             
-            # Run ollama with the prompt
-            result = subprocess.run(
-                ["ollama", "run", self.model_name, prompt],
-                capture_output=True,
-                text=True,
+            # Use HTTP API to call Ollama
+            # Make API request to Ollama
+            api_url = f"{self.base_url}/api/generate"
+            payload = {
+                "model": self.model_name,
+                "prompt": prompt,
+                "stream": False
+            }
+            
+            response = requests.post(
+                api_url,
+                json=payload,
                 timeout=self.timeout
             )
             
-            if result.returncode != 0:
-                print(f"Error running Ollama: {result.stderr}")
+            if response.status_code != 200:
+                print(f"Error calling Ollama API: {response.status_code} - {response.text}")
                 return None
             
             # Parse the response
-            response_text = result.stdout.strip()
+            response_data = response.json()
+            response_text = response_data.get('response', '').strip()
+            
+            if not response_text:
+                print("Error: Empty response from Ollama")
+                return None
+            
             metadata = self._parse_ollama_response(response_text)
             
             if not metadata:
@@ -99,11 +146,12 @@ class OllamaClient:
             
             return metadata
             
-        except subprocess.TimeoutExpired:
-            print(f"Error: Ollama timed out after {self.timeout} seconds")
-            return None
         except Exception as e:
-            print(f"Error running Ollama: {e}")
+            # Check if it's a requests timeout
+            if 'timeout' in str(e).lower() or 'timed out' in str(e).lower():
+                print(f"Error: Ollama timed out after {self.timeout} seconds")
+            else:
+                print(f"Error calling Ollama API: {e}")
             return None
     
     def _build_extraction_prompt(self, text: str, document_context: str = "general", language: str = None) -> str:

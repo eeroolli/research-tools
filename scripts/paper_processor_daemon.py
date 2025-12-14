@@ -145,11 +145,13 @@ class PaperProcessorDaemon:
         self.publications_dir = Path(self._normalize_path(publications_path))
         
         # Get Ollama configuration
+        self.ollama_container_name = self.config.get('OLLAMA', 'container_name', fallback='ollama-gpu')
         self.ollama_auto_start = self.config.getboolean('OLLAMA', 'auto_start', fallback=True)
         self.ollama_auto_stop = self.config.getboolean('OLLAMA', 'auto_stop', fallback=True)
         self.ollama_startup_timeout = self.config.getint('OLLAMA', 'startup_timeout', fallback=30)
         self.ollama_shutdown_timeout = self.config.getint('OLLAMA', 'shutdown_timeout', fallback=10)
         self.ollama_port = self.config.getint('OLLAMA', 'port', fallback=11434)
+        self.ollama_base_url = self.config.get('OLLAMA', 'base_url', fallback='http://localhost:11434')
         
         # Get GROBID configuration
         self.grobid_auto_start = self.config.getboolean('GROBID', 'auto_start', fallback=True)
@@ -570,79 +572,71 @@ class PaperProcessorDaemon:
         print()
     
     def is_ollama_running(self) -> bool:
-        """Check if Ollama server is running on the configured port.
+        """Check if Ollama Docker container is running and accessible.
         
         Returns:
-            True if Ollama is responding, False otherwise
+            True if Ollama container is running and responding
         """
         try:
-            # Try to connect to Ollama's configured port with fast timeout
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)  # Fast 2 second timeout for detection
-            result = sock.connect_ex(('localhost', self.ollama_port))
-            sock.close()
-            return result == 0
+            # First check if container is running
+            result = subprocess.run(['docker', 'ps', '--filter', f'name={self.ollama_container_name}', '--format', '{{.Names}}'], 
+                                  capture_output=True, text=True, timeout=5)
+            
+            if self.ollama_container_name not in result.stdout:
+                return False
+            
+            # Then check if OLLAMA API is responding
+            import requests
+            try:
+                response = requests.get(f'{self.ollama_base_url}/api/tags', timeout=2)
+                return response.status_code == 200
+            except:
+                return False
         except Exception:
             return False
     
     def _start_ollama_background(self):
-        """Start Ollama server in background without blocking initialization."""
+        """Start Ollama Docker container in background without blocking initialization."""
         try:
-            self.logger.info("🤖 Starting Ollama server in background...")
+            self.logger.info("🤖 Starting Ollama Docker container in background...")
             
-            # Start Ollama server in background
-            self.ollama_process = subprocess.Popen(
-                ['ollama', 'serve'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            
-            # Start a background thread to wait for Ollama to be ready
-            def wait_for_ollama():
-                for attempt in range(self.ollama_startup_timeout):
-                    time.sleep(1)
-                    if self.is_ollama_running():
-                        self.ollama_ready = True
-                        self.logger.info("✅ Ollama server started successfully")
-                        return
-                
-                # If we get here, Ollama didn't start in time
-                self.logger.warning(f"⚠️  Ollama failed to start within {self.ollama_startup_timeout} seconds")
-                self.ollama_ready = False
+            # Start a background thread to start container and wait for it to be ready
+            def start_and_wait_for_ollama():
+                if self._start_ollama_container():
+                    for attempt in range(self.ollama_startup_timeout):
+                        time.sleep(1)
+                        if self.is_ollama_running():
+                            self.ollama_ready = True
+                            self.logger.info("✅ Ollama container started successfully")
+                            return
+                    
+                    # If we get here, Ollama didn't start in time
+                    self.logger.warning(f"⚠️  Ollama failed to start within {self.ollama_startup_timeout} seconds")
+                    self.ollama_ready = False
+                else:
+                    self.ollama_ready = False
             
             # Start the waiting thread
-            threading.Thread(target=wait_for_ollama, daemon=True).start()
+            threading.Thread(target=start_and_wait_for_ollama, daemon=True).start()
             
-        except FileNotFoundError:
-            self.logger.error("❌ Ollama not found. Please install Ollama first.")
-            self.ollama_ready = False
         except Exception as e:
-            self.logger.error(f"❌ Failed to start Ollama: {e}")
+            self.logger.error(f"❌ Failed to start Ollama container: {e}")
             self.ollama_ready = False
     
     def start_ollama_if_needed(self):
-        """Start Ollama server if it's not already running.
+        """Start Ollama Docker container if it's not already running.
         
         This ensures the daemon can use Ollama for metadata extraction
         without requiring manual startup.
         """
         if self.is_ollama_running():
-            self.logger.info("✅ Ollama server is already running")
+            self.logger.info("✅ Ollama container is already running")
             return
         
-        self.logger.info("🤖 Starting Ollama server...")
-        print("🤖 Starting Ollama server...")
+        self.logger.info("🤖 Starting Ollama Docker container...")
+        print("🤖 Starting Ollama Docker container...")
         
-        try:
-            # Start Ollama server in background
-            self.ollama_process = subprocess.Popen(
-                ['ollama', 'serve'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            
+        if self._start_ollama_container():
             # Wait for Ollama to be ready (up to configured timeout)
             self.logger.info("⏳ Waiting for Ollama to start...")
             print("⏳ Waiting for Ollama to start...")
@@ -650,8 +644,8 @@ class PaperProcessorDaemon:
             for attempt in range(self.ollama_startup_timeout):  # Configurable timeout
                 time.sleep(1)
                 if self.is_ollama_running():
-                    self.logger.info("✅ Ollama server started successfully")
-                    print("✅ Ollama server started successfully")
+                    self.logger.info("✅ Ollama container started successfully")
+                    print("✅ Ollama container started successfully")
                     return
                 if attempt % 5 == 0 and attempt > 0:
                     self.logger.info(f"⏳ Still waiting for Ollama... ({attempt}s)")
@@ -660,42 +654,78 @@ class PaperProcessorDaemon:
             # If we get here, Ollama didn't start in time
             self.logger.warning(f"⚠️  Ollama failed to start within {self.ollama_startup_timeout} seconds")
             print(f"⚠️  Ollama failed to start within {self.ollama_startup_timeout} seconds")
-            print("   You may need to start it manually: ollama serve")
-            
-        except FileNotFoundError:
-            self.logger.error("❌ Ollama not found. Please install Ollama first.")
-            print("❌ Ollama not found. Please install Ollama first.")
-            print("   Install from: https://ollama.ai/")
-        except Exception as e:
-            self.logger.error(f"❌ Failed to start Ollama: {e}")
-            print(f"❌ Failed to start Ollama: {e}")
+            print("   You may need to start it manually: ./scripts/docker_ollama_start.sh")
+        else:
+            self.logger.error("❌ Failed to start Ollama container")
+            print("❌ Failed to start Ollama container")
+            print("   Try manually: ./scripts/docker_ollama_start.sh")
     
     def stop_ollama_if_started(self):
-        """Stop Ollama server if we started it.
+        """Stop Ollama Docker container if we started it.
         
         This is called during daemon shutdown to clean up.
         """
         if not self.ollama_auto_stop:
-            self.logger.info("⏭️  Ollama auto-stop disabled - leaving server running")
+            self.logger.info("⏭️  Ollama auto-stop disabled - leaving container running")
             return
+        
+        self.logger.info("🛑 Stopping Ollama Docker container...")
+        print("🛑 Stopping Ollama Docker container...")
+        self._stop_ollama_container()
+    
+    def _start_ollama_container(self) -> bool:
+        """Start OLLAMA Docker container.
+        
+        Returns:
+            True if started successfully
+        """
+        try:
+            # Check if container already exists
+            result = subprocess.run(['docker', 'ps', '-a', '--filter', f'name={self.ollama_container_name}', '--format', '{{.Names}}'], 
+                                  capture_output=True, text=True, timeout=10)
             
-        if self.ollama_process:
-            self.logger.info("🛑 Stopping Ollama server...")
-            print("🛑 Stopping Ollama server...")
-            try:
-                self.ollama_process.terminate()
-                # Wait up to configured timeout for graceful shutdown
-                self.ollama_process.wait(timeout=self.ollama_shutdown_timeout)
-                self.logger.info("✅ Ollama server stopped")
-                print("✅ Ollama server stopped")
-            except subprocess.TimeoutExpired:
-                # Force kill if it doesn't stop gracefully
-                self.ollama_process.kill()
-                self.logger.warning("⚠️  Ollama server force-stopped")
-                print("⚠️  Ollama server force-stopped")
-            except Exception as e:
-                self.logger.error(f"❌ Error stopping Ollama: {e}")
-                print(f"❌ Error stopping Ollama: {e}")
+            if self.ollama_container_name in result.stdout:
+                # Container exists - start it
+                self.logger.info(f"Starting existing OLLAMA container: {self.ollama_container_name}")
+                result = subprocess.run(['docker', 'start', self.ollama_container_name], 
+                                      capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    self.logger.info("Started existing OLLAMA container")
+                    return True
+                else:
+                    self.logger.error(f"Failed to start existing container: {result.stderr}")
+                    return False
+            else:
+                # Container doesn't exist - suggest using the start script
+                self.logger.warning(f"OLLAMA container {self.ollama_container_name} does not exist")
+                self.logger.info("Please run: ./scripts/docker_ollama_start.sh")
+                print(f"   💡 Tip: Run './scripts/docker_ollama_start.sh' to create the container")
+                return False
+            
+        except FileNotFoundError:
+            self.logger.error("Docker not found. Please install Docker first.")
+            return False
+        except subprocess.TimeoutExpired:
+            self.logger.error("Docker command timed out")
+            return False
+        except Exception as e:
+            self.logger.error(f"Failed to start OLLAMA container: {e}")
+            return False
+    
+    def _stop_ollama_container(self):
+        """Stop OLLAMA Docker container if we started it."""
+        try:
+            result = subprocess.run(['docker', 'stop', self.ollama_container_name], 
+                                  capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                self.logger.info("✅ OLLAMA container stopped")
+                print("✅ OLLAMA container stopped")
+            else:
+                self.logger.warning(f"Failed to stop OLLAMA container: {result.stderr}")
+                print(f"⚠️  Failed to stop OLLAMA container")
+        except Exception as e:
+            self.logger.error(f"Error stopping OLLAMA container: {e}")
+            print(f"❌ Error stopping OLLAMA container: {e}")
     
     def display_metadata(self, metadata: dict, pdf_path: Path, extraction_time: float):
         """Display extracted metadata to user with universal field handling.
@@ -1714,15 +1744,65 @@ class PaperProcessorDaemon:
             if ':' in source_str and not source_str.startswith('/'):
                 source_str = self._normalize_path(source_str)
             
-            # Validate source file exists using existing helper method
+            # Check if source is in a temp directory that might not be accessible from Windows
+            # If validation fails but file exists in WSL, copy to Windows-accessible location first
             is_valid, error = self._validate_path_via_powershell(source_str, is_directory=False)
+            temp_source_path = None
+            
             if not is_valid:
-                return (False, f"Source file not found or not accessible: {error or 'Unknown error'}")
+                # File might be in WSL temp directory - check if it exists in WSL
+                if source_path.exists():
+                    # Check if it's in a temp directory
+                    source_str_lower = source_str.lower()
+                    is_temp_path = ('/tmp/' in source_str_lower or 
+                                   source_str_lower.startswith('/tmp/') or
+                                   '/temp/' in source_str_lower)
+                    
+                    if is_temp_path:
+                        # Copy temp file to Windows-accessible location first
+                        # Use watch directory's temp subdirectory
+                        temp_dir = self.watch_dir / 'temp_for_copy'
+                        temp_dir.mkdir(parents=True, exist_ok=True)
+                        temp_source_path = temp_dir / source_path.name
+                        
+                        try:
+                            self.logger.debug(f"Copying temp file to Windows-accessible location: {temp_source_path}")
+                            shutil.copy2(source_path, temp_source_path)
+                            # Update source to use the Windows-accessible copy
+                            source_str = str(temp_source_path)
+                            source_path = temp_source_path
+                            # Re-validate the new path
+                            is_valid, error = self._validate_path_via_powershell(source_str, is_directory=False)
+                            if not is_valid:
+                                # Clean up temp file
+                                if temp_source_path.exists():
+                                    temp_source_path.unlink()
+                                return (False, f"Source file not accessible even after copying to temp location: {error or 'Unknown error'}")
+                        except Exception as e:
+                            # Clean up temp file if copy failed
+                            if temp_source_path and temp_source_path.exists():
+                                try:
+                                    temp_source_path.unlink()
+                                except:
+                                    pass
+                            return (False, f"Failed to copy temp file to Windows-accessible location: {e}")
+                    else:
+                        # Not a temp path, but validation failed
+                        return (False, f"Source file not found or not accessible: {error or 'Unknown error'}")
+                else:
+                    # File doesn't exist in WSL either
+                    return (False, f"Source file not found or not accessible: {error or 'Unknown error'}")
             
             # Convert source WSL path to Windows path using PowerShell utility
             try:
                 source_win = self._convert_wsl_to_windows_path(source_str)
             except Exception as e:
+                # Clean up temp file if we created one
+                if temp_source_path and temp_source_path.exists():
+                    try:
+                        temp_source_path.unlink()
+                    except:
+                        pass
                 return (False, f"Failed to convert source path {source_path}: {e}")
             
             # Convert target path
@@ -1733,12 +1813,24 @@ class PaperProcessorDaemon:
             try:
                 target_win = self._convert_wsl_to_windows_path(target_str)
             except Exception as e:
+                # Clean up temp file if we created one
+                if temp_source_path and temp_source_path.exists():
+                    try:
+                        temp_source_path.unlink()
+                    except:
+                        pass
                 return (False, f"Failed to convert target path: {e}")
             
             # Get script path
             try:
                 ps_script_win = self._get_path_utils_script_win()
             except Exception as e:
+                # Clean up temp file if we created one
+                if temp_source_path and temp_source_path.exists():
+                    try:
+                        temp_source_path.unlink()
+                    except:
+                        pass
                 return (False, f"Failed to get script path: {e}")
             
             # Copy file using path_utils.ps1
@@ -1763,13 +1855,39 @@ class PaperProcessorDaemon:
                     result_data = json.loads(result.stdout.strip())
                     if result_data.get('success', False):
                         self.logger.debug(f"PowerShell copy successful: {target_path}")
+                        # Clean up temp file if we created one
+                        if temp_source_path and temp_source_path.exists():
+                            try:
+                                temp_source_path.unlink()
+                                self.logger.debug(f"Cleaned up temp file: {temp_source_path}")
+                            except Exception as e:
+                                self.logger.warning(f"Failed to clean up temp file {temp_source_path}: {e}")
                         return (True, None)
                     else:
+                        # Clean up temp file on failure
+                        if temp_source_path and temp_source_path.exists():
+                            try:
+                                temp_source_path.unlink()
+                            except:
+                                pass
                         return (False, result_data.get('error', 'Unknown error'))
                 except json.JSONDecodeError:
                     # If JSON parsing fails, check if copy actually succeeded
                     if 'SUCCESS' in result.stdout or 'success' in result.stdout.lower():
+                        # Clean up temp file if we created one
+                        if temp_source_path and temp_source_path.exists():
+                            try:
+                                temp_source_path.unlink()
+                                self.logger.debug(f"Cleaned up temp file: {temp_source_path}")
+                            except Exception as e:
+                                self.logger.warning(f"Failed to clean up temp file {temp_source_path}: {e}")
                         return (True, None)
+                    # Clean up temp file on failure
+                    if temp_source_path and temp_source_path.exists():
+                        try:
+                            temp_source_path.unlink()
+                        except:
+                            pass
                     return (False, f"Invalid response: {result.stdout}")
             else:
                 # Try to parse error from JSON
@@ -1780,11 +1898,29 @@ class PaperProcessorDaemon:
                     error_msg = result.stdout + result.stderr
                     if not error_msg:
                         error_msg = f"PowerShell copy failed with code {result.returncode}"
+                # Clean up temp file on failure
+                if temp_source_path and temp_source_path.exists():
+                    try:
+                        temp_source_path.unlink()
+                    except:
+                        pass
                 return (False, error_msg)
                 
         except subprocess.TimeoutExpired:
+            # Clean up temp file on timeout
+            if temp_source_path and temp_source_path.exists():
+                try:
+                    temp_source_path.unlink()
+                except:
+                    pass
             return (False, "Copy timeout (file too large or network issue)")
         except Exception as e:
+            # Clean up temp file on error
+            if temp_source_path and temp_source_path.exists():
+                try:
+                    temp_source_path.unlink()
+                except:
+                    pass
             return (False, f"Copy error: {e}")
     
     def _copy_to_publications_via_windows(self, pdf_path: Path, target_filename: str, replace_existing: bool = False) -> tuple:
