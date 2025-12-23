@@ -391,8 +391,9 @@ Create different batch files for different workflows:
 The paper processor daemon uses **GROBID** (GeneRation Of BIbliographic Data) for advanced academic paper metadata extraction.
 
 ### Automatic Setup
-- ✅ **Auto-start**: GROBID Docker container starts automatically when daemon launches
-- ✅ **Auto-stop**: Container stops when daemon shuts down (configurable)
+- ✅ **Auto-start**: GROBID Docker container starts automatically when daemon launches (local GROBID only)
+- ✅ **Auto-stop**: Container stops when daemon shuts down (configurable, local GROBID only)
+- ✅ **Remote Support**: Can connect to GROBID running on another machine
 - ✅ **Smart Processing**: Extracts metadata from first 2 pages only (prevents citation pollution)
 - ✅ **Document Type Detection**: Automatically identifies journal articles, books, conferences, etc.
 
@@ -401,30 +402,77 @@ Edit `config.conf` to customize GROBID behavior:
 
 ```ini
 [GROBID]
-# Automatically start GROBID Docker container if not running
+# GROBID server host (localhost or remote hostname/IP)
+# For local GROBID: host = localhost
+# For remote GROBID: host = p1
+host = localhost
+# GROBID server port (default is 8070)
+port = 8070
+# Automatically start GROBID Docker container if not running (only if host=localhost)
 auto_start = true
-# Stop GROBID container when daemon shuts down (if we started it)
+# Stop GROBID container when daemon shuts down (if we started it, only if host=localhost)
 auto_stop = true
 # Docker container name for GROBID
 container_name = grobid
-# GROBID server port (default is 8070)
-port = 8070
 # Maximum pages to process for metadata extraction (prevents extracting authors from references)
 max_pages = 2
 ```
+
+### Distributed Processing Setup
+
+For distributed processing where GROBID runs on one machine (P1) and the daemon runs on another (blacktower):
+
+**On P1 (GROBID server):**
+1. Start GROBID Docker container:
+   ```bash
+   docker start grobid
+   # Or create if needed:
+   docker run -d --name grobid -p 8070:8070 lfoppiano/grobid:0.8.2
+   ```
+2. Ensure GROBID is accessible on port 8070 (check firewall if needed)
+
+**On blacktower (daemon machine):**
+1. Edit `config.personal.conf`:
+   ```ini
+   [GROBID]
+   host = p1
+   # Or use IP address: host = 192.168.1.100
+   port = 8070
+   auto_start = false
+   auto_stop = false
+   ```
+2. Configure daemon lock checking (optional, prevents multiple daemons):
+   ```ini
+   [DAEMON]
+   remote_check_host = p1
+   ```
+3. Start daemon - it will connect to remote GROBID automatically
+
+**Daemon Locking:**
+- Only one daemon should run at a time across all machines
+- Local daemon checks prevent duplicate instances on same machine
+- Remote daemon check (if configured) prevents conflicts when daemon is running on another machine
+- If remote daemon is detected, startup will exit with clear error message
 
 ### GROBID Features
 - **Smart Author Extraction** - Only processes first 2 pages to avoid extracting authors from references
 - **Document Type Detection** - Identifies journal articles, books, conferences, theses, reports, preprints
 - **Enhanced Metadata** - Extracts keywords, publisher, volume, issue, pages, language, conference info
 - **Fallback Support** - Falls back to Ollama 7B if GROBID is unavailable
+- **Remote Access** - Can connect to GROBID on another machine over network
 
 ### Troubleshooting GROBID
 If GROBID fails to start:
-1. **Check Docker**: Ensure Docker is running on Windows
+1. **Check Docker**: Ensure Docker is running on Windows (for local GROBID)
 2. **Check Port**: Verify port 8070 is not in use
 3. **Check Logs**: Run `docker logs grobid` to see container logs
 4. **Manual Start**: `docker start grobid` to manually start container
+
+If remote GROBID is unreachable:
+1. **Test Connectivity**: `curl http://p1:8070/api/isalive` (should return "true")
+2. **Check Firewall**: Ensure port 8070 is open on GROBID machine
+3. **Check Network**: Verify machines can reach each other (ping, SSH)
+4. **Check GROBID Status**: Ensure GROBID container is running on remote machine
 
 ---
 

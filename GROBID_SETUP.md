@@ -31,9 +31,10 @@ Automatically identifies:
 
 ### Automatic Setup
 The daemon automatically manages GROBID:
-- **Auto-start**: Starts Docker container when daemon launches
-- **Auto-stop**: Stops container when daemon shuts down (configurable)
-- **Health checks**: Monitors GROBID availability
+- **Auto-start**: Starts Docker container when daemon launches (local GROBID only)
+- **Auto-stop**: Stops container when daemon shuts down (configurable, local GROBID only)
+- **Health checks**: Monitors GROBID availability (local and remote)
+- **Remote support**: Can connect to GROBID running on another machine
 - **Fallback**: Uses Ollama 7B if GROBID is unavailable
 
 ### Configuration Options
@@ -41,14 +42,19 @@ Edit `config.conf` to customize GROBID behavior:
 
 ```ini
 [GROBID]
-# Automatically start GROBID Docker container if not running
+# GROBID server host (localhost or remote hostname/IP)
+# For local GROBID: host = localhost
+# For remote GROBID: host = p1
+# For remote GROBID: host = 192.168.1.100
+host = localhost
+# GROBID server port (default is 8070)
+port = 8070
+# Automatically start GROBID Docker container if not running (only if host=localhost)
 auto_start = true
-# Stop GROBID container when daemon shuts down (if we started it)
+# Stop GROBID container when daemon shuts down (if we started it, only if host=localhost)
 auto_stop = true
 # Docker container name for GROBID
 container_name = grobid
-# GROBID server port (default is 8070)
-port = 8070
 # Maximum pages to process for metadata extraction (prevents extracting authors from references)
 max_pages = 2
 ```
@@ -182,6 +188,41 @@ Use a different container name:
 [GROBID]
 container_name = my-grobid
 ```
+
+### Remote GROBID Configuration
+Use GROBID running on another machine (e.g., for distributed processing):
+
+```ini
+[GROBID]
+# Connect to GROBID on remote machine
+host = p1
+# Or use IP address
+# host = 192.168.1.100
+port = 8070
+# Docker management is skipped for remote GROBID
+auto_start = false
+auto_stop = false
+```
+
+**Prerequisites for Remote GROBID:**
+- GROBID must be running and accessible on the remote machine
+- Network connectivity between machines
+- GROBID port (8070) must be accessible (check firewall settings)
+- Remote GROBID should be started manually or via system service
+
+**Testing Remote GROBID:**
+```bash
+# Test connectivity from daemon machine
+curl http://p1:8070/api/isalive
+
+# Should return: true
+```
+
+**Distributed Processing Setup:**
+- **Machine 1 (P1)**: Runs GROBID Docker container, accessible via network
+- **Machine 2 (blacktower)**: Runs daemon, connects to remote GROBID
+- Both machines can access shared storage (F: drive) for PDFs
+- Only one daemon should run at a time (daemon locking prevents conflicts)
 
 ## Integration with Other Tools
 

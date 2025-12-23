@@ -48,9 +48,11 @@ For detailed development status, technical architecture, and upcoming features, 
 
 **Features:**
 - ✅ **GROBID Integration** - Advanced academic paper metadata extraction
+- ✅ **Remote GROBID Support** - Use GROBID running on another machine (distributed processing)
 - ✅ **Smart Author Extraction** - Processes only first 2 pages to avoid citation pollution
 - ✅ **Document Type Detection** - Automatically identifies journal articles, books, conferences, etc.
 - ✅ **Enhanced Metadata** - Extracts keywords, publisher, volume, issue, pages, language
+- ✅ **Daemon Locking** - Prevents multiple daemon instances (local and remote checking)
 - ✅ Interactive review and approval with 3-step workflow
 - ✅ Local Zotero database search with enhanced UX
 - ✅ Metadata comparison and field-by-field merging

@@ -151,11 +151,15 @@ class PaperProcessorDaemon:
         self.ollama_shutdown_timeout = self.config.getint('OLLAMA', 'shutdown_timeout', fallback=10)
         self.ollama_port = self.config.getint('OLLAMA', 'port', fallback=11434)
         
+        # Get DAEMON configuration
+        self.remote_check_host = self.config.get('DAEMON', 'remote_check_host', fallback='').strip()
+        
         # Get GROBID configuration
+        self.grobid_host = self.config.get('GROBID', 'host', fallback='localhost').strip()
+        self.grobid_port = self.config.getint('GROBID', 'port', fallback=8070)
         self.grobid_auto_start = self.config.getboolean('GROBID', 'auto_start', fallback=True)
         self.grobid_auto_stop = self.config.getboolean('GROBID', 'auto_stop', fallback=True)
         self.grobid_container_name = self.config.get('GROBID', 'container_name', fallback='grobid')
-        self.grobid_port = self.config.getint('GROBID', 'port', fallback=8070)
         self.grobid_max_pages = self.config.getint('GROBID', 'max_pages', fallback=2)
         
         # Get border detection configuration
@@ -389,14 +393,27 @@ class PaperProcessorDaemon:
             'tesseract_path': self.config.get('PROCESSING', 'tesseract_path', fallback=None)
         }
         
-        self.grobid_client = GrobidClient(f"http://localhost:{self.grobid_port}", config=grobid_config)
+        # Construct GROBID URL from config
+        grobid_url = f"http://{self.grobid_host}:{self.grobid_port}"
+        self.grobid_client = GrobidClient(grobid_url, config=grobid_config)
         
+        # Check if GROBID is local or remote
+        is_local_grobid = (self.grobid_host == 'localhost' or 
+                          self.grobid_host == '127.0.0.1' or 
+                          self.grobid_host == '::1')
+        
+        if is_local_grobid:
+            print(f"    📍 GROBID: Local (localhost:{self.grobid_port})")
+        else:
+            print(f"    📍 GROBID: Remote ({self.grobid_host}:{self.grobid_port})")
+        
+        # Test connectivity to GROBID
         if self.grobid_client.is_available(verbose=False):
             self.grobid_ready = True
             print("    ✅ GROBID: Available")
         else:
-            # Try to start GROBID container
-            if self.grobid_auto_start:
+            # Only try to start Docker container if GROBID is local
+            if is_local_grobid and self.grobid_auto_start:
                 print("    🐳 GROBID: Starting Docker container...")
                 if self._start_grobid_container():
                     self.grobid_ready = True
@@ -407,7 +424,11 @@ class PaperProcessorDaemon:
                     print("      💡 Tip: Check if Docker is running and port 8070 is free")
             else:
                 self.grobid_ready = False
-                print("    ❌ GROBID: Not available (will use fallback methods)")
+                if is_local_grobid:
+                    print("    ❌ GROBID: Not available (will use fallback methods)")
+                else:
+                    print(f"    ❌ GROBID: Cannot reach {grobid_url} (will use fallback methods)")
+                    print(f"      💡 Tip: Check network connectivity and ensure GROBID is running on {self.grobid_host}")
         
         # Don't start Ollama yet - only when needed
         print("    ⏭️  Ollama: Will start when needed")
@@ -443,11 +464,16 @@ class PaperProcessorDaemon:
         return False
     
     def _start_grobid_container(self) -> bool:
-        """Start GROBID Docker container.
+        """Start GROBID Docker container (only for local GROBID).
         
         Returns:
             True if started successfully
         """
+        # Only manage Docker containers for local GROBID
+        if self.grobid_host != 'localhost' and self.grobid_host != '127.0.0.1' and self.grobid_host != '::1':
+            self.logger.info("Skipping Docker container management for remote GROBID")
+            return False
+        
         try:
             # Check if container already exists
             result = subprocess.run(['docker', 'ps', '-a', '--filter', f'name={self.grobid_container_name}', '--format', '{{.Names}}'], 
@@ -508,7 +534,12 @@ class PaperProcessorDaemon:
             return False
     
     def _stop_grobid_container(self):
-        """Stop GROBID Docker container if we started it."""
+        """Stop GROBID Docker container if we started it (only for local GROBID)."""
+        # Only manage Docker containers for local GROBID
+        if self.grobid_host != 'localhost' and self.grobid_host != '127.0.0.1' and self.grobid_host != '::1':
+            self.logger.info("Skipping Docker container stop for remote GROBID")
+            return
+        
         if not self.grobid_auto_stop:
             self.logger.info("⏭️  GROBID auto-stop disabled - leaving container running")
             return
@@ -1714,15 +1745,65 @@ class PaperProcessorDaemon:
             if ':' in source_str and not source_str.startswith('/'):
                 source_str = self._normalize_path(source_str)
             
-            # Validate source file exists using existing helper method
+            # Check if source is in a temp directory that might not be accessible from Windows
+            # If validation fails but file exists in WSL, copy to Windows-accessible location first
             is_valid, error = self._validate_path_via_powershell(source_str, is_directory=False)
+            temp_source_path = None
+            
             if not is_valid:
-                return (False, f"Source file not found or not accessible: {error or 'Unknown error'}")
+                # File might be in WSL temp directory - check if it exists in WSL
+                if source_path.exists():
+                    # Check if it's in a temp directory
+                    source_str_lower = source_str.lower()
+                    is_temp_path = ('/tmp/' in source_str_lower or 
+                                   source_str_lower.startswith('/tmp/') or
+                                   '/temp/' in source_str_lower)
+                    
+                    if is_temp_path:
+                        # Copy temp file to Windows-accessible location first
+                        # Use watch directory's temp subdirectory
+                        temp_dir = self.watch_dir / 'temp_for_copy'
+                        temp_dir.mkdir(parents=True, exist_ok=True)
+                        temp_source_path = temp_dir / source_path.name
+                        
+                        try:
+                            self.logger.debug(f"Copying temp file to Windows-accessible location: {temp_source_path}")
+                            shutil.copy2(source_path, temp_source_path)
+                            # Update source to use the Windows-accessible copy
+                            source_str = str(temp_source_path)
+                            source_path = temp_source_path
+                            # Re-validate the new path
+                            is_valid, error = self._validate_path_via_powershell(source_str, is_directory=False)
+                            if not is_valid:
+                                # Clean up temp file
+                                if temp_source_path.exists():
+                                    temp_source_path.unlink()
+                                return (False, f"Source file not accessible even after copying to temp location: {error or 'Unknown error'}")
+                        except Exception as e:
+                            # Clean up temp file if copy failed
+                            if temp_source_path and temp_source_path.exists():
+                                try:
+                                    temp_source_path.unlink()
+                                except:
+                                    pass
+                            return (False, f"Failed to copy temp file to Windows-accessible location: {e}")
+                    else:
+                        # Not a temp path, but validation failed
+                        return (False, f"Source file not found or not accessible: {error or 'Unknown error'}")
+                else:
+                    # File doesn't exist in WSL either
+                    return (False, f"Source file not found or not accessible: {error or 'Unknown error'}")
             
             # Convert source WSL path to Windows path using PowerShell utility
             try:
                 source_win = self._convert_wsl_to_windows_path(source_str)
             except Exception as e:
+                # Clean up temp file if we created one
+                if temp_source_path and temp_source_path.exists():
+                    try:
+                        temp_source_path.unlink()
+                    except:
+                        pass
                 return (False, f"Failed to convert source path {source_path}: {e}")
             
             # Convert target path
@@ -1733,12 +1814,24 @@ class PaperProcessorDaemon:
             try:
                 target_win = self._convert_wsl_to_windows_path(target_str)
             except Exception as e:
+                # Clean up temp file if we created one
+                if temp_source_path and temp_source_path.exists():
+                    try:
+                        temp_source_path.unlink()
+                    except:
+                        pass
                 return (False, f"Failed to convert target path: {e}")
             
             # Get script path
             try:
                 ps_script_win = self._get_path_utils_script_win()
             except Exception as e:
+                # Clean up temp file if we created one
+                if temp_source_path and temp_source_path.exists():
+                    try:
+                        temp_source_path.unlink()
+                    except:
+                        pass
                 return (False, f"Failed to get script path: {e}")
             
             # Copy file using path_utils.ps1
@@ -1763,13 +1856,39 @@ class PaperProcessorDaemon:
                     result_data = json.loads(result.stdout.strip())
                     if result_data.get('success', False):
                         self.logger.debug(f"PowerShell copy successful: {target_path}")
+                        # Clean up temp file if we created one
+                        if temp_source_path and temp_source_path.exists():
+                            try:
+                                temp_source_path.unlink()
+                                self.logger.debug(f"Cleaned up temp file: {temp_source_path}")
+                            except Exception as e:
+                                self.logger.warning(f"Failed to clean up temp file {temp_source_path}: {e}")
                         return (True, None)
                     else:
+                        # Clean up temp file on failure
+                        if temp_source_path and temp_source_path.exists():
+                            try:
+                                temp_source_path.unlink()
+                            except:
+                                pass
                         return (False, result_data.get('error', 'Unknown error'))
                 except json.JSONDecodeError:
                     # If JSON parsing fails, check if copy actually succeeded
                     if 'SUCCESS' in result.stdout or 'success' in result.stdout.lower():
+                        # Clean up temp file if we created one
+                        if temp_source_path and temp_source_path.exists():
+                            try:
+                                temp_source_path.unlink()
+                                self.logger.debug(f"Cleaned up temp file: {temp_source_path}")
+                            except Exception as e:
+                                self.logger.warning(f"Failed to clean up temp file {temp_source_path}: {e}")
                         return (True, None)
+                    # Clean up temp file on failure
+                    if temp_source_path and temp_source_path.exists():
+                        try:
+                            temp_source_path.unlink()
+                        except:
+                            pass
                     return (False, f"Invalid response: {result.stdout}")
             else:
                 # Try to parse error from JSON
@@ -1780,11 +1899,29 @@ class PaperProcessorDaemon:
                     error_msg = result.stdout + result.stderr
                     if not error_msg:
                         error_msg = f"PowerShell copy failed with code {result.returncode}"
+                # Clean up temp file on failure
+                if temp_source_path and temp_source_path.exists():
+                    try:
+                        temp_source_path.unlink()
+                    except:
+                        pass
                 return (False, error_msg)
                 
         except subprocess.TimeoutExpired:
+            # Clean up temp file on timeout
+            if temp_source_path and temp_source_path.exists():
+                try:
+                    temp_source_path.unlink()
+                except:
+                    pass
             return (False, "Copy timeout (file too large or network issue)")
         except Exception as e:
+            # Clean up temp file on error
+            if temp_source_path and temp_source_path.exists():
+                try:
+                    temp_source_path.unlink()
+                except:
+                    pass
             return (False, f"Copy error: {e}")
     
     def _copy_to_publications_via_windows(self, pdf_path: Path, target_filename: str, replace_existing: bool = False) -> tuple:
@@ -3253,11 +3390,13 @@ class PaperProcessorDaemon:
         """Return True and exit gracefully if a running instance is detected.
         
         Behavior:
-        - If PID file exists and PID is alive, print message and exit(0)
-        - If PID file exists but PID is stale, remove PID file and continue
+        - If local PID file exists and PID is alive, print message and exit(0)
+        - If local PID file exists but PID is stale, remove PID file and continue
+        - If remote_check_host is configured, check for remote daemon
         - If no PID file, continue
         """
         try:
+            # Check local PID file
             if self.pid_file.exists():
                 try:
                     existing_pid_str = self.pid_file.read_text().strip()
@@ -3279,9 +3418,54 @@ class PaperProcessorDaemon:
                     self.logger.warning("Stale PID file found. Removing and starting new instance.")
                     self.pid_file.unlink(missing_ok=True)
                     return False
+            
+            # Check remote daemon if configured
+            if self.remote_check_host:
+                if self._check_remote_daemon():
+                    print(f"❌ Daemon already running on {self.remote_check_host}")
+                    print("   Please stop the remote daemon before starting a new instance.")
+                    sys.exit(1)
         except Exception:
             # On any unexpected error, continue without blocking startup
             return False
+        return False
+    
+    def _check_remote_daemon(self) -> bool:
+        """Check if daemon is running on remote machine.
+        
+        Returns:
+            True if remote daemon is running, False otherwise
+        """
+        try:
+            # Try to check remote PID file via SSH
+            # Format: ssh user@host "cat /path/to/.daemon.pid 2>/dev/null"
+            remote_pid_file_path = str(self.pid_file)
+            # Extract username from remote_check_host if format is user@host
+            if '@' in self.remote_check_host:
+                ssh_target = self.remote_check_host
+            else:
+                # Use default username (e.g., eero_22) or get from config
+                # For now, assume format is just hostname, user will configure as user@host if needed
+                ssh_target = self.remote_check_host
+            
+            # Try to read remote PID file
+            cmd = ['ssh', ssh_target, f'cat "{remote_pid_file_path}" 2>/dev/null']
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                try:
+                    remote_pid = int(result.stdout.strip())
+                    # Check if process is alive on remote machine
+                    check_cmd = ['ssh', ssh_target, f'kill -0 {remote_pid} 2>/dev/null']
+                    check_result = subprocess.run(check_cmd, capture_output=True, timeout=5)
+                    if check_result.returncode == 0:
+                        return True
+                except (ValueError, subprocess.TimeoutExpired):
+                    pass
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            # SSH not available or connection failed - assume no remote daemon
+            if self.debug:
+                self.logger.debug(f"Could not check remote daemon: {e}")
         return False
 
     def remove_pid_file(self):
@@ -5198,8 +5382,7 @@ class PaperProcessorDaemon:
                         pass
             author_info.append(info)
         
-        # Display authors with letter labels
-        letters = 'abcdefghijklmnopqrstuvwxyz'
+        # Display authors with number labels (1, 2, 3, ...)
         author_map = {}
         
         while True:
@@ -5209,9 +5392,9 @@ class PaperProcessorDaemon:
             # Rebuild author_map each iteration (in case authors were edited)
             author_map = {}
             if author_info:
-                for i, info in enumerate(author_info[:26]):  # Limit to 26 authors
-                    letter = letters[i]
-                    author_map[letter] = info['name']
+                for i, info in enumerate(author_info):
+                    author_num = str(i + 1)  # 1-indexed for display
+                    author_map[author_num] = info['name']
                     if info['paper_count'] > 0:
                         papers_str = f"(in Zotero: {info['paper_count']} publications)"
                     elif info['recognized']:
@@ -5221,23 +5404,23 @@ class PaperProcessorDaemon:
                             papers_str = "(in Zotero, 0 publications found)"
                     else:
                         papers_str = "(not in Zotero)"
-                    print(f"  [{letter}] {info['name']} {papers_str}")
+                    print(f"  [{author_num}] {info['name']} {papers_str}")
             else:
                 print("  (No authors - use 'n' to add a new author)")
             
             print("\nSelection options:")
-            print("  'a'   = Search by first author only")
-            print("  'ab'  = Search where 1st=a, 2nd=b")
-            print("  'ba'  = Search where 1st=b, 2nd=a")
+            print("  '1'   = Search by first author only")
+            print("  '12'  = Search where 1st=1, 2nd=2")
+            print("  '21'  = Search where 1st=2, 2nd=1")
             print("  'all' = Search by any author (no order)")
             print("  ''    = Use all authors as extracted")
             print("  'e'   = Edit an author name")
             print("  'n'   = Add new author manually")
-            print("  '-a'  = Delete author 'a' from list")
+            print("  '-1'  = Delete author 1 from list")
             print("  'z'   = Back to previous step")
             print("  'r'   = Restart from beginning")
             
-            selection = input("\nYour selection (letters like 'a', 'ab', 'all', or commands e/n/-a/z/r): ").strip()
+            selection = input("\nYour selection (numbers like '1', '12', 'all', or commands e/n/-1/z/r): ").strip()
             selection_lower = selection.lower()
             
             if selection_lower == 'z':
@@ -5245,10 +5428,10 @@ class PaperProcessorDaemon:
             elif selection_lower == 'r':
                 return 'RESTART'
             elif selection_lower.startswith('-'):
-                # Delete an author by letter
-                letter_to_delete = selection_lower[1:]  # Remove the '-' prefix
-                if letter_to_delete in author_map:
-                    author_to_remove = author_map[letter_to_delete]
+                # Delete an author by number
+                num_to_delete = selection_lower[1:]  # Remove the '-' prefix
+                if num_to_delete in author_map:
+                    author_to_remove = author_map[num_to_delete]
                     # Remove from author_info
                     author_info = [info for info in author_info if info['name'] != author_to_remove]
                     # Remove from authors list
@@ -5259,7 +5442,7 @@ class PaperProcessorDaemon:
                     if not author_info:
                         print("⚠️  No authors remaining - you can add a new author with 'n'")
                 else:
-                    print(f"⚠️  Invalid author letter: '{letter_to_delete}'")
+                    print(f"⚠️  Invalid author number: '{num_to_delete}'")
                 print()  # Blank line before showing list again
                 continue
             elif selection_lower == 'e':
@@ -5268,7 +5451,8 @@ class PaperProcessorDaemon:
                     print("⚠️  No authors to edit")
                     continue
                 print("\nWhich author to edit?")
-                edit_choice = input(f"Enter letter (a-{letters[len(author_info)-1]}): ").strip().lower()
+                max_num = len(author_info)
+                edit_choice = input(f"Enter number (1-{max_num}): ").strip()
                 if edit_choice in author_map:
                     old_name = author_map[edit_choice]
                     new_name = input(f"Edit '{old_name}' to: ").strip()
@@ -5332,25 +5516,30 @@ class PaperProcessorDaemon:
                 all_authors = [info['name'] for info in author_info]
                 return all_authors
             else:
-                # Parse selection (e.g., "ab" or "bac")
+                # Parse selection (e.g., "12" or "21" for numbered authors)
                 selected_authors = []
-                # If user typed option digits here by mistake, guide them
-                if selection_lower.isdigit():
-                    print("⚠️  This menu uses letters (e.g., 'a' or 'ab'). For numeric options (1-4), respond in the previous options prompt.")
+                
                 # Support typing a last name directly (e.g., "Hochschild"): only for length >= 3
-                else:
+                # Check if it's not all digits (could be a name)
+                if not selection_lower.isdigit() and len(selection_lower) >= 3:
                     # Try to resolve direct text to an author by last name match
                     direct = selection_lower.strip()
-                    if direct and len(direct) >= 3:
-                        for info in author_info:
-                            last = info['name'].split(',')[0].split()[-1].lower()
-                            if last == direct or direct in last:
-                                return [info['name']]
+                    for info in author_info:
+                        last = info['name'].split(',')[0].split()[-1].lower()
+                        if last == direct or direct in last:
+                            return [info['name']]
+                
+                # Parse number sequence (e.g., "12" means author 1 then author 2)
+                # Handle multi-digit numbers by parsing character by character
                 for char in selection:
-                    if char.lower() in author_map:
-                        selected_authors.append(author_map[char.lower()])
+                    if char in author_map:
+                        selected_authors.append(author_map[char])
+                    elif char.isdigit():
+                        # Valid digit but not in map (e.g., author number doesn't exist)
+                        print(f"⚠️  Ignoring invalid author number: '{char}'")
                     else:
-                        print(f"⚠️  Ignoring invalid selection: '{char}'")
+                        # Non-digit, non-command character
+                        print(f"⚠️  Ignoring invalid character: '{char}'")
                 
                 if selected_authors:
                     author_str = ', '.join(selected_authors)
