@@ -59,7 +59,7 @@ Starting paper processor daemon...
      - `DE_20251011_143522_2.pdf`
 
    **If Epson doesn't support this pattern:**
-   - Use any pattern that includes language prefix (EN_, NO_, DE_)
+   - Use any pattern that includes language prefix (EN_, NO_, DE_, SV_, DA_, FI_)
    - Daemon will detect files starting with these prefixes
 
 ### Post-Scan Action
@@ -108,10 +108,13 @@ Create separate jobs/profiles for each language and orientation:
    Filename pattern: Starts with `EN_` and ends with `_double`
 
 **Other Languages:**
-You can create similar profiles for other languages (Norwegian, German, etc.):
+You can create similar profiles for other languages:
 - Each with: exactly same settings as the English ones, except: 
 - Norwegian Portrait: Prefix `NO_`
 - German Portrait: Prefix `DE_`
+- Swedish Portrait: Prefix `SV_`
+- Danish Portrait: Prefix `DA_`
+- Finnish Portrait: Prefix `FI_`
 - And so on...
 
 ---

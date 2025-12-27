@@ -20,7 +20,7 @@ This document describes the complete user experience flow for the paper processo
 ┌─────────────────────────────────────────────────────────────────┐
 │  1. File Detection (Watchdog)                                   │
 │     - PDF detected in watch directory                           │
-│     - Language prefix detected (NO_, EN_, DE_, FI_, SE_)        │
+│     - Language prefix detected (NO_, EN_, DE_, FI_, SV_, DA_)   │
 │     - File moved to processing queue                            │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -398,7 +398,7 @@ These options are available at most decision points.
 
 ### Input
 - **Watch directory:** `/mnt/i/FraScanner/papers/` (or configured path)
-- **Language prefixes:** `NO_`, `EN_`, `DE_`, `FI_`, `SE_`
+- **Language prefixes:** `NO_`, `EN_`, `DE_`, `FI_`, `SV_`, `DA_`
 
 ### Processing
 - **Split PDFs:** System temp directory (e.g., `/tmp/pdf_splits/`)

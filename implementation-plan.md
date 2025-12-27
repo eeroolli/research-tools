@@ -97,7 +97,7 @@ At a glance:
 - **Smart Author Extraction** - Page-limited processing (first 2 pages) to avoid citation pollution
 - **Document Type Detection** - Automatic classification of academic documents (journal articles, books, conferences, etc.)
 - **Enhanced Metadata Extraction** - Keywords, publisher, volume, issue, pages, language, conference info
-- **Automatic Language Detection** - Detects language from filename prefix (NO_, EN_, DE_, FI_, SE_) and automatically adds to Zotero items (new items and updates existing items if language field is missing)
+- **Automatic Language Detection** - Detects language from filename prefix (NO_, EN_, DE_, FI_, SV_, DA_) and automatically adds to Zotero items (new items and updates existing items if language field is missing)
 - **Author Validation System** - Recognizes all authors in user's Zotero via lastname matching with alternatives
 - **Journal Validation System** - `JournalValidator` recognizes and validates journals against Zotero collection with OCR correction, integrated into paper processor daemon
 - **Path Utilities Refactoring** - Consolidated path handling methods, eliminated code duplication, improved maintainability (see `archive/REFACTORING_PLAN.md`)
@@ -159,7 +159,7 @@ At a glance:
   - **Improved identifier separation** - JSTOR URLs excluded from generic URL extraction to prevent confusion and double-counting
   - **Enhanced Zotero item selection UX** - Added metadata review step before attachment with options to edit, proceed, or go back
   - **UX flow optimization** - Eliminated duplicate code in item selection, streamlined metadata display
-  - **Automatic language detection from filenames** - Detects language prefix (NO_, EN_, DE_, FI_, SE_) and automatically adds to Zotero items when creating new items or updating existing ones with missing language field
+  - **Automatic language detection from filenames** - Detects language prefix (NO_, EN_, DE_, FI_, SV_, DA_) and automatically adds to Zotero items when creating new items or updating existing ones with missing language field
 
 ### ❌ **Not Completed:**
 - Detailed migration tasks from `archive/AI_CHAT_DOCUMENTS.md` (Phases 2-4)
@@ -499,7 +499,7 @@ Note: Largely covered by GROBID already (title/authors/venue/year from first pag
 - [x] **Separate workflows** - Books and papers use same underlying systems but different entry points
 - [x] **Configuration sharing** - Reuse existing config system (config.personal.conf)
 - [x] **Logging consistency** - Extend CSV logging with Zotero fields
-- [x] **Scanner integration** - Epson Capture Pro jobs configured with language prefixes (NO_, EN_, DE_) and orientations (Portrait/Landscape), post-scan action triggers quiet.vbs
+- [x] **Scanner integration** - Epson Capture Pro jobs configured with language prefixes (NO_, EN_, DE_, SV_, DA_, FI_) and orientations (Portrait/Landscape), post-scan action triggers quiet.vbs
 - [x] **Conference detection** - conference_detector.py for presentations (Oct 11, 2025)
 - [x] **Interactive menu** - PENDING: Add to process_scanned_papers.py (NEXT SESSION)
 - [ ] **Testing** - End-to-end testing with real scanner

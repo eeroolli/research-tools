@@ -1261,7 +1261,7 @@ class PaperProcessorDaemon:
         1. Prompt for year if missing
         2. Let user select which authors to search by (and in what order)
         3. Search Zotero with ordered author search + year filter
-        4. Display matches with letter labels (A-Z)
+        4. Display matches with number labels (1-N)
         5. Let user select item or take action
         
         Args:
@@ -3484,7 +3484,7 @@ class PaperProcessorDaemon:
             True if file should be processed (academic paper)
         """
         # Only process files with academic paper prefixes
-        prefixes = ['NO_', 'EN_', 'DE_', 'SE_', 'FI_']
+        prefixes = ['NO_', 'EN_', 'DE_', 'SV_', 'FI_', 'DA_']
         name_lower = filename.lower()
         # Ignore our own generated split artifacts to prevent double-processing
         if name_lower.endswith('_split.pdf'):
@@ -5135,12 +5135,7 @@ class PaperProcessorDaemon:
         print("\n🔄 Step 3: PDF Attachment")
         return self._handle_pdf_attachment_step(pdf_path, zotero_item, final_metadata)
     
-    def _extract_zotero_tags(self, zotero_item: dict) -> list:
-        """Extract tags from Zotero item for comparison."""
-        # This would need to be implemented to get tags from Zotero item
-        # For now, return empty list
-        return []
-    
+
     def _handle_pdf_attachment_step(self, pdf_path: Path, zotero_item: dict, metadata: dict) -> bool:
         """Handle PDF attachment step (from Task 7 specification)."""
         item_title = zotero_item.get('title', 'Unknown')
@@ -5570,20 +5565,20 @@ class PaperProcessorDaemon:
         print("These items exist in your Zotero library.")
         print()
         
-        # Display items with letter labels
-        letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        # Display items with number labels
         item_map = {}
+        max_items = min(len(matches), 99)  # Support up to 99 items
         
-        for i, match in enumerate(matches[:26]):  # Limit to 26 items
-            letter = letters[i]
-            item_map[letter] = match
+        for i, match in enumerate(matches[:max_items]):
+            item_num = i + 1
+            item_map[str(item_num)] = match
             
             title = match.get('title', 'Unknown title')
             # Truncate long titles
             if len(title) > 70:
                 title = title[:67] + "..."
             
-            print(f"  [{letter}] {title}")
+            print(f"  [{item_num}] {title}")
             
             # Show authors
             authors = match.get('authors', [])
@@ -5636,40 +5631,41 @@ class PaperProcessorDaemon:
         
         # Show action menu
         print("ACTIONS:")
-        print("  [A-Z] Select item from list above")
-        print("[1]   🔍 Change author/year search parameters")
-        print("[2]   🔍 Change all search parameters")
-        print("[3]   None of these items - create new")
-        print("[4]   ❌ Skip document")
+        print("  [1-N] Select item from list above")
+        print("[a]   🔍 Change author/year search parameters")
+        print("[b]   🔍 Change all search parameters")
+        print("[c]   None of these items - create new")
+        print("[d]   ❌ Skip document")
         print("  (z) ⬅️  Back to author selection")
         print("  (r) 🔄 Restart from beginning")
         print("  (q) Quit daemon")
         print()
         
         while True:
-            choice = input("Enter your choice: ").strip().upper()
+            choice = input("Enter your choice: ").strip().lower()
             
             if choice in item_map:
                 # User selected an item
                 selected_item = item_map[choice]
                 self.logger.info(f"User selected item: {selected_item.get('title', 'Unknown')}")
                 return ('select', selected_item)
-            elif choice == '1':
+            elif choice == 'a':
                 return ('search', None)
-            elif choice == '2':
+            elif choice == 'b':
                 return ('edit', None)
-            elif choice == '3':
+            elif choice == 'c':
                 return ('create', None)  # "None of these items"
-            elif choice == '4':
+            elif choice == 'd':
                 return ('skip', None)
-            elif choice == 'Z':
+            elif choice == 'z':
                 return ('back', None)
-            elif choice == 'R':
+            elif choice == 'r':
                 return ('restart', None)
-            elif choice == 'Q':
+            elif choice == 'q':
                 return ('quit', None)
             else:
-                print("⚠️  Invalid choice. Please select a letter A-Z, number 1-4, or 'z', 'r', 'q'.")
+                max_num = len(matches) if len(matches) <= 99 else 99
+                print(f"⚠️  Invalid choice. Please select a number 1-{max_num}, letter a-d, or 'z', 'r', 'q'.")
     
     def quick_manual_entry(self, extracted_metadata: dict) -> dict:
         """Allow user to quickly enter missing key fields manually.
@@ -5979,12 +5975,13 @@ class PaperProcessorDaemon:
                             language = self._detect_language_from_filename(self._original_scan_path)
                         if language and book_title:
                             try:
+                                country_code = self._language_to_country_code(language)
                                 print(f"\n🔍 Trying national library search for {language}...")
                                 nat_lib_results = self._search_national_library_for_book(
                                     book_title=book_title, 
                                     editor=editor,
                                     language=language,
-                                    country_code=language
+                                    country_code=country_code
                                 )
                                 if nat_lib_results:
                                     all_results.extend(nat_lib_results)
@@ -6009,12 +6006,13 @@ class PaperProcessorDaemon:
             
             if title and language:
                 try:
+                    country_code = self._language_to_country_code(language)
                     print(f"\n🔍 Trying national library search for {doc_type} ({language})...")
                     nat_lib_results = self._search_national_library_for_book(
                         book_title=title,
                         authors=authors,
                         language=language,
-                        country_code=language,
+                        country_code=country_code,
                         item_type='books' if doc_type == 'book' else 'papers'
                     )
                     if nat_lib_results:
@@ -6482,15 +6480,17 @@ class PaperProcessorDaemon:
             pdf_path: Path to PDF file
             
         Returns:
-            Language code (NO, EN, DE, FI, SE) or None if not detected
+            ISO 639-1 language code (no, en, de, fi, sv, da) for Zotero compatibility
         """
         filename = pdf_path.name.upper()
+        # Map filename prefixes to ISO 639-1 language codes (for Zotero compatibility)
         language_map = {
-            'NO_': 'NO',
-            'EN_': 'EN',
-            'DE_': 'DE',
-            'FI_': 'FI',
-            'SE_': 'SE'
+            'NO_': 'no',  # Norwegian
+            'EN_': 'en',  # English
+            'DE_': 'de',  # German
+            'FI_': 'fi',  # Finnish
+            'SV_': 'sv',  # Swedish (ISO code is 'sv')
+            'DA_': 'da'   # Danish
         }
         
         for prefix, lang_code in language_map.items():
@@ -6498,6 +6498,26 @@ class PaperProcessorDaemon:
                 return lang_code
         
         return None
+    
+    def _language_to_country_code(self, language_code: str) -> Optional[str]:
+        """Convert ISO 639-1 language code to country code for national library searches.
+        
+        Args:
+            language_code: ISO 639-1 language code (e.g., 'no', 'sv', 'da')
+            
+        Returns:
+            Country code (e.g., 'NO', 'SE', 'DK') or None
+        """
+        # Map ISO language codes to country codes for national library API
+        lang_to_country = {
+            'no': 'NO',  # Norwegian
+            'en': 'EN',  # English (no specific country)
+            'de': 'DE',  # German
+            'fi': 'FI',  # Finnish
+            'sv': 'SE',  # Swedish -> Sweden
+            'da': 'DK'   # Danish -> Denmark
+        }
+        return lang_to_country.get(language_code.lower())
     
     def _search_national_library_for_book(self, book_title: str, editor: str = None, 
                                          authors: list = None, language: str = None,
@@ -6508,8 +6528,8 @@ class PaperProcessorDaemon:
             book_title: Title to search for
             editor: Optional editor name (for book chapters)
             authors: Optional list of author names
-            language: Language code (NO, EN, DE, etc.)
-            country_code: Country code for library selection (defaults to language)
+            language: ISO 639-1 language code (no, en, de, etc.) - used as fallback
+            country_code: Country code (NO, SE, DK, etc.) for library selection (preferred)
             item_type: 'books' or 'papers' (theses are usually papers)
             
         Returns:
