@@ -27,6 +27,11 @@ import socket
 import threading
 import re
 from pathlib import Path
+try:
+    import select
+    HAS_SELECT = True
+except ImportError:
+    HAS_SELECT = False
 from watchdog.observers.polling import PollingObserver as Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -60,6 +65,8 @@ class PaperProcessorDaemon:
         """
         self.watch_dir = Path(watch_dir)
         self.pid_file = self.watch_dir / ".daemon.pid"
+        self.publications_cache_file = self.watch_dir / ".publications_cache.json"
+        self.publications_copy_count = 0  # Track PDF copies for cache refresh
         self.debug = debug
         
         # Load configuration for publications directory
@@ -164,6 +171,9 @@ class PaperProcessorDaemon:
         
         # Get border detection configuration
         self.border_max_width = self.config.getint('BORDER', 'max_border_width', fallback=600)
+        
+        # Get UX configuration
+        self.page_offset_timeout = self.config.getint('UX', 'page_offset_timeout', fallback=10)
         
         # Check if publications directory is accessible
         self._validate_publications_directory()
@@ -760,28 +770,39 @@ class PaperProcessorDaemon:
         self._display_metadata_universal(metadata)
         
         print("-" * 40)
+        print("💡 Tip: You can edit any field (including year) by choosing option [2] Edit metadata")
     
-    def prompt_for_year(self, metadata: dict, allow_back: bool = False) -> dict:
+    def prompt_for_year(self, metadata: dict, allow_back: bool = False, force_prompt: bool = False) -> dict:
         """Prompt user for publication year if missing.
         
         Args:
             metadata: Metadata dict
             allow_back: If True, allows 'z' to go back
+            force_prompt: If True, prompts even if year is already set (allows changing)
             
         Returns:
             Updated metadata with year, or special string 'BACK'/'RESTART'
         """
-        # Skip if already confirmed earlier in this session
-        if metadata.get('_year_confirmed'):
+        # Skip if already confirmed earlier in this session (unless forcing)
+        if not force_prompt and metadata.get('_year_confirmed'):
             return metadata
-        if metadata.get('year'):
+        
+        current_year = metadata.get('year', '')
+        if current_year and not force_prompt:
             metadata['_year_confirmed'] = True
             return metadata
         
-        print("\n📅 Publication year not found in scan")
-        hint = "(or press Enter to skip"
+        if current_year:
+            print(f"\n📅 Current publication year: {current_year}")
+            hint = "(Enter to keep current"
+        else:
+            print("\n📅 Publication year not found in scan")
+            hint = "(or press Enter to skip"
+        
         if allow_back:
             hint += ", 'z' to back, 'r' to restart"
+        if current_year:
+            hint += ", or enter new year to change"
         hint += ")"
         
         try:
@@ -794,15 +815,26 @@ class PaperProcessorDaemon:
             return 'BACK'
         elif year_input == 'r':
             return 'RESTART'
+        elif year_input == '':
+            # Enter pressed - keep current or skip
+            if current_year:
+                print(f"✅ Keeping current year: {current_year}")
+                metadata['_year_confirmed'] = True
+            return metadata
         elif year_input and year_input != '':
             # Validate year format
             if year_input.isdigit() and len(year_input) == 4:
                 metadata['year'] = year_input
                 metadata['_year_confirmed'] = True
-                print(f"User provided year: {year_input}")
+                if current_year:
+                    print(f"✅ Year changed from {current_year} to {year_input}")
+                else:
+                    print(f"✅ Year set to: {year_input}")
                 self.logger.info(f"User provided year: {year_input}")
             else:
-                print("⚠️  Invalid year format (expected 4 digits)")
+                print("⚠️  Invalid year format (expected 4 digits, e.g., '2024')")
+                if current_year:
+                    print(f"   Keeping current year: {current_year}")
         
         return metadata
     
@@ -1944,6 +1976,11 @@ class PaperProcessorDaemon:
         success, error_msg = self._copy_file_universal(pdf_path, target_path, replace_existing)
         
         if success:
+            # Increment copy counter and refresh cache after every 10 copies
+            self.publications_copy_count += 1
+            if self.publications_copy_count >= 10:
+                self._refresh_publications_cache()
+                self.publications_copy_count = 0
             return (True, target_path, None)
         else:
             return (False, None, error_msg)
@@ -2050,8 +2087,14 @@ class PaperProcessorDaemon:
         metadata = partial_metadata.copy()
         
         # Get author
-        author = input("First author's last name: ").strip()
-        if author:
+        author = input("First author's last name (or 'z' to skip, 'r' to restart): ").strip()
+        if author.lower() == 'z':
+            # Skip author entry
+            pass
+        elif author.lower() == 'r':
+            # Restart - return special marker
+            return {'_restart': True}
+        elif author:
             metadata['authors'] = [author]
             
             # Search local Zotero by author
@@ -2082,18 +2125,24 @@ class PaperProcessorDaemon:
                         return self.convert_zotero_item_to_metadata(selected)
         
         # Continue with manual entry
-        title = input("\nPaper title: ").strip()
-        if title:
+        title = input("\nPaper title (or 'z' to skip, 'r' to restart): ").strip()
+        if title.lower() == 'r':
+            return {'_restart': True}
+        elif title and title.lower() != 'z':
             metadata['title'] = title
         
-        year = input("Publication year: ").strip()
-        if year:
+        year = input("Publication year (or 'z' to skip, 'r' to restart): ").strip()
+        if year.lower() == 'r':
+            return {'_restart': True}
+        elif year and year.lower() != 'z':
             metadata['year'] = year
         
         # Type-specific fields
         if doc_type in ['journal_article', 'conference_paper']:
-            journal = input("Journal/Conference name: ").strip()
-            if journal:
+            journal = input("Journal/Conference name (or 'z' to skip, 'r' to restart): ").strip()
+            if journal.lower() == 'r':
+                return {'_restart': True}
+            elif journal and journal.lower() != 'z':
                 metadata['journal'] = journal
         
         elif doc_type == 'book_chapter':
@@ -2437,14 +2486,30 @@ class PaperProcessorDaemon:
             online_metadata.get('year') if online_metadata else None,
             local_metadata.get('year') if local_metadata else None
         )
-        new_value = input("New year (or Enter to keep current): ").strip()
+        current_year = edited.get('year', '')
+        if current_year:
+            prompt_text = f"New year (current: {current_year}, Enter to keep, or 'clear' to remove): "
+        else:
+            prompt_text = "New year (Enter to skip, or 'clear' to remove): "
+        new_value = input(prompt_text).strip()
         if new_value:
-            edited['year'] = new_value
+            if new_value.lower() == 'clear':
+                edited['year'] = ''
+                edited.pop('_year_confirmed', None)  # Clear confirmation flag if year is cleared
+                print("✅ Year cleared")
+            elif new_value.isdigit() and len(new_value) == 4:
+                edited['year'] = new_value
+                edited.pop('_year_confirmed', None)  # Clear confirmation flag to allow re-editing
+                print(f"✅ Year updated to: {new_value}")
+            else:
+                print("⚠️  Invalid year format (expected 4 digits, e.g., '2024'). Year not changed.")
         elif online_metadata and online_metadata.get('year') and not edited.get('year'):
             edited['year'] = online_metadata['year']
+            edited.pop('_year_confirmed', None)  # Clear confirmation flag
             print(f"✅ Auto-filled from online: {online_metadata['year']}")
         elif local_metadata and local_metadata.get('year') and not edited.get('year'):
             edited['year'] = local_metadata['year']
+            edited.pop('_year_confirmed', None)  # Clear confirmation flag
             print(f"✅ Auto-filled from local: {local_metadata['year']}")
         
         # Journal/Source
@@ -3665,9 +3730,10 @@ class PaperProcessorDaemon:
                             print(f"\n📅 Year found by {suggested_source}: {suggested_year}")
                         
                         # Simple prompt: press Enter to confirm or type a different year
+                        print("💡 You can type a 4-digit year to change it, or press Enter to confirm")
                         while True:
                             try:
-                                year_input = input(f"Press Enter to confirm ({suggested_year}) or type a different year (or 'r' to restart): ").strip()
+                                year_input = input(f"Year [{suggested_year}] (Enter=confirm, type new year, 'm'=manual entry, or 'r'=restart): ").strip()
                             except (KeyboardInterrupt, EOFError):
                                 print("\n❌ Cancelled")
                                 self.move_to_failed(pdf_path)
@@ -3682,24 +3748,47 @@ class PaperProcessorDaemon:
                                 metadata['_year_confirmed'] = True
                                 break
                             elif year_input.lower() == 'r':
-                                # User wants to restart
+                                # User wants to restart - go back to beginning of process_paper
                                 print("🔄 Restarting from beginning...")
+                                print("   (This will re-extract metadata and prompt for year again)")
                                 self.process_paper(pdf_path)
                                 return
+                            elif year_input.lower() == 'm':
+                                # User wants manual entry - clear suggested year and use manual prompt
+                                print("📝 Manual year entry...")
+                                metadata.pop('year', None)
+                                # Fall through to manual entry prompt below
+                                break
                             elif year_input.isdigit() and len(year_input) == 4:
                                 # User entered a different year
                                 metadata['year'] = year_input
                                 metadata['_year_source'] = 'manual'
-                                print(f"✅ Using manual year: {year_input}")
+                                print(f"✅ Year changed to: {year_input}")
                                 self.logger.info(f"User entered manual year: {year_input}")
                                 metadata['_year_confirmed'] = True
                                 break
                             else:
-                                print("⚠️  Invalid year format (expected 4 digits, press Enter, or 'r' to restart)")
+                                print("⚠️  Invalid year format (expected 4 digits, e.g., '2024')")
+                                print("   Press Enter to confirm suggested year, type a 4-digit year to change it,")
+                                print("   'm' for manual entry prompt, or 'r' to restart from beginning")
                 
                 # Prompt for year BEFORE document type, so numeric input isn't misrouted
-                # (This will only prompt if no year was found by any source)
-                metadata = self.prompt_for_year(metadata)
+                # (This will only prompt if no year was found by any source, or if user chose 'm' for manual entry)
+                # Check if user requested manual entry (year was cleared above)
+                if not metadata.get('year') or not metadata.get('_year_confirmed'):
+                    year_result = self.prompt_for_year(metadata, allow_back=True)
+                    # Handle special return values
+                    if year_result == 'BACK':
+                        # User cancelled - return gracefully, daemon continues watching
+                        print("\n⏸️  Returning to watch mode - ready for next scan")
+                        return
+                    elif year_result == 'RESTART':
+                        # User wants to restart processing this file
+                        print("🔄 Restarting from beginning...")
+                        self.process_paper(pdf_path)
+                        return
+                    else:
+                        metadata = year_result  # Year was added/updated in metadata
                 
                 # Check if JSTOR ID was found - automatically set as journal article
                 if identifiers.get('jstor_ids') and not metadata.get('document_type'):
@@ -3719,6 +3808,12 @@ class PaperProcessorDaemon:
                 # Extraction failed - use guided workflow
                 self.logger.warning("Metadata extraction failed - starting guided workflow")
                 metadata = self.handle_failed_extraction(pdf_path)
+                
+                # Check for restart request
+                if metadata and metadata.get('_restart'):
+                    print("🔄 Restarting from beginning...")
+                    self.process_paper(pdf_path)
+                    return
                 
                 if metadata:
                     # Document type was already set during handle_failed_extraction
@@ -4101,6 +4196,11 @@ class PaperProcessorDaemon:
         success, error_msg = self._copy_file_universal(source, final_path, replace_existing=False)
         if success:
             self.logger.debug(f"Copied to: {final_path}")
+            # Increment copy counter and refresh cache after every 10 copies
+            self.publications_copy_count += 1
+            if self.publications_copy_count >= 10:
+                self._refresh_publications_cache()
+                self.publications_copy_count = 0
             return final_path
         else:
             self.logger.error(f"Copy failed: {error_msg}")
@@ -4360,9 +4460,31 @@ class PaperProcessorDaemon:
         print("If your document starts on scan page 2, 3, 4, etc., enter that number now.")
         print()
         
+        # Use timeout if configured
+        timeout_seconds = self.page_offset_timeout
+        if timeout_seconds > 0:
+            print(f"⏱️  Auto-proceeding with page 1 in {timeout_seconds} seconds if no input...")
+            print()
+        
         while True:
             try:
-                user_input = input("Enter starting scan page number (1-{}) or press Enter for page 1: ".format(total_pages if total_pages else "N")).strip()
+                if timeout_seconds > 0 and HAS_SELECT:
+                    # Use select-based timeout for Unix/WSL
+                    prompt_text = "Enter starting scan page number (1-{}) or press Enter for page 1: ".format(total_pages if total_pages else "N")
+                    print(prompt_text, end='', flush=True)
+                    
+                    # Wait for input with timeout using select
+                    ready, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
+                    if ready:
+                        # Input is available - read it
+                        user_input = sys.stdin.readline().strip()
+                    else:
+                        # Timeout - use default (page 1)
+                        print("\n⏱️  Timeout reached - proceeding with page 1 (default)")
+                        return 0
+                else:
+                    # No timeout or select not available - use regular input
+                    user_input = input("Enter starting scan page number (1-{}) or press Enter for page 1: ".format(total_pages if total_pages else "N")).strip()
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Cancelled")
                 return None
@@ -4765,6 +4887,9 @@ class PaperProcessorDaemon:
         
         # Process existing files in the directory
         self.process_existing_files()
+        
+        # Refresh publications cache on startup
+        self._refresh_publications_cache()
         
         self.logger.info("Ready for scans!")
         self.logger.info("="*60)
@@ -5360,21 +5485,35 @@ class PaperProcessorDaemon:
         for author in authors:
             info = {'name': author, 'paper_count': 0, 'recognized': False, 'recognized_as': None}
             if self.author_validator:
+                # Try exact match first
                 author_data = self.author_validator.get_author_info(author)
                 if author_data:
                     info['paper_count'] = author_data.get('paper_count', 0)
                     info['recognized'] = True
                     info['recognized_as'] = author_data.get('name')
                 else:
-                    # Try OCR correction / alternatives match
-                    try:
-                        suggestion = self.author_validator.suggest_ocr_correction(author)
-                        if suggestion:
-                            info['recognized'] = True
-                            info['recognized_as'] = suggestion.get('corrected_name')
-                            info['paper_count'] = suggestion.get('paper_count', 0)
-                    except Exception:
-                        pass
+                    # Try lastname matching (for cases like "Sicakkan" matching "Hakan Gürcan Sicakkan")
+                    # Use validate_authors which does lastname matching
+                    validation_result = self.author_validator.validate_authors([author])
+                    if validation_result['known_authors']:
+                        # Found match via lastname
+                        known_author = validation_result['known_authors'][0]
+                        info['recognized'] = True
+                        info['recognized_as'] = known_author['name']
+                        # Get paper count for the matched full name
+                        full_name_data = self.author_validator.get_author_info(known_author['name'])
+                        if full_name_data:
+                            info['paper_count'] = full_name_data.get('paper_count', 0)
+                    else:
+                        # Try OCR correction / alternatives match
+                        try:
+                            suggestion = self.author_validator.suggest_ocr_correction(author)
+                            if suggestion:
+                                info['recognized'] = True
+                                info['recognized_as'] = suggestion.get('corrected_name')
+                                info['paper_count'] = suggestion.get('paper_count', 0)
+                        except Exception:
+                            pass
             author_info.append(info)
         
         # Display authors with number labels (1, 2, 3, ...)
@@ -5525,13 +5664,22 @@ class PaperProcessorDaemon:
                             return [info['name']]
                 
                 # Parse number sequence (e.g., "12" means author 1 then author 2)
-                # Handle multi-digit numbers by parsing character by character
+                # First check if the entire selection is a single valid author number
+                if selection in author_map:
+                    # Single author selection (e.g., "3" for author 3)
+                    selected_authors = [author_map[selection]]
+                    author_str = selected_authors[0]
+                    self.logger.info(f"User selected author: {author_str}")
+                    return selected_authors
+                
+                # Handle multi-digit numbers by parsing character by character (e.g., "12" means author 1 then author 2)
                 for char in selection:
                     if char in author_map:
                         selected_authors.append(author_map[char])
                     elif char.isdigit():
                         # Valid digit but not in map (e.g., author number doesn't exist)
-                        print(f"⚠️  Ignoring invalid author number: '{char}'")
+                        available = ', '.join(sorted(author_map.keys())) if author_map else 'none'
+                        print(f"⚠️  Invalid author number: '{char}' (available: {available})")
                     else:
                         # Non-digit, non-command character
                         print(f"⚠️  Ignoring invalid character: '{char}'")
@@ -5541,7 +5689,12 @@ class PaperProcessorDaemon:
                     self.logger.info(f"User selected authors in order: {author_str}")
                     return selected_authors
                 else:
-                    print("⚠️  No valid selection, please try again")
+                    # Show helpful error with available options
+                    if author_map:
+                        available = ', '.join(sorted(author_map.keys()))
+                        print(f"⚠️  No valid selection. Available author numbers: {available}")
+                    else:
+                        print("⚠️  No authors available. Use 'n' to add a new author.")
                     print()  # Blank line before showing list again
                     continue
     
@@ -6979,15 +7132,15 @@ class PaperProcessorDaemon:
         print("="*70)
         print("You can add a sentence or two from your notes on the paper folder.")
         print("  (Enter) Skip - don't add a note")
-        print("  (n) Add a note")
+        print("  (a) Add a note")
         print("  (z) Cancel and go back")
         print("="*70)
-        note_choice = input("\nAdd a note? [Enter/n/z]: ").strip().lower()
+        note_choice = input("\nAdd a note? [Enter/a/z]: ").strip().lower()
         
         if note_choice == 'z':
             print("⬅️  Cancelling note addition")
             return False
-        elif note_choice == 'n':
+        elif note_choice == 'a':
             print("\n📝 Enter your note (press Enter on a blank line when finished):")
             note_lines = []
             while True:
@@ -7426,25 +7579,77 @@ class PaperProcessorDaemon:
             year = item_metadata.get('year', '')
             
             if author_lastname and year:
-                # Look for files starting with Author_Year
+                # Look for files starting with Author_Year using cached list
                 search_pattern = f"{author_lastname}_{year}"
-                matching_files = list(self.publications_dir.glob(f"{search_pattern}*.pdf"))
+                cached_files = self._get_publications_cache()
                 
-                if matching_files:
+                # Filter cached filenames that match the pattern
+                matching_filenames = [f for f in cached_files if f.startswith(search_pattern)]
+                
+                if matching_filenames:
                     # Return the first match (most likely the same file)
-                    found_path = matching_files[0]
-                    stat = found_path.stat()
-                    return {
-                        'path': found_path,
-                        'size_mb': stat.st_size / 1024 / 1024,
-                        'modified': stat.st_mtime,
-                        'filename': found_path.name,
-                        'fuzzy_match': True  # Flag this as fuzzy match
-                    }
+                    found_filename = matching_filenames[0]
+                    found_path = self.publications_dir / found_filename
+                    
+                    # Verify file still exists (cache might be slightly stale)
+                    if found_path.exists():
+                        stat = found_path.stat()
+                        return {
+                            'path': found_path,
+                            'size_mb': stat.st_size / 1024 / 1024,
+                            'modified': stat.st_mtime,
+                            'filename': found_filename,
+                            'fuzzy_match': True  # Flag this as fuzzy match
+                        }
         except Exception as e:
             self.logger.debug(f"Could not locate existing PDF: {e}")
         
         return {}
+    
+    def _refresh_publications_cache(self):
+        """Refresh the publications directory cache by listing all PDF files.
+        
+        This is called on startup and periodically while daemon is idle to keep
+        the cache fresh for fast fuzzy matching.
+        """
+        try:
+            # List all PDF files in publications directory
+            pdf_files = []
+            if self.publications_dir.exists():
+                # Use glob to get all PDFs
+                pdf_paths = list(self.publications_dir.glob("*.pdf"))
+                pdf_files = [p.name for p in pdf_paths]
+            
+            # Save to cache file
+            cache_data = {
+                'pdf_files': pdf_files,
+                'timestamp': time.time(),
+                'count': len(pdf_files)
+            }
+            
+            with open(self.publications_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=2)
+            
+            self.logger.debug(f"Refreshed publications cache: {len(pdf_files)} PDFs")
+        except Exception as e:
+            self.logger.warning(f"Failed to refresh publications cache: {e}")
+    
+    def _get_publications_cache(self) -> list:
+        """Get cached list of PDF filenames from publications directory.
+        
+        Returns:
+            List of PDF filenames, or empty list if cache unavailable
+        """
+        try:
+            if not self.publications_cache_file.exists():
+                return []
+            
+            with open(self.publications_cache_file, 'r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+                return cache_data.get('pdf_files', [])
+        except Exception as e:
+            self.logger.debug(f"Could not load publications cache: {e}")
+            return []
     
     def _display_pdf_comparison(self, scan_path: Path, scan_size_mb: float, existing_pdf_info: dict):
         """Display comparison between scan and existing PDF.

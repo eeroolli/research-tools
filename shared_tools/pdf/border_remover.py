@@ -85,7 +85,7 @@ class BorderRemover:
         self.min_page_margin_px = self.config.get('min_page_margin_px', 80)
         self.close_gaps_k = self.config.get('close_gaps_k', 2)
         
-    def detect_borders(self, image: np.ndarray) -> Dict[str, int]:
+    def detect_borders(self, image: np.ndarray, debug: bool = False) -> Dict[str, int]:
         """Detect border widths on all sides of an image.
         
         Only reports borders if they actually contain dark pixels (scanner bed).
@@ -93,6 +93,7 @@ class BorderRemover:
         
         Args:
             image: Grayscale or color image as numpy array
+            debug: If True, log detailed diagnostic information
             
         Returns:
             Dictionary with keys: 'top', 'bottom', 'left', 'right'
@@ -106,78 +107,206 @@ class BorderRemover:
         
         h, w = gray.shape
         
+        if debug:
+            self.logger.info(f"Image dimensions: {w}x{h}")
+            self.logger.info(f"Image pixel range: min={gray.min()}, max={gray.max()}, mean={gray.mean():.1f}")
+        
         # Get candidate borders (where content starts)
         candidate_borders = self._detect_borders_projection(gray, h, w)
         
+        if debug:
+            self.logger.info(f"Candidate borders from projection: {candidate_borders}")
+        
         # Verify borders actually contain dark pixels (scanner bed)
-        # Skip outer portion of borders to avoid white strips at edges (copier masks)
+        # Handle case where there are white copier margins at edges, then dark borders beyond
         dark_threshold = float(self.dark_threshold)
         verified_borders = {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}
         
-        # Sample pixels in inner portion of border regions - require at least some dark pixels
-        min_dark_fraction = 0.15  # At least 15% of checked region should be dark
-        skip_outer_percent = 0.20  # Skip outer 20% of detected border
-        min_skip_pixels = 50  # Minimum pixels to skip (handles small borders)
+        # Sample pixels in border regions - require at least some dark pixels
+        min_dark_fraction = 0.10  # Lowered from 0.15 to 0.10 - at least 10% should be dark
+        # For edges: check from edge inward, looking for dark borders even beyond white margins
+        # White copier margins are typically 5-20 pixels, so check up to max_border_width from edge
+        max_border_check = min(self.max_border_width, w // 2, h // 2)
         
-        # Top border
-        if candidate_borders['top'] > 0:
-            border_width = candidate_borders['top']
-            # Skip outer portion, check inner part
-            skip_pixels = max(int(border_width * skip_outer_percent), min_skip_pixels)
-            inner_start = skip_pixels
-            inner_end = border_width
-            if inner_end > inner_start:
-                inner_region = gray[inner_start:inner_end, :]
-                if inner_region.size > 0:
-                    dark_pixels = np.sum(inner_region <= dark_threshold)
-                    dark_fraction = dark_pixels / inner_region.size
-                    if dark_fraction >= min_dark_fraction:
-                        verified_borders['top'] = candidate_borders['top']
+        if debug:
+            self.logger.info(f"Detection thresholds: dark_threshold={dark_threshold}, "
+                           f"min_dark_fraction={min_dark_fraction}, "
+                           f"max_border_check={max_border_check}")
         
-        # Bottom border
-        if candidate_borders['bottom'] > 0:
-            border_width = candidate_borders['bottom']
-            # Skip outer portion (from edge), check inner part
-            skip_pixels = max(int(border_width * skip_outer_percent), min_skip_pixels)
-            inner_start = h - border_width + skip_pixels
-            inner_end = h
-            if inner_end > inner_start:
-                inner_region = gray[inner_start:inner_end, :]
-                if inner_region.size > 0:
-                    dark_pixels = np.sum(inner_region <= dark_threshold)
-                    dark_fraction = dark_pixels / inner_region.size
-                    if dark_fraction >= min_dark_fraction:
-                        verified_borders['bottom'] = candidate_borders['bottom']
+        # Top border - scan from edge inward for dark borders (may have white margin first)
+        top_edge_region = gray[:max_border_check, :]
+        if top_edge_region.size > 0:
+            dark_pixels = np.sum(top_edge_region <= dark_threshold)
+            dark_fraction = dark_pixels / top_edge_region.size
+            min_val = top_edge_region.min()
+            max_val = top_edge_region.max()
+            mean_val = top_edge_region.mean()
+            
+            if debug:
+                self.logger.info(f"Top border: checking edge region 0:{max_border_check}, "
+                               f"pixels={top_edge_region.size}, dark_pixels={dark_pixels}, "
+                               f"dark_fraction={dark_fraction:.3f}, "
+                               f"pixel_range=[{min_val}, {max_val}], mean={mean_val:.1f}")
+            
+            if dark_fraction >= min_dark_fraction:
+                # Find the bottom edge of the dark border region
+                dark_border_end = 0
+                for row in range(max_border_check):
+                    row_data = gray[row, :]
+                    row_dark_fraction = np.sum(row_data <= dark_threshold) / row_data.size
+                    if row_dark_fraction >= min_dark_fraction:
+                        dark_border_end = row + 1
+                    else:
+                        if dark_border_end > 0:
+                            break
+                
+                if dark_border_end > 0:
+                    verified_borders['top'] = dark_border_end
+                    if debug:
+                        self.logger.info(f"  -> VERIFIED: dark border width={dark_border_end}px "
+                                       f"(dark_fraction {dark_fraction:.3f} >= {min_dark_fraction})")
+                else:
+                    if debug:
+                        self.logger.info(f"  -> REJECTED: dark pixels found but couldn't determine border width")
+            else:
+                if debug:
+                    self.logger.info(f"  -> REJECTED: dark_fraction {dark_fraction:.3f} < {min_dark_fraction}")
+        else:
+            if debug:
+                self.logger.info("Top border: edge region empty")
         
-        # Left border
-        if candidate_borders['left'] > 0:
-            border_width = candidate_borders['left']
-            # Skip outer portion, check inner part
-            skip_pixels = max(int(border_width * skip_outer_percent), min_skip_pixels)
-            inner_start = skip_pixels
-            inner_end = border_width
-            if inner_end > inner_start:
-                inner_region = gray[:, inner_start:inner_end]
-                if inner_region.size > 0:
-                    dark_pixels = np.sum(inner_region <= dark_threshold)
-                    dark_fraction = dark_pixels / inner_region.size
-                    if dark_fraction >= min_dark_fraction:
-                        verified_borders['left'] = candidate_borders['left']
+        # Bottom border - scan from edge inward for dark borders (may have white margin first)
+        bottom_edge_region = gray[h - max_border_check:, :]
+        if bottom_edge_region.size > 0:
+            dark_pixels = np.sum(bottom_edge_region <= dark_threshold)
+            dark_fraction = dark_pixels / bottom_edge_region.size
+            min_val = bottom_edge_region.min()
+            max_val = bottom_edge_region.max()
+            mean_val = bottom_edge_region.mean()
+            
+            if debug:
+                self.logger.info(f"Bottom border: checking edge region {h - max_border_check}:{h}, "
+                               f"pixels={bottom_edge_region.size}, dark_pixels={dark_pixels}, "
+                               f"dark_fraction={dark_fraction:.3f}, "
+                               f"pixel_range=[{min_val}, {max_val}], mean={mean_val:.1f}")
+            
+            if dark_fraction >= min_dark_fraction:
+                # Find the top edge of the dark border region (from bottom edge)
+                dark_border_end = 0
+                for row in range(h - 1, h - max_border_check - 1, -1):
+                    row_data = gray[row, :]
+                    row_dark_fraction = np.sum(row_data <= dark_threshold) / row_data.size
+                    if row_dark_fraction >= min_dark_fraction:
+                        dark_border_end = h - row
+                    else:
+                        if dark_border_end > 0:
+                            break
+                
+                if dark_border_end > 0:
+                    verified_borders['bottom'] = dark_border_end
+                    if debug:
+                        self.logger.info(f"  -> VERIFIED: dark border width={dark_border_end}px "
+                                       f"(dark_fraction {dark_fraction:.3f} >= {min_dark_fraction})")
+                else:
+                    if debug:
+                        self.logger.info(f"  -> REJECTED: dark pixels found but couldn't determine border width")
+            else:
+                if debug:
+                    self.logger.info(f"  -> REJECTED: dark_fraction {dark_fraction:.3f} < {min_dark_fraction}")
+        else:
+            if debug:
+                self.logger.info("Bottom border: edge region empty")
         
-        # Right border
-        if candidate_borders['right'] > 0:
-            border_width = candidate_borders['right']
-            # Skip outer portion (from edge), check inner part
-            skip_pixels = max(int(border_width * skip_outer_percent), min_skip_pixels)
-            inner_start = w - border_width + skip_pixels
-            inner_end = w
-            if inner_end > inner_start:
-                inner_region = gray[:, inner_start:inner_end]
-                if inner_region.size > 0:
-                    dark_pixels = np.sum(inner_region <= dark_threshold)
-                    dark_fraction = dark_pixels / inner_region.size
-                    if dark_fraction >= min_dark_fraction:
-                        verified_borders['right'] = candidate_borders['right']
+        # Left border - scan from edge inward for dark borders (may have white margin first)
+        # First check a smaller region (first 200px) to see if there's a border
+        # This avoids diluting the dark pixel fraction with content
+        initial_check_width = min(200, max_border_check)
+        left_initial_region = gray[:, :initial_check_width]
+        
+        if left_initial_region.size > 0:
+            initial_dark_pixels = np.sum(left_initial_region <= dark_threshold)
+            initial_dark_fraction = initial_dark_pixels / left_initial_region.size
+            
+            if debug:
+                self.logger.info(f"Left border: initial check region 0:{initial_check_width}, "
+                               f"pixels={left_initial_region.size}, dark_pixels={initial_dark_pixels}, "
+                               f"dark_fraction={initial_dark_fraction:.3f}")
+            
+            # If initial region has enough dark pixels, scan to find exact border width
+            if initial_dark_fraction >= min_dark_fraction:
+                # Scan columns from left to right, find where dark pixels stop
+                dark_border_end = 0
+                for col in range(max_border_check):
+                    col_data = gray[:, col]
+                    col_dark_fraction = np.sum(col_data <= dark_threshold) / col_data.size
+                    if col_dark_fraction >= min_dark_fraction:
+                        dark_border_end = col + 1
+                    else:
+                        # If we've found a dark border and now hit lighter content, stop
+                        if dark_border_end > 0:
+                            break
+                
+                if dark_border_end > 0:
+                    verified_borders['left'] = dark_border_end
+                    if debug:
+                        self.logger.info(f"  -> VERIFIED: dark border width={dark_border_end}px "
+                                       f"(initial check: {initial_dark_fraction:.3f} >= {min_dark_fraction})")
+                else:
+                    if debug:
+                        self.logger.info(f"  -> REJECTED: dark pixels found in initial region but couldn't determine border width")
+            else:
+                if debug:
+                    self.logger.info(f"  -> REJECTED: initial dark_fraction {initial_dark_fraction:.3f} < {min_dark_fraction}")
+        else:
+            if debug:
+                self.logger.info("Left border: initial check region empty")
+        
+        # Right border - scan from edge inward for dark borders (may have white margin first)
+        # First check a smaller region (last 200px) to see if there's a border
+        initial_check_width = min(200, max_border_check)
+        right_initial_region = gray[:, w - initial_check_width:]
+        
+        if right_initial_region.size > 0:
+            initial_dark_pixels = np.sum(right_initial_region <= dark_threshold)
+            initial_dark_fraction = initial_dark_pixels / right_initial_region.size
+            
+            if debug:
+                self.logger.info(f"Right border: initial check region {w - initial_check_width}:{w}, "
+                               f"pixels={right_initial_region.size}, dark_pixels={initial_dark_pixels}, "
+                               f"dark_fraction={initial_dark_fraction:.3f}")
+            
+            # If initial region has enough dark pixels, scan to find exact border width
+            if initial_dark_fraction >= min_dark_fraction:
+                # Find the leftmost edge of the dark border region (from right edge)
+                # Scan columns from right to left, find where dark pixels stop
+                dark_border_end = 0
+                for col in range(w - 1, w - max_border_check - 1, -1):
+                    col_data = gray[:, col]
+                    col_dark_fraction = np.sum(col_data <= dark_threshold) / col_data.size
+                    if col_dark_fraction >= min_dark_fraction:
+                        dark_border_end = w - col
+                    else:
+                        # If we've found a dark border and now hit lighter content, stop
+                        if dark_border_end > 0:
+                            break
+                
+                if dark_border_end > 0:
+                    verified_borders['right'] = dark_border_end
+                    if debug:
+                        self.logger.info(f"  -> VERIFIED: dark border width={dark_border_end}px "
+                                       f"(initial check: {initial_dark_fraction:.3f} >= {min_dark_fraction})")
+                else:
+                    if debug:
+                        self.logger.info(f"  -> REJECTED: dark pixels found in initial region but couldn't determine border width")
+            else:
+                if debug:
+                    self.logger.info(f"  -> REJECTED: initial dark_fraction {initial_dark_fraction:.3f} < {min_dark_fraction}")
+        else:
+            if debug:
+                self.logger.info("Right border: initial check region empty")
+        
+        if debug:
+            self.logger.info(f"Final verified borders: {verified_borders}")
         
         return verified_borders
     
@@ -1067,13 +1196,14 @@ class BorderRemover:
         return result
     
     def process_pdf_page(self, pdf_path: Path, page_num: int, 
-                        zoom: float = 2.0) -> Tuple[np.ndarray, Dict[str, int]]:
+                        zoom: float = 2.0, debug: bool = False) -> Tuple[np.ndarray, Dict[str, int]]:
         """Process a single PDF page.
         
         Args:
             pdf_path: Path to PDF file
             page_num: Zero-indexed page number
             zoom: Render zoom level for image quality
+            debug: If True, enable detailed diagnostic logging
             
         Returns:
             Tuple of (processed image, detected borders dict)
@@ -1085,6 +1215,9 @@ class BorderRemover:
             
             page = doc[page_num]
             
+            if debug:
+                self.logger.info(f"Processing PDF page {page_num + 1} from {pdf_path.name}")
+            
             # Render page as image
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat)
@@ -1095,7 +1228,7 @@ class BorderRemover:
             image_array = np.array(img)
             
             # Detect and remove borders
-            borders = self.detect_borders(image_array)
+            borders = self.detect_borders(image_array, debug=debug)
             result = self.remove_borders(image_array, borders)
             
             return result, borders
