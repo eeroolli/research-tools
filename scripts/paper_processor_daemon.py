@@ -52,6 +52,9 @@ from shared_tools.utils.isbn_matcher import ISBNMatcher
 # Import border remover for scanned documents
 from shared_tools.pdf.border_remover import BorderRemover
 
+# Import color utilities
+from shared_tools.ui.colors import ColorScheme, Colors
+
 
 class PaperProcessorDaemon:
     """Main daemon class."""
@@ -174,6 +177,7 @@ class PaperProcessorDaemon:
         
         # Get UX configuration
         self.page_offset_timeout = self.config.getint('UX', 'page_offset_timeout', fallback=10)
+        self.prompt_timeout = self.config.getint('UX', 'prompt_timeout', fallback=10)
         
         # Check if publications directory is accessible
         self._validate_publications_directory()
@@ -939,9 +943,9 @@ class PaperProcessorDaemon:
                               if typ == current_type)
             print(f"📄 Detected type: {current_name}")
             print()
-            print("[Enter] = Keep this type")
-            print("[1-9] = Change to a different type")
-            print("[q] = Cancel and skip this document")
+            print(Colors.colorize("[Enter] = Keep this type", ColorScheme.LIST))
+            print(Colors.colorize("[1-9] = Change to a different type", ColorScheme.LIST))
+            print(Colors.colorize("[q] = Cancel and skip this document", ColorScheme.LIST))
             print()
             
             print("Document types:")
@@ -1023,13 +1027,16 @@ class PaperProcessorDaemon:
             ('TECHNICAL INFO', self._get_technical_fields())
         ]
         
+        # Check if metadata is confirmed (from Zotero or has item_key)
+        is_confirmed = metadata.get('item_key') or metadata.get('from_zotero', False)
+        
         # Display each group if it has non-empty fields
         for group_name, field_mapping in field_groups:
             group_fields = self._extract_group_fields(metadata, field_mapping)
             if group_fields:
                 print(f"\n{group_name}:")
                 for field_name, field_value in group_fields.items():
-                    self._display_field(field_name, field_value)
+                    self._display_field(field_name, field_value, metadata, is_confirmed)
     
     def _get_basic_info_fields(self) -> dict:
         """Get field mapping for basic information."""
@@ -1152,36 +1159,62 @@ class PaperProcessorDaemon:
             return True  # Always show numeric values
         return True  # Default to showing other types
     
-    def _display_field(self, field_name: str, field_value):
-        """Display a single field with appropriate formatting.
+    def _display_field(self, field_name: str, field_value, metadata: dict = None, is_confirmed: bool = False):
+        """Display a single field with appropriate formatting and colors.
         
         Args:
             field_name: Display name for the field
             field_value: Value to display
+            metadata: Full metadata dict (for checking confirmation status)
+            is_confirmed: Whether metadata is confirmed (from Zotero)
         """
+        # Determine color for main metadata fields (Title, Authors, Year)
+        if field_name in ['Title', 'Authors', 'Year']:
+            if is_confirmed:
+                color = ColorScheme.METADATA_CONFIRMED
+            else:
+                color = ColorScheme.METADATA_UNCONFIRMED
+        else:
+            color = None
+        
         if field_name == 'Authors':
+            field_label = Colors.colorize(f"  {field_name}:", color) if color else f"  {field_name}:"
             if isinstance(field_value, list):
                 # Validate authors against Zotero if validator available
                 if self.author_validator:
                     validation = self.author_validator.validate_authors(field_value)
-                    print(f"  {field_name}:")
+                    print(field_label)
                     for author_info in validation['known_authors']:
                         author_name = author_info['name']
-                        print(f"    ✅ {author_name} (in Zotero)")
+                        author_display = Colors.colorize(author_name, color) if color else author_name
+                        print(f"    ✅ {author_display} (in Zotero)")
                         if author_info.get('alternatives'):
                             alts = ', '.join(author_info['alternatives'][:2])
                             print(f"       Other options: {alts}")
                     for author_info in validation['unknown_authors']:
-                        print(f"    🆕 {author_info['name']} (new author)")
+                        author_display = Colors.colorize(author_info['name'], color) if color else author_info['name']
+                        print(f"    🆕 {author_display} (new author)")
                 else:
                     # Fallback if validator not available
                     if len(field_value) > 3:
                         author_str = ', '.join(field_value[:3]) + f" (+{len(field_value)-3} more)"
                     else:
                         author_str = ', '.join(field_value)
-                    print(f"  {field_name}: {author_str}")
+                    author_display = Colors.colorize(author_str, color) if color else author_str
+                    print(f"{field_label} {author_display}")
             else:
-                print(f"  {field_name}: {field_value}")
+                value_display = Colors.colorize(str(field_value), color) if color else str(field_value)
+                print(f"{field_label} {value_display}")
+        
+        elif field_name == 'Title':
+            field_label = Colors.colorize(f"  {field_name}:", color) if color else f"  {field_name}:"
+            value_display = Colors.colorize(str(field_value), color) if color else str(field_value)
+            print(f"{field_label} {value_display}")
+        
+        elif field_name == 'Year':
+            field_label = Colors.colorize(f"  {field_name}:", color) if color else f"  {field_name}:"
+            value_display = Colors.colorize(str(field_value), color) if color else str(field_value)
+            print(f"{field_label} {value_display}")
         
         elif field_name == 'Abstract':
             if isinstance(field_value, str):
@@ -1245,12 +1278,12 @@ class PaperProcessorDaemon:
         print("\n🎯 ZOTERO MATCH FOUND!")
         print("What would you like to do with the scanned PDF?")
         print()
-        print("[1] 📎 Attach PDF to existing Zotero item")
-        print("[2] ✏️  Edit metadata before attaching")
-        print("[3] 🔍 Search Zotero again with different info")
-        print("[4] 📄 Create new Zotero item (ignore match)")
-        print("[5] ❌ Skip document")
-        print("  (q) Quit daemon")
+        print(Colors.colorize("[1] 📎 Attach PDF to existing Zotero item", ColorScheme.LIST))
+        print(Colors.colorize("[2] ✏️  Edit metadata before attaching", ColorScheme.LIST))
+        print(Colors.colorize("[3] 🔍 Search Zotero again with different info", ColorScheme.LIST))
+        print(Colors.colorize("[4] 📄 Create new Zotero item (ignore match)", ColorScheme.LIST))
+        print(Colors.colorize("[5] ❌ Skip document", ColorScheme.LIST))
+        print(Colors.colorize("  (q) Quit daemon", ColorScheme.LIST))
         print()
         
         while True:
@@ -1268,12 +1301,12 @@ class PaperProcessorDaemon:
         """
         print("\nWHAT WOULD YOU LIKE TO DO?")
         print()
-        print("[1] 📄 Create new Zotero item with extracted metadata")
-        print("[2] ✏️  Edit metadata before creating item")
-        print("[3] 🔍 Search Zotero with additional info")
-        print("[4] ❌ Skip document (not academic)")
-        print("[5] 📝 Manual processing later")
-        print("  (q) Quit daemon")
+        print(Colors.colorize("[1] 📄 Create new Zotero item with extracted metadata", ColorScheme.LIST))
+        print(Colors.colorize("[2] ✏️  Edit metadata before creating item", ColorScheme.LIST))
+        print(Colors.colorize("[3] 🔍 Search Zotero with additional info", ColorScheme.LIST))
+        print(Colors.colorize("[4] ❌ Skip document (not academic)", ColorScheme.LIST))
+        print(Colors.colorize("[5] 📝 Manual processing later", ColorScheme.LIST))
+        print(Colors.colorize("  (q) Quit daemon", ColorScheme.LIST))
         print()
         
         while True:
@@ -1469,11 +1502,11 @@ class PaperProcessorDaemon:
             # No matches after all fallbacks
             print(f"\n❌ No matches found in Zotero after trying relaxed filters for: {author_display}")
             print()
-            print("Options:")
-            print("[1] Enter a different year and search again")
-            print("[2] Proceed to create new Zotero item")
-            print("[3] Move to manual review")
-            print("  (z) Back to previous step")
+            print(Colors.colorize("Options:", ColorScheme.ACTION))
+            print(Colors.colorize("[1] Enter a different year and search again", ColorScheme.LIST))
+            print(Colors.colorize("[2] Proceed to create new Zotero item", ColorScheme.LIST))
+            print(Colors.colorize("[3] Move to manual review", ColorScheme.LIST))
+            print(Colors.colorize("  (z) Back to previous step", ColorScheme.LIST))
             print()
             
             while True:
@@ -2673,11 +2706,11 @@ class PaperProcessorDaemon:
         if suggestions:
             print(f"  💡 Suggestions: {' | '.join(suggestions)}")
         
-        print("Options:")
-        print("[Enter] Keep current")
-        print("[o] Use online abstract")
-        print("[l] Use local abstract")
-        print("[e] Edit manually")
+        print(Colors.colorize("Options:", ColorScheme.ACTION))
+        print(Colors.colorize("[Enter] Keep current", ColorScheme.LIST))
+        print(Colors.colorize("[o] Use online abstract", ColorScheme.LIST))
+        print(Colors.colorize("[l] Use local abstract", ColorScheme.LIST))
+        print(Colors.colorize("[e] Edit manually", ColorScheme.LIST))
         
         abstract_choice = input("Abstract choice: ").strip().lower()
         
@@ -2755,9 +2788,9 @@ class PaperProcessorDaemon:
             if local_tags_list:
                 print(f"  [Local]   {', '.join(local_tags_list)}")
             
-            print("\nTag editing options:")
-            print("  [Enter] = Keep current tags (or none)")
-            print("  [t]     = Edit tags interactively")
+            print(Colors.colorize("\nTag editing options:", ColorScheme.ACTION))
+            print(Colors.colorize("  [Enter] = Keep current tags (or none)", ColorScheme.LIST))
+            print(Colors.colorize("  [t]     = Edit tags interactively", ColorScheme.LIST))
             
             tag_choice = input("Choice: ").strip().lower()
             if tag_choice == 't':
@@ -2785,11 +2818,11 @@ class PaperProcessorDaemon:
                 display_note = local_note[:200] + "..." if len(local_note) > 200 else local_note
                 print(f"  [Local]   {display_note}")
             
-            print("\nNote editing options:")
-            print("  [Enter] = Keep current note (or none)")
-            print("  [o]     = Use online note")
-            print("  [l]     = Use local note")
-            print("  [e]     = Edit note manually")
+            print(Colors.colorize("\nNote editing options:", ColorScheme.ACTION))
+            print(Colors.colorize("  [Enter] = Keep current note (or none)", ColorScheme.LIST))
+            print(Colors.colorize("  [o]     = Use online note", ColorScheme.LIST))
+            print(Colors.colorize("  [l]     = Use local note", ColorScheme.LIST))
+            print(Colors.colorize("  [e]     = Edit note manually", ColorScheme.LIST))
             
             note_choice = input("Choice: ").strip().lower()
             
@@ -3638,6 +3671,69 @@ class PaperProcessorDaemon:
                         'identifiers_found': identifiers_found  # Preserve GREP years
                     }
                     self.logger.info(f"✅ GROBID extracted: {len(metadata.get('authors', []))} authors")
+                    
+                    # If we have a JSTOR ID, try to fetch full metadata from CrossRef/OpenAlex
+                    jstor_ids = identifiers_found.get('jstor_ids', [])
+                    if jstor_ids and metadata.get('title'):
+                        jstor_id = jstor_ids[0]
+                        self.logger.info(f"JSTOR ID {jstor_id} found - trying to fetch metadata from CrossRef/OpenAlex")
+                        print(f"\n🔍 JSTOR ID found ({jstor_id}) - searching CrossRef/OpenAlex for full metadata...")
+                        
+                        # Try searching with extracted title and authors
+                        title = metadata.get('title', '')
+                        authors = metadata.get('authors', [])
+                        year = metadata.get('year') or identifiers_found.get('best_year')
+                        journal = metadata.get('journal', '')
+                        
+                        # Try CrossRef first
+                        try:
+                            crossref_results = self.metadata_processor.crossref.search_by_metadata(
+                                title=title,
+                                authors=authors,
+                                year=year,
+                                journal=journal,
+                                max_results=3
+                            )
+                            if crossref_results:
+                                # Use the first (most relevant) result
+                                api_metadata = crossref_results[0]
+                                # Merge with existing metadata (prefer API data)
+                                metadata.update(api_metadata)
+                                metadata['jstor_id'] = jstor_id  # Preserve JSTOR ID
+                                result['metadata'] = metadata
+                                result['method'] = 'grobid+crossref'
+                                print(f"  ✅ Found metadata in CrossRef - merged with GROBID extraction")
+                                self.logger.info("JSTOR article: Found metadata in CrossRef")
+                            else:
+                                # Try OpenAlex as fallback
+                                try:
+                                    openalex_results = self.metadata_processor.openalex.search_by_metadata(
+                                        title=title,
+                                        authors=authors,
+                                        year=year,
+                                        journal=journal,
+                                        max_results=3
+                                    )
+                                    if openalex_results:
+                                        api_metadata = openalex_results[0]
+                                        metadata.update(api_metadata)
+                                        metadata['jstor_id'] = jstor_id
+                                        result['metadata'] = metadata
+                                        result['method'] = 'grobid+openalex'
+                                        print(f"  ✅ Found metadata in OpenAlex - merged with GROBID extraction")
+                                        self.logger.info("JSTOR article: Found metadata in OpenAlex")
+                                    else:
+                                        print(f"  ⚠️  No metadata found in CrossRef/OpenAlex - using GROBID extraction only")
+                                        metadata['jstor_id'] = jstor_id
+                                        result['metadata'] = metadata
+                                except Exception as e:
+                                    self.logger.warning(f"OpenAlex search failed for JSTOR ID {jstor_id}: {e}")
+                                    metadata['jstor_id'] = jstor_id
+                                    result['metadata'] = metadata
+                        except Exception as e:
+                            self.logger.warning(f"CrossRef search failed for JSTOR ID {jstor_id}: {e}")
+                            metadata['jstor_id'] = jstor_id
+                            result['metadata'] = metadata
                 else:
                     self.logger.info("GROBID did not find authors")
             
@@ -4428,6 +4524,51 @@ class PaperProcessorDaemon:
             self.logger.error(f"Split failed: {e}")
             return None
     
+    def _input_with_timeout(self, prompt: str, timeout_seconds: int = None, 
+                           default: str = None) -> Optional[str]:
+        """Get user input with optional timeout.
+        
+        Args:
+            prompt: Prompt text to display
+            timeout_seconds: Timeout in seconds (None = use config default, 0 = no timeout)
+            default: Default value to return on timeout (None = return None)
+            
+        Returns:
+            User input string, default value on timeout, or None if cancelled
+        """
+        if timeout_seconds is None:
+            timeout_seconds = self.prompt_timeout
+        
+        # Silent timeout - no warning message (only show message when timeout occurs)
+        try:
+            if timeout_seconds > 0 and HAS_SELECT:
+                # Use select-based timeout for Unix/WSL
+                print(prompt, end='', flush=True)
+                
+                # Wait for input with timeout using select
+                ready, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
+                if ready:
+                    # Input is available - read it
+                    user_input = sys.stdin.readline().strip()
+                    return user_input if user_input else default
+                else:
+                    # Timeout - use default (low-contrast message)
+                    if default is not None:
+                        timeout_msg = Colors.colorize("⏱️  Timeout reached - proceeding with default", ColorScheme.TIMEOUT)
+                        print(f"\n{timeout_msg}")
+                        return default
+                    else:
+                        timeout_msg = Colors.colorize("⏱️  Timeout reached", ColorScheme.TIMEOUT)
+                        print(f"\n{timeout_msg}")
+                        return None
+            else:
+                # No timeout or select not available - use regular input
+                user_input = input(prompt).strip()
+                return user_input if user_input else default
+        except (KeyboardInterrupt, EOFError):
+            print("\n❌ Cancelled")
+            return None
+    
     def _prompt_for_page_offset(self, pdf_path: Path) -> Optional[int]:
         """Prompt user to specify which page the document actually starts on.
         
@@ -4462,29 +4603,19 @@ class PaperProcessorDaemon:
         
         # Use timeout if configured
         timeout_seconds = self.page_offset_timeout
-        if timeout_seconds > 0:
-            print(f"⏱️  Auto-proceeding with page 1 in {timeout_seconds} seconds if no input...")
-            print()
         
         while True:
             try:
-                if timeout_seconds > 0 and HAS_SELECT:
-                    # Use select-based timeout for Unix/WSL
-                    prompt_text = "Enter starting scan page number (1-{}) or press Enter for page 1: ".format(total_pages if total_pages else "N")
-                    print(prompt_text, end='', flush=True)
-                    
-                    # Wait for input with timeout using select
-                    ready, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
-                    if ready:
-                        # Input is available - read it
-                        user_input = sys.stdin.readline().strip()
-                    else:
-                        # Timeout - use default (page 1)
-                        print("\n⏱️  Timeout reached - proceeding with page 1 (default)")
-                        return 0
-                else:
-                    # No timeout or select not available - use regular input
-                    user_input = input("Enter starting scan page number (1-{}) or press Enter for page 1: ".format(total_pages if total_pages else "N")).strip()
+                prompt_text = "Enter starting scan page number (1-{}) or press Enter for page 1: ".format(total_pages if total_pages else "N")
+                user_input = self._input_with_timeout(
+                    prompt_text,
+                    timeout_seconds=timeout_seconds,
+                    default=""
+                )
+                if user_input is None:
+                    print("\n❌ Cancelled")
+                    return None
+                user_input = user_input.strip()
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Cancelled")
                 return None
@@ -4639,7 +4770,14 @@ class PaperProcessorDaemon:
         
         while True:
             try:
-                response = input("Trim leading pages? [Enter=keep all / number=pages to drop]: ").strip().lower()
+                response = self._input_with_timeout(
+                    "Trim leading pages? [Enter=keep all / number=pages to drop]: ",
+                    default=""
+                )
+                if response is None:
+                    print("\n❌ Trim cancelled - keeping all pages")
+                    return pdf_path, False
+                response = response.strip().lower()
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Trim cancelled - keeping all pages")
                 return pdf_path, False
@@ -5542,17 +5680,17 @@ class PaperProcessorDaemon:
             else:
                 print("  (No authors - use 'n' to add a new author)")
             
-            print("\nSelection options:")
-            print("  '1'   = Search by first author only")
-            print("  '12'  = Search where 1st=1, 2nd=2")
-            print("  '21'  = Search where 1st=2, 2nd=1")
-            print("  'all' = Search by any author (no order)")
-            print("  ''    = Use all authors as extracted")
-            print("  'e'   = Edit an author name")
-            print("  'n'   = Add new author manually")
-            print("  '-1'  = Delete author 1 from list")
-            print("  'z'   = Back to previous step")
-            print("  'r'   = Restart from beginning")
+            print(Colors.colorize("\nSelection options:", ColorScheme.ACTION))
+            print(Colors.colorize("  '1'   = Search by first author only", ColorScheme.LIST))
+            print(Colors.colorize("  '12'  = Search where 1st=1, 2nd=2", ColorScheme.LIST))
+            print(Colors.colorize("  '21'  = Search where 1st=2, 2nd=1", ColorScheme.LIST))
+            print(Colors.colorize("  'all' = Search by any author (no order)", ColorScheme.LIST))
+            print(Colors.colorize("  ''    = Use all authors as extracted", ColorScheme.LIST))
+            print(Colors.colorize("  'e'   = Edit an author name", ColorScheme.LIST))
+            print(Colors.colorize("  'n'   = Add new author manually", ColorScheme.LIST))
+            print(Colors.colorize("  '-1'  = Delete author 1 from list", ColorScheme.LIST))
+            print(Colors.colorize("  'z'   = Back to previous step", ColorScheme.LIST))
+            print(Colors.colorize("  'r'   = Restart from beginning", ColorScheme.LIST))
             
             selection = input("\nYour selection (numbers like '1', '12', 'all', or commands e/n/-1/z/r): ").strip()
             selection_lower = selection.lower()
@@ -6008,6 +6146,7 @@ class PaperProcessorDaemon:
         
         all_results = []
         source_name = None
+        checked_libraries = []  # Track which libraries were checked
         
         # Use document type to guide API selection
         doc_type = metadata.get('document_type', '').lower()
@@ -6019,6 +6158,8 @@ class PaperProcessorDaemon:
         ) and doc_type in ['journal_article', 'conference_paper', 'report', 'academic_paper', '']
         
         if should_try_crossref:
+            print("🔍 Checking CrossRef...")
+            checked_libraries.append("CrossRef")
             try:
                 # Access crossref client from metadata processor
                 crossref = self.metadata_processor.crossref
@@ -6033,10 +6174,15 @@ class PaperProcessorDaemon:
                 if results:
                     all_results = results
                     source_name = "CrossRef"
+                    print("   ✅ CrossRef: Found results")
+                else:
+                    print("   ⚠️  CrossRef: No results found")
                     
             except Exception as e:
                 self.logger.error(f"CrossRef search error: {e}")
-                print(f"⚠️  CrossRef search failed: {e}")
+                print(f"   ❌ CrossRef: Error - {e}")
+        else:
+            print("⏭️  Skipping CrossRef (document type: " + (doc_type if doc_type else "unknown") + ")")
         
         # Try arXiv for preprints and working papers (also try if no CrossRef result and no journal)
         should_try_arxiv = (
@@ -6045,6 +6191,8 @@ class PaperProcessorDaemon:
         )
         
         if should_try_arxiv:
+            print("🔍 Checking arXiv...")
+            checked_libraries.append("arXiv")
             try:
                 arxiv = self.metadata_processor.arxiv
                 results = arxiv.search_by_metadata(
@@ -6056,10 +6204,16 @@ class PaperProcessorDaemon:
                 if results:
                     all_results = results
                     source_name = "arXiv"
+                    print("   ✅ arXiv: Found results")
+                else:
+                    print("   ⚠️  arXiv: No results found")
                     
             except Exception as e:
                 self.logger.error(f"arXiv search error: {e}")
-                print(f"⚠️  arXiv search failed: {e}")
+                print(f"   ❌ arXiv: Error - {e}")
+        else:
+            if not all_results:
+                print("⏭️  Skipping arXiv (document type: " + (doc_type if doc_type else "unknown") + ")")
         
         # Try book lookup for book chapters (title + editor)
         should_try_book_lookup = doc_type == 'book_chapter'
@@ -6089,8 +6243,8 @@ class PaperProcessorDaemon:
                     print("\nEditor name (often one of the chapter authors):")
                     if editor_candidates:
                         print(f"Chapter authors found: {'; '.join(editor_candidates)}")
-                        print("[Enter] = Use first chapter author as editor")
-                        print("[Enter name] = Enter editor name manually")
+                        print(Colors.colorize("[Enter] = Use first chapter author as editor", ColorScheme.LIST))
+                        print(Colors.colorize("[Enter name] = Enter editor name manually", ColorScheme.LIST))
                         editor_input = input("Editor: ").strip()
                         if not editor_input and editor_candidates:
                             editor = editor_candidates[0]
@@ -6105,8 +6259,10 @@ class PaperProcessorDaemon:
             
             # Perform book lookup if we have book title
             if book_title:
+                print("🔍 Checking Google Books/OpenLibrary...")
+                checked_libraries.append("Google Books/OpenLibrary")
                 try:
-                    print(f"\n🔍 Searching for book: '{book_title}'" + (f" (editor: {editor})" if editor else " (no editor)"))
+                    print(f"   Searching for book: '{book_title}'" + (f" (editor: {editor})" if editor else " (no editor)"))
                     book_result = self.book_lookup_service.lookup_by_title_and_editor(book_title, editor)
                     
                     if book_result:
@@ -6116,9 +6272,9 @@ class PaperProcessorDaemon:
                         # Store as single result (books don't return multiple like CrossRef)
                         all_results = [normalized_book]
                         source_name = "Google Books/OpenLibrary"
-                        print("✅ Found book metadata")
+                        print("   ✅ Google Books/OpenLibrary: Found results")
                     else:
-                        print("❌ No book metadata found")
+                        print("   ⚠️  Google Books/OpenLibrary: No results found")
                         
                         # Try national library search as fallback
                         language = None
@@ -6127,9 +6283,10 @@ class PaperProcessorDaemon:
                         elif hasattr(self, '_original_scan_path') and self._original_scan_path:
                             language = self._detect_language_from_filename(self._original_scan_path)
                         if language and book_title:
+                            print(f"🔍 Checking National Libraries ({language})...")
+                            checked_libraries.append(f"National Libraries ({language})")
                             try:
                                 country_code = self._language_to_country_code(language)
-                                print(f"\n🔍 Trying national library search for {language}...")
                                 nat_lib_results = self._search_national_library_for_book(
                                     book_title=book_title, 
                                     editor=editor,
@@ -6139,13 +6296,15 @@ class PaperProcessorDaemon:
                                 if nat_lib_results:
                                     all_results.extend(nat_lib_results)
                                     source_name = "Google Books/OpenLibrary + National Libraries"
-                                    print(f"✅ Found {len(nat_lib_results)} additional result(s) in national libraries")
+                                    print(f"   ✅ National Libraries: Found {len(nat_lib_results)} result(s)")
+                                else:
+                                    print(f"   ⚠️  National Libraries: No results found")
                             except Exception as e:
                                 self.logger.error(f"National library search error: {e}")
-                                print(f"⚠️  National library search failed: {e}")
+                                print(f"   ❌ National Libraries: Error - {e}")
                 except Exception as e:
                     self.logger.error(f"Book lookup error: {e}")
-                    print(f"⚠️  Book search failed: {e}")
+                    print(f"   ❌ Google Books/OpenLibrary: Error - {e}")
         
         # Also try national library search for books and theses
         if doc_type in ['book', 'thesis'] and not all_results:
@@ -6158,9 +6317,10 @@ class PaperProcessorDaemon:
                 language = self._detect_language_from_filename(self._original_scan_path)
             
             if title and language:
+                print(f"🔍 Checking National Libraries ({language})...")
+                checked_libraries.append(f"National Libraries ({language})")
                 try:
                     country_code = self._language_to_country_code(language)
-                    print(f"\n🔍 Trying national library search for {doc_type} ({language})...")
                     nat_lib_results = self._search_national_library_for_book(
                         book_title=title,
                         authors=authors,
@@ -6171,13 +6331,20 @@ class PaperProcessorDaemon:
                     if nat_lib_results:
                         all_results.extend(nat_lib_results)
                         source_name = "National Libraries"
-                        print(f"✅ Found {len(nat_lib_results)} result(s) in national libraries")
+                        print(f"   ✅ National Libraries: Found {len(nat_lib_results)} result(s)")
+                    else:
+                        print(f"   ⚠️  National Libraries: No results found")
                 except Exception as e:
                     self.logger.error(f"National library search error: {e}")
-                    print(f"⚠️  National library search failed: {e}")
+                    print(f"   ❌ National Libraries: Error - {e}")
         
         if not all_results:
-            print("❌ No matches found in online libraries")
+            if checked_libraries:
+                print(f"\n❌ No matches found in online libraries")
+                print(f"   Checked: {', '.join(checked_libraries)}")
+            else:
+                print(f"\n❌ No matches found in online libraries")
+                print(f"   No libraries were checked (document type: {doc_type if doc_type else 'unknown'})")
             print()
             return None
         
@@ -6897,7 +7064,14 @@ class PaperProcessorDaemon:
         else:
             # No online results - either none found or user skipped all
             print("\nUsing manual/extracted metadata (no online library metadata selected)")
-            confirm = input("Proceed with creation? [Y/n]: ").strip().lower()
+            confirm = self._input_with_timeout(
+                "Proceed with creation? [Y/n]: ",
+                default="y"
+            )
+            if confirm is None:
+                print("❌ Cancelled")
+                return False
+            confirm = confirm.strip().lower()
             if confirm and confirm != 'y':  # Enter or 'y' = proceed, anything else = cancel
                 print("❌ Cancelled")
                 return False
@@ -7135,7 +7309,14 @@ class PaperProcessorDaemon:
         print("  (a) Add a note")
         print("  (z) Cancel and go back")
         print("="*70)
-        note_choice = input("\nAdd a note? [Enter/a/z]: ").strip().lower()
+        note_choice = self._input_with_timeout(
+            "\nAdd a note? [Enter/a/z]: ",
+            default=""
+        )
+        if note_choice is None:
+            print("⬅️  Cancelling note addition")
+            return False
+        note_choice = note_choice.strip().lower()
         
         if note_choice == 'z':
             print("⬅️  Cancelling note addition")
@@ -7205,7 +7386,7 @@ class PaperProcessorDaemon:
         
         # Create pages and navigation engine
         pages = create_all_pages(self)
-        engine = NavigationEngine(pages)
+        engine = NavigationEngine(pages, timeout_seconds=self.prompt_timeout)
         
         # Run page flow starting from REVIEW & PROCEED
         result = engine.run_page_flow('review_and_proceed', ctx_dict)

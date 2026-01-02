@@ -4,10 +4,19 @@ This module provides a clean, testable framework for managing multi-page
 interactive flows with consistent navigation commands (z=back, q=quit, etc.).
 """
 
+import sys
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Union
 from pathlib import Path
 from enum import Enum
+
+try:
+    import select
+    HAS_SELECT = True
+except ImportError:
+    HAS_SELECT = False
+
+from .colors import ColorScheme, Colors
 
 
 class NavigationResult:
@@ -157,13 +166,15 @@ class NavigationEngine:
     Provides consistent behavior for standard commands (z=back, q=quit).
     """
     
-    def __init__(self, pages: Dict[str, Page]):
+    def __init__(self, pages: Dict[str, Page], timeout_seconds: int = 0):
         """Initialize navigation engine.
         
         Args:
             pages: Dictionary mapping page_id to Page objects
+            timeout_seconds: Timeout in seconds for input prompts (0 = no timeout)
         """
         self.pages = pages
+        self.timeout_seconds = timeout_seconds
     
     def show_page(self, page_id: str, context: dict) -> NavigationResult:
         """Display a page and handle user input.
@@ -181,16 +192,51 @@ class NavigationEngine:
         
         # Display page
         print("\n" + "="*70)
-        print(page.title)
+        print(Colors.colorize(page.title, ColorScheme.PAGE_TITLE))
         print("="*70)
         for line in page.content(context):
-            print(line)
+            # Check if line is a list item or action item
+            if line.strip().startswith(('(', '[', '-', '•', '1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '9.')):
+                print(Colors.colorize(line, ColorScheme.LIST))
+            elif any(keyword in line.lower() for keyword in ['will perform', 'proceed', 'go back', 'skip', 'add', 'remove', 'edit']):
+                print(Colors.colorize(line, ColorScheme.ACTION))
+            else:
+                print(line)
         print("="*70)
         print()
         
         # Get and process input
         while True:
-            user_input = input(page.prompt).strip().lower()
+            # Get input with optional timeout
+            # Check if page has a default (including empty string '')
+            has_default = page.default is not None
+            if self.timeout_seconds > 0 and HAS_SELECT and has_default:
+                # Use timeout with default (no warning message - just timeout if needed)
+                # Remove leading newline from prompt if present (we already have spacing)
+                prompt_text = page.prompt.lstrip('\n') if page.prompt.startswith('\n') else page.prompt
+                print(prompt_text, end='', flush=True)
+                
+                try:
+                    ready, _, _ = select.select([sys.stdin], [], [], self.timeout_seconds)
+                    if ready:
+                        user_input = sys.stdin.readline().strip()
+                    else:
+                        # Timeout - use default
+                        timeout_msg = Colors.colorize("⏱️  Timeout reached - proceeding with default", ColorScheme.TIMEOUT)
+                        print(f"\n{timeout_msg}")
+                        user_input = page.default
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Cancelled")
+                    return NavigationResult.quit_scan(move_to_manual=False)
+            else:
+                # No timeout or no default - use regular input
+                try:
+                    user_input = input(page.prompt).strip()
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Cancelled")
+                    return NavigationResult.quit_scan(move_to_manual=False)
+            
+            user_input = user_input.lower() if user_input else ""
             
             # Standardize input (handle Enter key for default)
             user_input = self.standardize_input(user_input, page)
