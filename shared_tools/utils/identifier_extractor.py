@@ -7,12 +7,37 @@ resorting to slower AI-based extraction.
 """
 
 import re
+import configparser
+from pathlib import Path
 from typing import Optional, List, Tuple
 from .isbn_matcher import ISBNMatcher
 
 
 class IdentifierExtractor:
     """Fast regex-based identifier extraction."""
+    
+    @classmethod
+    def _get_accessed_context_window(cls) -> int:
+        """Get the context window size for filtering years near 'Accessed:' from config.
+        
+        Returns:
+            Context window size in characters (default: 30)
+        """
+        try:
+            config = configparser.ConfigParser()
+            root_dir = Path(__file__).parent.parent.parent
+            config.read([
+                root_dir / 'config.conf',
+                root_dir / 'config.personal.conf'
+            ])
+            
+            if config.has_option('IDENTIFIER_EXTRACTION', 'accessed_context_window'):
+                return config.getint('IDENTIFIER_EXTRACTION', 'accessed_context_window')
+        except Exception:
+            pass
+        
+        # Default value if config not found or error
+        return 30
     
     # DOI patterns - handles various formats
     DOI_PATTERNS = [
@@ -369,6 +394,17 @@ class IdentifierExtractor:
                 try:
                     year = int(year_str)
                     if 1900 <= year <= 2100:
+                        # Check if year appears near "Accessed:" - filter these out
+                        position = match.start()
+                        context_window = cls._get_accessed_context_window()
+                        context_start = max(0, position - context_window)
+                        context_end = min(len(text), position + context_window)
+                        context = text[context_start:context_end].lower()
+                        
+                        # Skip years that appear near "Accessed:" (access dates, not publication dates)
+                        if 'accessed' in context:
+                            continue
+                        
                         if year_str not in seen_years:
                             years.append(year_str)
                             seen_years.add(year_str)
@@ -491,6 +527,14 @@ class IdentifierExtractor:
                         if is_in_body_text(position):
                             continue  # Skip this candidate - it's in body text
                         
+                        # Check if year appears near "Accessed:" - filter these out (access dates, not publication dates)
+                        context_window = cls._get_accessed_context_window()
+                        context_start = max(0, position - context_window)
+                        context_end = min(text_length, position + context_window)
+                        context = text[context_start:context_end].lower()
+                        if 'accessed' in context:
+                            continue  # Skip this candidate - it's an access date, not publication year
+                        
                         # Calculate score for years in short paragraphs (likely metadata)
                         score = base_score
                         
@@ -507,13 +551,14 @@ class IdentifierExtractor:
                         score += position_bonus
                         
                         # Keyword proximity bonus: check if publication keywords nearby
-                        context_start = max(0, position - 50)
-                        context_end = min(text_length, position + 100)
-                        context = text[context_start:context_end].lower()
+                        # Use wider context for keyword checking
+                        keyword_context_start = max(0, position - 50)
+                        keyword_context_end = min(text_length, position + 100)
+                        keyword_context = text[keyword_context_start:keyword_context_end].lower()
                         
                         keyword_bonus = 0
                         for keyword in publication_keywords:
-                            if keyword in context:
+                            if keyword in keyword_context:
                                 keyword_bonus += 3  # Increased bonus for publication keywords
                                 break  # Only count once
                         score += keyword_bonus
