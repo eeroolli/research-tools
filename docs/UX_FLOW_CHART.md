@@ -1,6 +1,6 @@
 # Paper Processor Daemon - UX Flow Chart
 
-**Last Updated:** January 2025  
+**Last Updated:** January 2026  
 **Status:** Current implementation with color coding and timeout improvements
 
 ## Overview
@@ -168,10 +168,17 @@ This document describes the complete user experience flow for the paper processo
 ┌─────────────────────────────────────────────────────────────────┐
 │  STEP 3: PDF Attachment                                         │
 │  ┌─────────────────────────────────────────────────────────────┐ │
-│  │  1/4 Preparing split for two-up file (if needed)             │ │
-│  │  2/4 Copying to publications directory                       │ │
-│  │  3/4 Attaching to Zotero item                                │ │
-│  │  4/4 Moving original to done/                                │ │
+│  │  1/5 Detect landscape/two-up pages (BEFORE border removal)  │ │
+│  │     ├─ Check for _double.pdf pattern                        │ │
+│  │     └─ Analyze aspect ratio and content for two-up layout   │ │
+│  │  2/5 Remove borders (consistent UX for all pages)            │ │
+│  │  3/5 Intelligent split for two-up files (if detected)       │ │
+│  │     ├─ Detect gutter position (spine or content gap)       │ │
+│  │     └─ Split at detected position                           │ │
+│  │  4/5 Trim leading pages (optional)                          │ │
+│  │  5/5 Copying to publications directory                      │ │
+│  │  6/5 Attaching to Zotero item                               │ │
+│  │  7/5 Moving original to done/                                │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -287,7 +294,7 @@ This document describes the complete user experience flow for the paper processo
 
 ---
 
-## Recent Improvements (January 2025)
+## Recent Improvements (January 2026)
 
 ### 1. Color Coding System
 - **Page Titles:** Bright Cyan - Clear visual hierarchy for navigation pages
@@ -317,12 +324,47 @@ This document describes the complete user experience flow for the paper processo
 ### 5. Intelligent File Copy
 - **Method:** `_copy_file_universal()` - Tries native Python first, falls back to PowerShell
 - **Benefit:** Fast for local paths, robust for cloud drives
+
+### 6. Intelligent Two-Up Page Splitting
+- **Landscape Detection:** Happens BEFORE border removal to ensure accurate detection even if border removal changes dimensions
+- **Detection Methods:**
+  - Checks for `_double.pdf` filename pattern (always split)
+  - For other files: Analyzes aspect ratio (>1.3) and content structure
+  - Stores detection results (dimensions, two-up status) before border removal
+- **Gutter Detection:** Image-based analysis to find actual gutter position (not just 50% split)
+- **Dual Methods:** 
+  - Spine detection for physical books (finds darker gray spine area)
+  - Content detection for printed articles (finds minimum content density)
+- **Automatic Selection:** Chooses method based on signal strength (15% threshold)
+- **Border-Aware:** Accounts for dark borders when detecting gutter
+- **Multi-Page Validation:** Analyzes 3 pages for consistency
+- **Workflow:** Landscape detection → Border removal → Intelligent splitting
+- **Fallback:** Uses geometric split (50%) if detection fails
+- **Benefit:** Significantly improves splitting accuracy for physical book scans with visible spines, works correctly even after border removal
 - **Handles:** `/tmp/` paths, cloud drive paths, path conversion failures
 
 ### 6. Path Validation
 - **Method:** `_validate_path_via_powershell()` - Validates paths from Windows perspective
 - **Benefit:** Catches path issues before attempting operations
 - **Use:** Validates source files exist before copying
+
+### 7. PROPOSED ACTIONS Page Update (January 2026)
+- **Enhanced Message:** Now shows all operations that will occur during PDF processing
+- **Operations Listed:**
+  1. Check and remove dark borders (if detected)
+  2. Split landscape/two-up pages (if detected)
+  3. Trim leading pages (optional)
+  4. Generate filename
+  5. Copy to publications directory
+  6. Attach as linked file in Zotero
+  7. Move scan to done/
+- **Benefit:** Users see complete workflow before confirming, reducing surprises during processing
+
+### 8. Filename Validation and Logging (January 2026)
+- **Defensive Checks:** Validates target filename doesn't contain temp file patterns (`_no_borders`, `_split`, etc.)
+- **Auto-Regeneration:** If temp patterns detected, regenerates filename from metadata
+- **Logging:** Logs source and target filenames before copy operation for debugging
+- **Benefit:** Prevents weird filenames from temp file operations, improves debugging
 
 ---
 
@@ -418,8 +460,8 @@ These options are available at most decision points.
 - **Language prefixes:** `NO_`, `EN_`, `DE_`, `FI_`, `SV_`, `DA_`
 
 ### Processing
-- **Split PDFs:** System temp directory (e.g., `/tmp/pdf_splits/`)
-- **Border removal:** System temp directory (e.g., `/tmp/pdf_borders_removed/`)
+- **Border removal:** System temp directory (e.g., `/tmp/pdf_borders_removed/`) - Happens FIRST
+- **Split PDFs:** System temp directory (e.g., `/tmp/pdf_splits/`) - Uses intelligent gutter detection
 
 ### Output
 - **Publications:** Configured path (e.g., `/mnt/g/My Drive/publications/`)

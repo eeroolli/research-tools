@@ -980,17 +980,17 @@ class PaperProcessorDaemon:
                 return None
         else:
             # No type detected - ask user to select
-            print("No document type detected. Please select:")
+            print(Colors.colorize("No document type detected. Please select:", ColorScheme.ACTION))
             print()
-            print("[1] Journal Article")
-            print("[2] Book Chapter")
-            print("[3] Conference Paper")
-            print("[4] Book")
-            print("[5] Thesis/Dissertation")
-            print("[6] Report")
-            print("[7] News Article")
-            print("[8] Working Paper/preprint")
-            print("[9] Other")
+            print(Colors.colorize("[1] Journal Article", ColorScheme.LIST))
+            print(Colors.colorize("[2] Book Chapter", ColorScheme.LIST))
+            print(Colors.colorize("[3] Conference Paper", ColorScheme.LIST))
+            print(Colors.colorize("[4] Book", ColorScheme.LIST))
+            print(Colors.colorize("[5] Thesis/Dissertation", ColorScheme.LIST))
+            print(Colors.colorize("[6] Report", ColorScheme.LIST))
+            print(Colors.colorize("[7] News Article", ColorScheme.LIST))
+            print(Colors.colorize("[8] Working Paper/preprint", ColorScheme.LIST))
+            print(Colors.colorize("[9] Other", ColorScheme.LIST))
             print()
             
             try:
@@ -1034,7 +1034,7 @@ class PaperProcessorDaemon:
         for group_name, field_mapping in field_groups:
             group_fields = self._extract_group_fields(metadata, field_mapping)
             if group_fields:
-                print(f"\n{group_name}:")
+                print(Colors.colorize(f"\n{group_name}:", ColorScheme.PAGE_TITLE))
                 for field_name, field_value in group_fields.items():
                     self._display_field(field_name, field_value, metadata, is_confirmed)
     
@@ -2033,17 +2033,17 @@ class PaperProcessorDaemon:
         
         # Step 1: Document type selection
         # TODO: later to maximize portability this could be moved to a config file       
-        print("📚 What type of document is this?")
+        print(Colors.colorize("📚 What type of document is this?", ColorScheme.ACTION))
         print()
-        print("[1] Journal Article")
-        print("[2] Book Chapter")
-        print("[3] Conference Paper")
-        print("[4] Book")
-        print("[5] Thesis/Dissertation")
-        print("[6] Report")
-        print("[7] News Article")
-        print("[8] Working Paper/preprint")
-        print("[9] Other")
+        print(Colors.colorize("[1] Journal Article", ColorScheme.LIST))
+        print(Colors.colorize("[2] Book Chapter", ColorScheme.LIST))
+        print(Colors.colorize("[3] Conference Paper", ColorScheme.LIST))
+        print(Colors.colorize("[4] Book", ColorScheme.LIST))
+        print(Colors.colorize("[5] Thesis/Dissertation", ColorScheme.LIST))
+        print(Colors.colorize("[6] Report", ColorScheme.LIST))
+        print(Colors.colorize("[7] News Article", ColorScheme.LIST))
+        print(Colors.colorize("[8] Working Paper/preprint", ColorScheme.LIST))
+        print(Colors.colorize("[9] Other", ColorScheme.LIST))
         print()
         
         doc_type_map = {
@@ -2113,7 +2113,7 @@ class PaperProcessorDaemon:
         Returns:
             Complete metadata dict
         """
-        print("\n📝 MANUAL METADATA ENTRY")
+        print(Colors.colorize("\n📝 MANUAL METADATA ENTRY", ColorScheme.PAGE_TITLE))
         print("We'll search local Zotero as you type to help find matches.")
         print()
         
@@ -2870,7 +2870,7 @@ class PaperProcessorDaemon:
     
     def _display_numbered_field_comparison(self, current: dict, online: dict, local: dict, online_source: str = None):
         """Display numbered field comparison for bulk operations."""
-        print("\n📋 FIELD COMPARISON:")
+        print(Colors.colorize("\n📋 FIELD COMPARISON:", ColorScheme.PAGE_TITLE))
         print("=" * 80)
         
         # Map method names to display names
@@ -3222,7 +3222,7 @@ class PaperProcessorDaemon:
         local_tag_names = self._extract_tag_names(local_tags)
         
         # Show current tag sources
-        print("\n📋 CURRENT TAG SOURCES:")
+        print(Colors.colorize("\n📋 CURRENT TAG SOURCES:", ColorScheme.PAGE_TITLE))
         if current_tag_names:
             print(f"  {'Scan:':<12} {', '.join(current_tag_names)}")
         if online_tag_names:
@@ -3829,7 +3829,8 @@ class PaperProcessorDaemon:
                         print("💡 You can type a 4-digit year to change it, or press Enter to confirm")
                         while True:
                             try:
-                                year_input = input(f"Year [{suggested_year}] (Enter=confirm, type new year, 'm'=manual entry, or 'r'=restart): ").strip()
+                                prompt_text = Colors.colorize(f"Year [{suggested_year}] (Enter=confirm, type new year, 'm'=manual entry, or 'r'=restart): ", ColorScheme.ACTION)
+                                year_input = input(prompt_text).strip()
                             except (KeyboardInterrupt, EOFError):
                                 print("\n❌ Cancelled")
                                 self.move_to_failed(pdf_path)
@@ -3934,14 +3935,15 @@ class PaperProcessorDaemon:
                     action, selected_item, updated_metadata = self.search_and_display_local_zotero(updated_metadata)
                     
                     # Handle back/restart actions - allow user to go back and restart
-                    if action == 'back' or action == 'restart':
-                        if action == 'restart':
-                            print("🔄 Restarting from beginning...")
-                            updated_metadata = metadata.copy()  # Reset to original
-                        else:
-                            print("⬅️  Going back to author selection...")
+                    if action == 'back':
+                        print("⬅️  Going back to author selection...")
                         # Loop will restart and prompt again
                         continue
+                    elif action == 'restart':
+                        # User wants to restart processing this file from the very beginning
+                        print("🔄 Restarting from beginning...")
+                        self.process_paper(pdf_path)
+                        return
                     
                     break
             
@@ -4487,11 +4489,284 @@ class PaperProcessorDaemon:
                 return (True, max(0.0, score), 'spine')
             return (False, 0.0, 'none')
     
-    def _split_with_mutool(self, pdf_path: Path, width: Optional[float] = None, height: Optional[float] = None) -> Optional[Path]:
-        """Split a two-up PDF using mutool poster and return path to the split file.
-        Creates split in temp directory to avoid cluttering watch directory.
+    def _find_gutter_position(self, pdf_path: Path, sample_pages: int = 3) -> Optional[float]:
+        """Find the actual gutter position between two pages using image analysis.
+        
+        Uses vertical projection profile to find the column with minimum content density.
+        Accounts for dark borders by detecting them first.
+        
+        Args:
+            pdf_path: Path to PDF file (should already have borders removed)
+            sample_pages: Number of pages to analyze for consistency
+            
+        Returns:
+            X coordinate of gutter in PDF points, or None if detection fails
         """
         try:
+            import fitz  # PyMuPDF
+            import numpy as np
+            import cv2
+        except ImportError:
+            self.logger.debug("PyMuPDF/numpy/cv2 not available for gutter detection")
+            return None
+        
+        try:
+            doc = fitz.open(str(pdf_path))
+            if len(doc) == 0:
+                doc.close()
+                return None
+            
+            # Analyze multiple pages for consistency
+            gutter_positions = []
+            pages_to_check = min(sample_pages, len(doc))
+            page_width = None
+            
+            for page_num in range(pages_to_check):
+                page = doc[page_num]
+                page_rect = page.rect
+                if page_width is None:
+                    page_width = page_rect.width
+                page_height = page_rect.height
+                
+                # Render page as image (use reasonable resolution)
+                zoom = 2.0
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                
+                # Convert to numpy array
+                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
+                
+                # Convert to grayscale
+                if len(img.shape) == 3:
+                    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                else:
+                    gray = img
+                
+                img_height, img_width = gray.shape
+                
+                # Detect borders to exclude them from gutter detection
+                borders = {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}
+                try:
+                    borders = self.border_remover.detect_borders(img)
+                except Exception:
+                    pass  # Continue without border detection if it fails
+                
+                # Calculate content area (excluding detected borders)
+                border_left_px = borders.get('left', 0)
+                border_right_px = borders.get('right', 0)
+                content_left_px = border_left_px
+                content_right_px = img_width - border_right_px
+                content_width_px = content_right_px - content_left_px
+                
+                if content_width_px < img_width * 0.3:
+                    # Content area too small, skip this page
+                    continue
+                
+                # Extract content region (middle 80% vertically to avoid headers/footers)
+                vertical_margin = int(img_height * 0.1)
+                content_region = gray[vertical_margin:img_height-vertical_margin, 
+                                     content_left_px:content_right_px]
+                
+                if content_region.size == 0:
+                    continue
+                
+                # Calculate vertical projection profile
+                # For physical book scans: look for darker spine area (gray/dark pixels)
+                # For printed articles: look for minimum content (white space)
+                # We'll check both and use whichever is more prominent
+                
+                # Method 1: Look for darker spine area (physical books)
+                # Average pixel intensity per column (lower = darker)
+                spine_projection = np.mean(content_region, axis=0)
+                
+                # Method 2: Look for minimum content density (printed articles)
+                # Invert so dark pixels (text) have higher values
+                inverted = 255 - content_region
+                content_projection = np.sum(inverted, axis=0)
+                
+                # Smooth both projections to reduce noise
+                kernel_size = max(5, int(content_width_px * 0.02))
+                if kernel_size % 2 == 0:
+                    kernel_size += 1
+                if kernel_size > 1:
+                    spine_projection = cv2.GaussianBlur(spine_projection.reshape(1, -1), (1, kernel_size), 0).flatten()
+                    content_projection = cv2.GaussianBlur(content_projection.reshape(1, -1), (1, kernel_size), 0).flatten()
+                
+                # Search in the middle 60% of content area (avoid edges)
+                search_start = int(len(spine_projection) * 0.2)
+                search_end = int(len(spine_projection) * 0.8)
+                search_region_spine = spine_projection[search_start:search_end]
+                search_region_content = content_projection[search_start:search_end]
+                
+                if len(search_region_spine) == 0:
+                    continue
+                
+                # Find gutter using both methods
+                window_size = max(5, int(len(search_region_spine) * 0.05))
+                
+                # Method 1: Find darkest area (spine marker for physical books)
+                # Lower values = darker pixels
+                min_spine_val = float('inf')
+                min_spine_idx = search_start
+                for i in range(len(search_region_spine) - window_size):
+                    window = search_region_spine[i:i+window_size]
+                    window_avg = np.mean(window)
+                    if window_avg < min_spine_val:
+                        min_spine_val = window_avg
+                        min_spine_idx = i + search_start
+                
+                # Method 2: Find minimum content (white space for printed articles)
+                # Lower values = less content
+                min_content_val = float('inf')
+                min_content_idx = search_start
+                for i in range(len(search_region_content) - window_size):
+                    window = search_region_content[i:i+window_size]
+                    window_avg = np.mean(window)
+                    if window_avg < min_content_val:
+                        min_content_val = window_avg
+                        min_content_idx = i + search_start
+                
+                # Choose method based on which shows a stronger signal
+                # Check if spine method found a significantly darker area (spine marker)
+                # Compare to average brightness in search region
+                avg_brightness = np.mean(search_region_spine)
+                spine_darkness = avg_brightness - min_spine_val
+                
+                # Check if content method found significantly less content
+                avg_content = np.mean(search_region_content)
+                content_reduction = avg_content - min_content_val
+                
+                # Normalize by average to compare relative strength
+                spine_signal = spine_darkness / (avg_brightness + 1e-6)  # Avoid division by zero
+                content_signal = content_reduction / (avg_content + 1e-6)
+                
+                # Use spine method if it shows a strong dark signal (physical book)
+                # Otherwise use content method (printed article)
+                if spine_signal > 0.15:  # At least 15% darker than average (spine marker)
+                    min_idx = min_spine_idx
+                else:
+                    min_idx = min_content_idx
+                
+                # Convert pixel position back to PDF coordinates
+                gutter_px = content_left_px + min_idx
+                gutter_pdf_points = (gutter_px / img_width) * page_width
+                
+                gutter_positions.append(gutter_pdf_points)
+            
+            doc.close()
+            
+            if not gutter_positions:
+                return None
+            
+            # Use median for robustness against outliers
+            median_gutter = np.median(gutter_positions)
+            
+            if page_width is None:
+                return None
+            
+            # Validate: gutter should be roughly in the middle (30-70% of page width)
+            if median_gutter < page_width * 0.3 or median_gutter > page_width * 0.7:
+                self.logger.debug(f"Gutter position {median_gutter:.1f} seems invalid (page width: {page_width:.1f})")
+                return None
+            
+            # Check consistency across pages (std dev should be small)
+            if len(gutter_positions) > 1:
+                std_dev = np.std(gutter_positions)
+                if std_dev > page_width * 0.1:  # More than 10% variation
+                    self.logger.debug(f"Gutter positions inconsistent (std dev: {std_dev:.1f})")
+                    return None
+            
+            self.logger.info(f"Detected gutter at {median_gutter:.1f} points (from {len(gutter_positions)} pages)")
+            return float(median_gutter)
+            
+        except Exception as e:
+            self.logger.debug(f"Gutter detection failed: {e}")
+            return None
+    
+    def _split_with_custom_gutter(self, pdf_path: Path, gutter_x: float) -> Optional[Path]:
+        """Split a two-up PDF at a custom X coordinate using PyMuPDF.
+        
+        Args:
+            pdf_path: Path to input PDF
+            gutter_x: X coordinate in PDF points where to split
+            
+        Returns:
+            Path to split PDF or None if failed
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            self.logger.warning("PyMuPDF not available for custom split")
+            return None
+        
+        try:
+            doc = fitz.open(str(pdf_path))
+            if len(doc) == 0:
+                doc.close()
+                return None
+            
+            # Create new document for split pages
+            new_doc = fitz.open()
+            
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                page_rect = page.rect
+                page_width = page_rect.width
+                page_height = page_rect.height
+                
+                # Validate gutter position
+                if gutter_x <= 0 or gutter_x >= page_width:
+                    self.logger.warning(f"Invalid gutter position {gutter_x} for page width {page_width}")
+                    doc.close()
+                    new_doc.close()
+                    return None
+                
+                # Create left page (from 0 to gutter_x)
+                left_rect = fitz.Rect(0, 0, gutter_x, page_height)
+                left_page = new_doc.new_page(width=gutter_x, height=page_height)
+                left_page.show_pdf_page(left_rect, doc, page_num, clip=left_rect)
+                
+                # Create right page (from gutter_x to page_width)
+                right_rect = fitz.Rect(gutter_x, 0, page_width, page_height)
+                right_page = new_doc.new_page(width=page_width - gutter_x, height=page_height)
+                right_page.show_pdf_page(right_rect, doc, page_num, clip=right_rect)
+            
+            # Save to temp directory
+            import tempfile
+            temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            out_path = temp_dir / f"{pdf_path.stem}_split.pdf"
+            
+            new_doc.save(str(out_path))
+            new_doc.close()
+            doc.close()
+            
+            self.logger.info(f"Split PDF created with custom gutter: {out_path.name}")
+            return out_path
+            
+        except Exception as e:
+            self.logger.error(f"Custom split failed: {e}")
+            return None
+    
+    def _split_with_mutool(self, pdf_path: Path, width: Optional[float] = None, height: Optional[float] = None) -> Optional[Path]:
+        """Split a two-up PDF using intelligent gutter detection or mutool poster as fallback.
+        
+        First attempts to detect the actual gutter position using image analysis.
+        If detection fails, falls back to geometric split at 50% width.
+        Assumes borders have already been removed from the PDF.
+        """
+        try:
+            # Try to detect actual gutter position first
+            gutter_x = self._find_gutter_position(pdf_path)
+            
+            if gutter_x is not None:
+                # Use custom split at detected gutter
+                result = self._split_with_custom_gutter(pdf_path, gutter_x)
+                if result:
+                    return result
+                # If custom split failed, fall through to geometric split
+            
+            # Fallback to geometric split with mutool
             if width is None or height is None:
                 try:
                     import pdfplumber
@@ -4500,6 +4775,7 @@ class PaperProcessorDaemon:
                             width, height = pdf.pages[0].width, pdf.pages[0].height
                 except Exception:
                     width = height = 0
+            
             x, y = (2, 1) if (width and height and width > height) else (1, 2)
             # Create split in temp directory to avoid cluttering watch directory
             import tempfile
@@ -4515,7 +4791,7 @@ class PaperProcessorDaemon:
                 self.logger.error(f"mutool poster failed: {result.stderr.strip()}")
                 return None
             # Use split file for downstream processing
-            self.logger.info(f"Split PDF created: {out_path.name}")
+            self.logger.info(f"Split PDF created (geometric): {out_path.name}")
             return out_path
         except FileNotFoundError:
             self.logger.warning("mutool not found; skipping two-up split")
@@ -5113,7 +5389,7 @@ class PaperProcessorDaemon:
             Final metadata dict to use for Zotero update
         """
         print("\n" + "="*60)
-        print("📋 METADATA COMPARISON")
+        print(Colors.colorize("📋 METADATA COMPARISON", ColorScheme.PAGE_TITLE))
         print("="*60)
         
         # Display comparison
@@ -5276,7 +5552,7 @@ class PaperProcessorDaemon:
         
         # Show comparison between all three sources
         print("\n" + "="*60)
-        print("🌐 ONLINE METADATA FOUND")
+        print(Colors.colorize("🌐 ONLINE METADATA FOUND", ColorScheme.PAGE_TITLE))
         print("="*60)
         
         print("\nExtracted (from scan):")
@@ -5339,7 +5615,7 @@ class PaperProcessorDaemon:
         print("=" * 60)
         
         # STEP 1: Metadata Comparison
-        print("\n🔄 Step 1: Metadata Comparison")
+        print(Colors.colorize("\n🔄 Step 1: Metadata Comparison", ColorScheme.PAGE_TITLE))
         zotero_metadata = self.convert_zotero_item_to_metadata(zotero_item)
         final_metadata = self.compare_metadata_step(metadata, zotero_metadata)
         
@@ -5359,7 +5635,7 @@ class PaperProcessorDaemon:
                     self.zotero_processor.update_item_field_if_missing(item_key, 'language', detected_language)
         
         # STEP 2: Tags Comparison
-        print("\n🔄 Step 2: Tags Comparison")
+        print(Colors.colorize("\n🔄 Step 2: Tags Comparison", ColorScheme.PAGE_TITLE))
         # Get current tags from Zotero item (local search returns tags as strings)
         current_tags_raw = zotero_item.get('tags', [])
         # Convert to dict format for edit_tags_interactively
@@ -5395,7 +5671,7 @@ class PaperProcessorDaemon:
                 print("ℹ️  No tag changes to save")
         
         # STEP 3: PDF Attachment (from Task 7 specification)
-        print("\n🔄 Step 3: PDF Attachment")
+        print(Colors.colorize("\n🔄 Step 3: PDF Attachment", ColorScheme.PAGE_TITLE))
         return self._handle_pdf_attachment_step(pdf_path, zotero_item, final_metadata)
     
 
@@ -6683,7 +6959,8 @@ class PaperProcessorDaemon:
         
         for isbn in possible_isbns:
             try:
-                print(f"\n📚 Step 3: Resolving ISBN {isbn} via configured lookup services...")
+                step_title = Colors.colorize(f"\n📚 Step 3: Resolving ISBN {isbn} via configured lookup services...", ColorScheme.PAGE_TITLE)
+                print(step_title)
                 lookup_result = self.book_lookup_service.lookup_isbn(isbn)
                 if lookup_result:
                     normalized_metadata = self._normalize_isbn_lookup_metadata(lookup_result, isbn)
@@ -6996,7 +7273,7 @@ class PaperProcessorDaemon:
         print("="*60)
         
         # Step 1: Quick manual entry
-        print("\n📝 Step 1: Quick Manual Entry")
+        print(Colors.colorize("\n📝 Step 1: Quick Manual Entry", ColorScheme.PAGE_TITLE))
         combined_metadata = self.quick_manual_entry(extracted_metadata)
         if combined_metadata is None:
             # User cancelled during manual entry
@@ -7004,7 +7281,7 @@ class PaperProcessorDaemon:
             return False
         
         # Step 2: Search online libraries (optional)
-        print("\n🌐 Step 2: Online Library Search (Optional)")
+        print(Colors.colorize("\n🌐 Step 2: Online Library Search (Optional)", ColorScheme.PAGE_TITLE))
         print("This step searches CrossRef and arXiv to enrich metadata from online sources.")
         print("You can skip this if your manual entry is complete.")
         print()
@@ -7028,7 +7305,7 @@ class PaperProcessorDaemon:
                 return False
         
         # Step 3: Metadata selection
-        print("\n📋 Step 3: Metadata Selection")
+        print(Colors.colorize("\n📋 Step 3: Metadata Selection", ColorScheme.PAGE_TITLE))
         final_metadata = combined_metadata
         
         if online_metadata:
@@ -7077,7 +7354,7 @@ class PaperProcessorDaemon:
                 return False
         
         # Step 4: Tag selection
-        print("\n🏷️  Step 4: Tag Selection")
+        print(Colors.colorize("\n🏷️  Step 4: Tag Selection", ColorScheme.PAGE_TITLE))
         
         # Get tags from online metadata if available
         online_tags = []
@@ -7099,7 +7376,7 @@ class PaperProcessorDaemon:
                 final_metadata['language'] = detected_language
         
         # Step 5: Create item and attach PDF
-        print("\n📖 Step 5: Creating Zotero Item")
+        print(Colors.colorize("\n📖 Step 5: Creating Zotero Item", ColorScheme.PAGE_TITLE))
 
         # Allow skipping attachment entirely
         try:
@@ -7448,7 +7725,7 @@ class PaperProcessorDaemon:
         
         print("\n📋 Executing actions...")
         
-        # Step 1: Determine which PDF to use (original, page-offset temp, or split)
+        # Step 1: Determine which PDF to use (original or page-offset temp)
         # Check if there's a temporary PDF created from page offset
         pdf_to_copy = getattr(self, '_temp_pdf_path', None)
         if pdf_to_copy is None or not pdf_to_copy.exists():
@@ -7457,52 +7734,100 @@ class PaperProcessorDaemon:
         else:
             self.logger.info(f"Using temporary PDF from page offset: {pdf_to_copy.name}")
         
+        # Step 1a: Check for landscape/two-up pages BEFORE border removal
+        # This ensures detection works correctly even if border removal changes dimensions
         name_lower = pdf_to_copy.name.lower()
         split_attempted = False
         split_success = False
+        needs_split = False
+        landscape_width = None
+        landscape_height = None
+        landscape_is_two_up = False
+        landscape_score = 0.0
+        landscape_mode = 'none'
         
         if name_lower.endswith('_double.pdf'):
             # Always split on _double.pdf
-            print(f"1/4 Preparing split for two-up file...")
-            split_attempted = True
-            split_path = self._split_with_mutool(pdf_to_copy)
-            if split_path:
-                pdf_to_copy = split_path
-                name_lower = pdf_to_copy.name.lower()
-                self.logger.info(f"Using split version for Zotero: {pdf_to_copy.name}")
-                split_success = True
-            else:
-                print("⚠️  Splitting the PDF did fail. Using the original in landscape format.")
+            needs_split = True
+            self.logger.info("_double.pdf detected - will split after border removal")
         else:
-            # Check if we should prompt for split on wide pages
+            # Check if we should prompt for split on wide pages (before border removal)
             try:
                 import pdfplumber
                 with pdfplumber.open(str(pdf_to_copy)) as pdf:
                     if len(pdf.pages) > 0:
                         first = pdf.pages[0]
                         width, height = first.width, first.height
-                        if width and height and width / max(1.0, height) > 1.3:
-                            is_two_up, score, mode = self._detect_two_up_page(pdf_to_copy)
-                            if is_two_up:
-                                print("\nTwo-up candidate detected:")
-                                print(f"  Aspect ratio: {width/height:.2f}")
-                                print(f"  Center structure: {mode} score={score:.2f}")
-                                choice = input("Split this file into single pages before attaching to Zotero? [y/N]: ").strip().lower()
-                                if choice == 'y':
-                                    split_attempted = True
-                                    split_path = self._split_with_mutool(pdf_to_copy, width=width, height=height)
-                                    if split_path:
-                                        pdf_to_copy = split_path
-                                        name_lower = pdf_to_copy.name.lower()
-                                        self.logger.info(f"Using split version for Zotero: {pdf_to_copy.name}")
-                                        split_success = True
-                                    else:
-                                        print("⚠️  Splitting the PDF did fail. Using the original in landscape format.")
+                        if width and height:
+                            aspect_ratio = width / max(1.0, height)
+                            if aspect_ratio > 1.3:
+                                # Landscape detected - check if it's two-up
+                                is_two_up, score, mode = self._detect_two_up_page(pdf_to_copy)
+                                landscape_width = width
+                                landscape_height = height
+                                landscape_is_two_up = is_two_up
+                                landscape_score = score
+                                landscape_mode = mode
+                                
+                                if is_two_up:
+                                    self.logger.info(f"Landscape detected: {width:.1f}x{height:.1f} (ratio: {aspect_ratio:.2f})")
+                                    self.logger.info(f"Two-up candidate: {mode} score={score:.2f}")
+                                    needs_split = True
             except Exception as e:
-                self.logger.debug(f"Two-up detection skipped: {e}")
+                self.logger.debug(f"Landscape detection skipped: {e}")
                 pass
         
-        # Step 1b: Optional trimming of leading pages
+        # Step 1b: Remove borders (for both single and two-up pages - consistent UX)
+        border_removed_pdf = self._check_and_remove_dark_borders(pdf_to_copy)
+        if border_removed_pdf:
+            pdf_to_copy = border_removed_pdf
+            self.logger.debug(f"Using PDF without borders: {border_removed_pdf.name}")
+            name_lower = pdf_to_copy.name.lower()
+        
+        # Step 1c: Split two-up pages (if needed) - now works on cleaned PDF
+        if needs_split:
+            if name_lower.endswith('_double.pdf'):
+                # Always split on _double.pdf
+                print(f"1/4 Preparing split for two-up file...")
+                split_attempted = True
+                split_path = self._split_with_mutool(pdf_to_copy)
+                if split_path:
+                    pdf_to_copy = split_path
+                    name_lower = pdf_to_copy.name.lower()
+                    self.logger.info(f"Using split version for Zotero: {pdf_to_copy.name}")
+                    split_success = True
+                else:
+                    print("⚠️  Splitting the PDF did fail. Using the original in landscape format.")
+            elif landscape_is_two_up:
+                # Landscape page detected before border removal - prompt user
+                print("\nTwo-up candidate detected:")
+                print(f"  Aspect ratio: {landscape_width/landscape_height:.2f}")
+                print(f"  Center structure: {landscape_mode} score={landscape_score:.2f}")
+                choice = input("Split this file into single pages before attaching to Zotero? [y/N]: ").strip().lower()
+                if choice == 'y':
+                    split_attempted = True
+                    # Re-check dimensions after border removal in case they changed
+                    try:
+                        import pdfplumber
+                        with pdfplumber.open(str(pdf_to_copy)) as pdf:
+                            if len(pdf.pages) > 0:
+                                first = pdf.pages[0]
+                                width, height = first.width, first.height
+                                split_path = self._split_with_mutool(pdf_to_copy, width=width, height=height)
+                            else:
+                                split_path = self._split_with_mutool(pdf_to_copy, width=landscape_width, height=landscape_height)
+                    except Exception:
+                        split_path = self._split_with_mutool(pdf_to_copy, width=landscape_width, height=landscape_height)
+                    
+                    if split_path:
+                        pdf_to_copy = split_path
+                        name_lower = pdf_to_copy.name.lower()
+                        self.logger.info(f"Using split version for Zotero: {pdf_to_copy.name}")
+                        split_success = True
+                    else:
+                        print("⚠️  Splitting the PDF did fail. Using the original in landscape format.")
+        
+        # Step 1c: Optional trimming of leading pages
         if split_attempted and not split_success:
             print("ℹ️  Split failed; skipping trimming to avoid shifting the wrong pages.")
         else:
@@ -7510,12 +7835,6 @@ class PaperProcessorDaemon:
             if trimmed:
                 pdf_to_copy = trimmed_pdf
                 name_lower = pdf_to_copy.name.lower()
-        
-        # Step 1c: Check and optionally remove dark borders
-        border_removed_pdf = self._check_and_remove_dark_borders(pdf_to_copy)
-        if border_removed_pdf:
-            pdf_to_copy = border_removed_pdf
-            self.logger.debug(f"Using PDF without borders: {border_removed_pdf.name}")
         
         # Step 2: Check if target file exists and show comparison/choice if needed
         target_path_full = self.publications_dir / target_filename
@@ -7575,6 +7894,34 @@ class PaperProcessorDaemon:
                 suffix = target_path_full.suffix
                 target_filename = f"{stem}_scan{suffix}"
                 target_path_full = self.publications_dir / target_filename
+        
+        # Step 2: Verify and log target filename before copy
+        # Defensive check: ensure target_filename doesn't contain temp file patterns
+        temp_file_patterns = ['_no_borders', '_split', '_from_page', '_no_page1']
+        if target_filename and any(pattern in target_filename for pattern in temp_file_patterns):
+            self.logger.warning(f"Target filename contains temp file pattern: {target_filename}")
+            # Regenerate filename from metadata if available
+            if metadata:
+                from shared_tools.utils.filename_generator import FilenameGenerator
+                filename_gen = FilenameGenerator()
+                zotero_authors = zotero_item.get('authors', [])
+                zotero_title = zotero_item.get('title', '')
+                zotero_year = zotero_item.get('year', zotero_item.get('date', ''))
+                zotero_item_type = zotero_item.get('itemType', 'journalArticle')
+                merged_metadata = {
+                    'title': zotero_title,
+                    'authors': zotero_authors,
+                    'year': zotero_year if zotero_year else 'Unknown',
+                    'document_type': zotero_item_type
+                }
+                target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
+                self.logger.info(f"Regenerated target filename: {target_filename}")
+            else:
+                self.logger.error("Cannot regenerate filename - no metadata available")
+        
+        # Log the filename being used for copy
+        self.logger.info(f"Copying PDF to publications with filename: {target_filename}")
+        self.logger.debug(f"Source PDF: {pdf_to_copy.name}, Target filename: {target_filename}")
         
         # Step 2: Copy to publications directory via PowerShell
         print(f"2/4 Copying to publications directory...")
