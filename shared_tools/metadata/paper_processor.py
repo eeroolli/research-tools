@@ -310,7 +310,7 @@ class PaperMetadataProcessor:
             pdf_path: Path to PDF file
             
         Returns:
-            Language code (NO, EN, DE, FI, SE) or None if not detected
+            Language code (NO, EN, DE, FI, SV) or None if not detected
         """
         filename = pdf_path.name.upper()
         language_map = {
@@ -318,7 +318,7 @@ class PaperMetadataProcessor:
             'EN_': 'EN',
             'DE_': 'DE',
             'FI_': 'FI',
-            'SE_': 'SE'
+            'SV_': 'SV'  # Swedish (matches filename prefix SV_)
         }
         
         for prefix, lang_code in language_map.items():
@@ -457,17 +457,13 @@ class PaperMetadataProcessor:
             jstor_id = valid_jstor_ids[0]
             print(f"  JSTOR ID: {jstor_id}")
             print(f"  ℹ️  JSTOR ID confirms this is a journal article")
-            print(f"  ℹ️  Continuing with GROBID or manual extraction for full metadata")
-            # Mark as successful extraction with journal article type
-            # Continue to GROBID or Ollama for full metadata extraction
-            result['method'] = 'jstor_identifier'
-            result['success'] = True
-            result['metadata'] = {
-                'document_type': 'journal_article',
-                'jstor_id': jstor_id
-            }
-            result['processing_time_seconds'] = time.time() - start_time
-            return result
+            print(f"  ℹ️  Will try to fetch metadata via CrossRef/OpenAlex after extraction")
+            # Don't return early - continue to GROBID extraction to get title/authors
+            # Then we'll search CrossRef/OpenAlex with that metadata
+            # Store JSTOR ID for later use
+            result['jstor_id'] = jstor_id
+            result['document_type_hint'] = 'journal_article'
+            # Continue processing - don't return yet
         
         elif valid_isbns:
             print(f"\n📚 Step 3: ISBN found - use existing book lookup workflow")

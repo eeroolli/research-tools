@@ -39,7 +39,7 @@ This solution automatically detects and corrects PDF rotation before sending to 
 
 ### New Files
 - `shared_tools/pdf/pdf_rotation_handler.py` - Core rotation detection and correction
-- `scripts/test_pdf_rotation.py` - Test script for rotation handling
+- `tests/test_pdf_rotation.py` - Test script for rotation handling
 - `PDF_ROTATION_SOLUTION.md` - This documentation
 
 ### Modified Files
@@ -69,7 +69,7 @@ The rotation handling is now automatic when using the paper processor daemon. No
 Test the rotation handling with a specific PDF:
 
 ```bash
-python scripts/test_pdf_rotation.py /path/to/rotated.pdf
+python tests/test_pdf_rotation.py /path/to/rotated.pdf
 ```
 
 ### Programmatic Usage

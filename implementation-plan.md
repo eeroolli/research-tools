@@ -137,6 +137,16 @@ At a glance:
   - Performance: 5-8x faster than unpaper with similar quality
   - Clean production structure: `shared_tools/pdf/` with archived development docs in `archive/pdf/`
 
+- **Intelligent Two-Up Page Splitting** (January 2026)
+  - Intelligent gutter detection using image analysis for accurate page splitting
+  - Dual detection methods: spine detection (physical books) and content detection (printed articles)
+  - Automatic method selection based on signal strength (15% threshold)
+  - Multi-page validation for consistency across pages
+  - Border-aware detection: accounts for dark borders when finding gutter
+  - Consistent UX: border removal happens first for both single and two-up pages
+  - Fallback to geometric split (50%) if intelligent detection fails
+  - Significantly improves splitting accuracy for physical book scans with visible spines
+
 - **October 2025:**
   - Hash-based duplicate detection during copy/name collisions
   - Global publications-first identical reuse before copy

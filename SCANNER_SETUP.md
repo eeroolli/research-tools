@@ -108,7 +108,7 @@ Create separate jobs/profiles for each language and orientation:
    Filename pattern: Starts with `EN_` and ends with `_double`
 
 **Other Languages:**
-You can create similar profiles for other languages:
+You can create similar profiles for other languages (Norwegian, German, etc.):
 - Each with: exactly same settings as the English ones, except: 
 - Norwegian Portrait: Prefix `NO_`
 - German Portrait: Prefix `DE_`

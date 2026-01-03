@@ -216,44 +216,61 @@ class CrossRefClient:
         Returns:
             List of metadata dictionaries (empty if no matches)
         """
-        # Build query parameters
-        query_parts = []
+        # Build query parameters - use simple query string format
+        # CrossRef accepts a simple query string that searches across fields
+        query_terms = []
         
         if title:
-            # Remove common words and use as phrase search
-            query_parts.append(f'title:{title}')
-        elif authors and len(authors) > 0:
-            # Use first author's last name if no title
+            # Clean and truncate title if too long (CrossRef has limits)
+            # Remove special characters that might break the query
+            clean_title = title.strip()
+            # Truncate very long titles (keep first 200 chars)
+            if len(clean_title) > 200:
+                clean_title = clean_title[:200]
+            query_terms.append(clean_title)
+        
+        if authors and len(authors) > 0:
+            # Extract last name from first author
             first_author = authors[0]
-            if ' ' in first_author:
+            # Handle "Last, First" or "First Last" formats
+            if ',' in first_author:
+                last_name = first_author.split(',')[0].strip()
+            elif ' ' in first_author:
                 last_name = first_author.split()[-1]
             else:
                 last_name = first_author
-            query_parts.append(f'author:{last_name}')
+            query_terms.append(last_name)
         
         if journal:
-            query_parts.append(f'container-title:{journal}')
+            # Clean journal name
+            clean_journal = journal.strip()
+            if len(clean_journal) > 100:
+                clean_journal = clean_journal[:100]
+            query_terms.append(clean_journal)
         
-        if year:
-            # CrossRef can filter by year using filter parameter
-            pass  # Will use filter below
-        
-        if not query_parts:
+        if not query_terms:
             return []
         
-        # Build query string
-        query = '+'.join(query_parts)
+        # Build simple query string (CrossRef will search across all fields)
+        # Join terms with spaces - CrossRef handles this better than field-specific queries
+        query = ' '.join(query_terms)
         
         # Build request parameters
         params = {
             'query': query,
-            'rows': max_results,
+            'rows': min(max_results, 20),  # CrossRef limits rows
             'sort': 'relevance'
         }
         
+        # Add year filter if provided (correct filter syntax)
         if year:
-            # Filter by publication year
-            params['filter'] = f'from-pub-date:{year},to-pub-date:{year}'
+            try:
+                year_int = int(year)
+                # CrossRef filter format: from-pub-date:YYYY,to-pub-date:YYYY
+                params['filter'] = f'from-pub-date:{year_int},to-pub-date:{year_int}'
+            except (ValueError, TypeError):
+                # Invalid year format, skip filter
+                pass
         
         try:
             # CrossRef search endpoint
@@ -273,8 +290,26 @@ class CrossRefClient:
                         results.append(parsed)
                 
                 return results
+            elif response.status_code == 400:
+                # Bad request - log the actual error message
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('message', {}).get('message', [])
+                    if isinstance(error_msg, list) and len(error_msg) > 0:
+                        error_msg = error_msg[0]
+                    print(f"CrossRef search error 400: {error_msg}")
+                except:
+                    print(f"CrossRef search error 400: Bad request (query may be malformed)")
+                return []
             else:
                 print(f"CrossRef search error: {response.status_code}")
+                # Try to get error details
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('message', {}).get('message', 'Unknown error')
+                    print(f"  Error details: {error_msg}")
+                except:
+                    pass
                 return []
                 
         except requests.RequestException as e:

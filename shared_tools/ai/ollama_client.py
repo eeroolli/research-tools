@@ -153,7 +153,7 @@ class OllamaClient:
         Args:
             text: Text to extract metadata from
             document_context: Context hint for specialized extraction
-            language: Language code (NO, EN, DE, FI, SE, etc.) for language-aware extraction
+            language: Language code (NO, EN, DE, FI, SV, etc.) for language-aware extraction
             
         Returns:
             Formatted prompt string
@@ -166,7 +166,7 @@ class OllamaClient:
                 'EN': 'English', 
                 'DE': 'German',
                 'FI': 'Finnish',
-                'SE': 'Swedish'
+                'SV': 'Swedish'  # Swedish (matches filename prefix SV_ and ISO code sv)
             }
             lang_name = lang_map.get(language.upper(), language.upper())
             
@@ -194,7 +194,7 @@ LANGUAGE CONTEXT: This document is in Finnish.
 - Common terms: "Kustantaja" (publisher), "Lehti"/"Aikakauslehti" (journal), "Luku" (chapter)
 - Extract authors, titles, and metadata in Finnish format
 """
-            elif language.upper() == 'SE':
+            elif language.upper() == 'SV':
                 language_instructions = f"""
 LANGUAGE CONTEXT: This document is in Swedish.
 - Author patterns: "Av [Name]", "Av: [Name]", "[Name] och [Name]"

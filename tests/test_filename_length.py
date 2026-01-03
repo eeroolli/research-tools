@@ -6,8 +6,8 @@ Test script for filename length limit with Ollama shortening.
 import sys
 from pathlib import Path
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared_tools.utils.filename_generator import create_filename_generator
 

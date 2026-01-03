@@ -67,7 +67,7 @@ class ConfigManager:
         
         self.config['PROCESSING'] = {
             'language_detection': 'true',
-            'languages': 'EN,DE,NO,FI,SE',
+            'languages': 'EN,DE,NO,FI,SV',
             'intel_gpu_optimization': 'true',
             'batch_size': '10',
             'max_retries': '3'
