@@ -40,6 +40,9 @@ def create_review_and_proceed_page(daemon) -> Page:
         zotero_year = selected_item.get('year', selected_item.get('date', ''))
         zotero_item_type = selected_item.get('itemType', 'journalArticle')
         
+        # Log extracted metadata for debugging
+        daemon.logger.debug(f"Extracting metadata from Zotero item - Title: '{zotero_title}' (length: {len(zotero_title)}), Authors: {zotero_authors}, Year: {zotero_year}")
+        
         # Validate critical fields
         missing_fields = []
         if not zotero_title:
@@ -71,8 +74,10 @@ def create_review_and_proceed_page(daemon) -> Page:
         }
         
         # Generate target filename with _scan suffix
+        daemon.logger.debug(f"Generating filename from metadata - Title: '{merged_metadata['title']}' (length: {len(merged_metadata['title'])})")
         filename_gen = FilenameGenerator()
         target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
+        daemon.logger.debug(f"Generated filename: {target_filename}")
         
         # Store in context
         ctx['zotero_authors'] = zotero_authors

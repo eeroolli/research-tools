@@ -21,6 +21,7 @@ import shutil
 import configparser
 import os
 import json
+import io
 from typing import Optional, Tuple, List, Dict
 import subprocess
 import socket
@@ -96,6 +97,9 @@ class PaperProcessorDaemon:
         self.ollama_process = None
         self.ollama_ready = False
         self.grobid_ready = False
+        
+        # Window management
+        self._terminal_window_handle = None  # Store terminal window handle for positioning
         
         print("🚀 Initializing services...")
         self._initialize_services()
@@ -3601,6 +3605,17 @@ class PaperProcessorDaemon:
             return
         
         self.logger.info(f"New scan: {pdf_path.name}")
+        
+        # Close previous PDF file in viewer before opening new one
+        self._close_previous_pdf_file()
+        
+        # Open PDF in default viewer (non-blocking)
+        self._open_pdf_in_viewer(pdf_path)
+        
+        # Return focus to terminal after opening PDF
+        time.sleep(0.5)  # Small delay to ensure PDF viewer is ready
+        self._return_focus_to_terminal()
+        
         # Remember the original scan path for final move operations
         self._original_scan_path = Path(pdf_path)
         
@@ -4021,6 +4036,9 @@ class PaperProcessorDaemon:
             self.logger.error(f"Processing error: {e}", exc_info=self.debug)
             self.move_to_failed(pdf_path)
         finally:
+            # Close PDF viewer when processing completes
+            self._close_pdf_viewer()
+            
             # Clean up temporary PDF if created
             temp_to_cleanup = temp_pdf_path if 'temp_pdf_path' in locals() else getattr(self, '_temp_pdf_path', None)
             if temp_to_cleanup and temp_to_cleanup.exists():
@@ -5023,31 +5041,149 @@ class PaperProcessorDaemon:
             self.logger.debug(f"Failed to extract preview text for page {page_offset + 1}: {e}")
             return None, None
     
+    def _extract_trailing_preview_text(self, pdf_path: Path, pages_to_drop: int, max_chars: int = 180) -> Optional[str]:
+        """Extract a short preview of text from the last page that will remain after trimming trailing pages.
+        
+        Args:
+            pdf_path: Path to PDF file
+            pages_to_drop: Number of trailing pages to drop
+            max_chars: Maximum characters to include in preview
+        
+        Returns:
+            Preview text from the last remaining page, or None if text unavailable.
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            self.logger.warning("PyMuPDF (fitz) not available - cannot preview trailing page text")
+            return None
+        
+        try:
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+            if pages_to_drop >= total_pages:
+                doc.close()
+                return None
+            
+            # Get the last page that will remain (total_pages - pages_to_drop - 1, 0-indexed)
+            last_remaining_page_idx = total_pages - pages_to_drop - 1
+            if last_remaining_page_idx < 0:
+                doc.close()
+                return None
+            
+            page = doc[last_remaining_page_idx]
+            raw_text = page.get_text("text") or ""
+            doc.close()
+            
+            # Get the end of the text (last part of the page)
+            preview = " ".join(raw_text.split())
+            if preview and len(preview) > max_chars:
+                # Take the last max_chars characters
+                preview = "..." + preview[-(max_chars - 3):].lstrip()
+            return preview or None
+        except Exception as e:
+            self.logger.debug(f"Failed to extract trailing preview text: {e}")
+            return None
+    
+    def _create_pdf_without_trailing_pages(self, pdf_path: Path, pages_to_drop: int) -> Optional[Path]:
+        """Create a temporary PDF without the last N pages.
+        
+        Args:
+            pdf_path: Path to original PDF file
+            pages_to_drop: Number of trailing pages to drop
+        
+        Returns:
+            Path to temporary PDF without trailing pages, or None if failed
+        """
+        if pages_to_drop < 1:
+            return None
+        
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            self.logger.error("PyMuPDF (fitz) not available - cannot create PDF without trailing pages")
+            return None
+        
+        doc = None
+        new_doc = None
+        try:
+            # Open the PDF
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+            
+            # Check if PDF has enough pages
+            if pages_to_drop >= total_pages:
+                self.logger.warning(f"PDF has only {total_pages} page(s) - cannot drop {pages_to_drop} trailing pages")
+                doc.close()
+                return None
+            
+            # Create new PDF without trailing pages
+            new_doc = fitz.open()
+            
+            # Copy all pages except the last N pages
+            pages_to_keep = total_pages - pages_to_drop
+            for page_num in range(pages_to_keep):
+                page = doc[page_num]
+                new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
+                new_page.show_pdf_page(new_page.rect, doc, page_num)
+            
+            # Save to a temporary file
+            import tempfile
+            temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            out_path = temp_dir / f"{pdf_path.stem}_trimmed_end_{pages_to_drop}.pdf"
+            
+            new_doc.save(str(out_path))
+            new_doc.close()
+            doc.close()
+            
+            self.logger.info(f"Created PDF without last {pages_to_drop} page(s): {out_path.name}")
+            return out_path
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create PDF without trailing pages: {e}")
+            # Ensure both documents are closed to prevent resource leaks
+            if new_doc is not None:
+                try:
+                    new_doc.close()
+                except Exception:
+                    pass  # Ignore errors during cleanup
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass  # Ignore errors during cleanup
+            return None
+    
     def _prompt_trim_leading_pages_for_attachment(self, pdf_path: Path) -> Tuple[Path, bool]:
-        """Prompt user to optionally trim leading pages before attachment.
+        """Prompt user to optionally trim leading or trailing pages before attachment.
+        
+        Supports both positive numbers (trim from start) and negative numbers (trim from end).
+        Example: "3" trims first 3 pages, "-2" trims last 2 pages.
         
         Args:
             pdf_path: Current working PDF path (after any splitting)
         
         Returns:
             Tuple of (path_to_use, trimmed_flag). If trimmed_flag is True, path_to_use
-            points to a temporary PDF starting from the desired page.
+            points to a temporary PDF with pages trimmed.
         """
         if not pdf_path.exists():
             return pdf_path, False
         
         print("\n" + "=" * 70)
-        print("OPTIONAL: TRIM LEADING PAGES")
+        print("OPTIONAL: TRIM PAGES")
         print("=" * 70)
         print("Press Enter to keep the PDF exactly as it is.")
-        print("Enter a number to drop that many leading scan page(s) after split.")
-        print("We'll show you the first page of the trimmed PDF before anything is changed.")
+        print("Enter a positive number to drop that many leading pages (e.g., '3' = drop first 3 pages).")
+        print("Enter a negative number to drop that many trailing pages (e.g., '-2' = drop last 2 pages).")
+        print("We'll show you a preview of the trimmed PDF before anything is changed.")
         print("=" * 70)
         
         while True:
             try:
                 response = self._input_with_timeout(
-                    "Trim leading pages? [Enter=keep all / number=pages to drop]: ",
+                    "Trim pages? [Enter=keep all / number=pages to drop from start / -number=pages to drop from end]: ",
                     default=""
                 )
                 if response is None:
@@ -5062,45 +5198,94 @@ class PaperProcessorDaemon:
                 print("ℹ️  Keeping all pages.")
                 return pdf_path, False
             
-            if not response.isdigit():
-                print("⚠️  Please enter a whole number or press Enter to keep everything.")
-                continue
-            
-            pages_to_drop = int(response)
-            if pages_to_drop <= 0:
-                print("ℹ️  Keeping all pages.")
-                return pdf_path, False
-            
-            preview_text, total_pages = self._extract_page_preview_text(pdf_path, pages_to_drop)
-            if total_pages is not None and pages_to_drop >= total_pages:
-                print(f"⚠️  This PDF has {total_pages} page(s); you cannot drop {pages_to_drop}.")
-                continue
-            
-            print("\nThe first page in your new PDF will start with:")
-            if preview_text:
-                print(f'  "{preview_text}"')
-            else:
-                print("  [No text detected on that page]")
-            print()
-            
+            # Check if it's a valid number (positive or negative)
             try:
-                confirm = input(f"Type 'trim' to drop the first {pages_to_drop} page(s), or press Enter to keep everything: ").strip().lower()
-            except (KeyboardInterrupt, EOFError):
-                print("\n❌ Trim cancelled - keeping all pages")
-                return pdf_path, False
+                pages_to_drop = int(response)
+            except ValueError:
+                print("⚠️  Please enter a whole number (positive for leading pages, negative for trailing pages) or press Enter to keep everything.")
+                continue
             
-            if confirm != "trim":
+            if pages_to_drop == 0:
                 print("ℹ️  Keeping all pages.")
                 return pdf_path, False
             
-            trimmed_pdf = self._create_pdf_from_page_offset(pdf_path, pages_to_drop)
-            if not trimmed_pdf:
-                print("⚠️  Failed to create trimmed PDF. Keeping original pages.")
-                return pdf_path, False
+            # Get total pages for validation
+            try:
+                import fitz  # PyMuPDF
+                doc = fitz.open(pdf_path)
+                total_pages = len(doc)
+                doc.close()
+            except Exception:
+                print("⚠️  Could not read PDF to get page count.")
+                continue
             
-            print(f"✅ Trimmed first {pages_to_drop} page(s) for Zotero attachment")
-            self.logger.info(f"Trimmed first {pages_to_drop} page(s) before attachment: {trimmed_pdf.name}")
-            return trimmed_pdf, True
+            # Handle negative numbers (trim from end)
+            if pages_to_drop < 0:
+                pages_to_drop_abs = abs(pages_to_drop)
+                if pages_to_drop_abs >= total_pages:
+                    print(f"⚠️  This PDF has {total_pages} page(s); you cannot drop {pages_to_drop_abs} trailing pages.")
+                    continue
+                
+                # Show preview of last page that will remain
+                preview_text = self._extract_trailing_preview_text(pdf_path, pages_to_drop_abs)
+                print(f"\nThe last page in your new PDF (page {total_pages - pages_to_drop_abs}) will end with:")
+                if preview_text:
+                    print(f'  "...{preview_text}"')
+                else:
+                    print("  [No text detected on that page]")
+                print()
+                
+                try:
+                    confirm = input(f"Type 'trim' to drop the last {pages_to_drop_abs} page(s), or press Enter to keep everything: ").strip().lower()
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Trim cancelled - keeping all pages")
+                    return pdf_path, False
+                
+                if confirm != "trim":
+                    print("ℹ️  Keeping all pages.")
+                    return pdf_path, False
+                
+                trimmed_pdf = self._create_pdf_without_trailing_pages(pdf_path, pages_to_drop_abs)
+                if not trimmed_pdf:
+                    print("⚠️  Failed to create trimmed PDF. Keeping original pages.")
+                    return pdf_path, False
+                
+                print(f"✅ Trimmed last {pages_to_drop_abs} page(s) for Zotero attachment")
+                self.logger.info(f"Trimmed last {pages_to_drop_abs} page(s) before attachment: {trimmed_pdf.name}")
+                return trimmed_pdf, True
+            
+            # Handle positive numbers (trim from start)
+            else:
+                if pages_to_drop >= total_pages:
+                    print(f"⚠️  This PDF has {total_pages} page(s); you cannot drop {pages_to_drop} leading pages.")
+                    continue
+                
+                preview_text, _ = self._extract_page_preview_text(pdf_path, pages_to_drop)
+                print("\nThe first page in your new PDF will start with:")
+                if preview_text:
+                    print(f'  "{preview_text}"')
+                else:
+                    print("  [No text detected on that page]")
+                print()
+                
+                try:
+                    confirm = input(f"Type 'trim' to drop the first {pages_to_drop} page(s), or press Enter to keep everything: ").strip().lower()
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Trim cancelled - keeping all pages")
+                    return pdf_path, False
+                
+                if confirm != "trim":
+                    print("ℹ️  Keeping all pages.")
+                    return pdf_path, False
+                
+                trimmed_pdf = self._create_pdf_from_page_offset(pdf_path, pages_to_drop)
+                if not trimmed_pdf:
+                    print("⚠️  Failed to create trimmed PDF. Keeping original pages.")
+                    return pdf_path, False
+                
+                print(f"✅ Trimmed first {pages_to_drop} page(s) for Zotero attachment")
+                self.logger.info(f"Trimmed first {pages_to_drop} page(s) before attachment: {trimmed_pdf.name}")
+                return trimmed_pdf, True
     
     def _delete_first_page_from_pdf(self, pdf_path: Path) -> Optional[Path]:
         """Delete the first page from a PDF and return path to the modified file.
@@ -5299,6 +5484,15 @@ class PaperProcessorDaemon:
         self.logger.info(f"Publications: {self.publications_dir}")
         self.logger.info("="*60)
         
+        # Position terminal window on right half of screen using Windows Snap
+        # Wait for terminal window to be ready
+        time.sleep(2.0)  # Give terminal window time to be fully ready
+        self._position_terminal_window()
+        
+        # Retry positioning after a bit more time (in case window wasn't ready yet)
+        time.sleep(1.0)
+        self._position_terminal_window()
+        
         # Process existing files in the directory
         self.process_existing_files()
         
@@ -5314,9 +5508,633 @@ class PaperProcessorDaemon:
         except KeyboardInterrupt:
             self.shutdown(None, None)
     
+    def _open_pdf_in_viewer(self, pdf_path: Path) -> bool:
+        """Open PDF in default system viewer (non-blocking) and position window.
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            True if opened successfully, False otherwise
+        """
+        try:
+            # Convert to Windows path if needed for WSL
+            if sys.platform != 'win32':
+                # Try to convert WSL path to Windows path
+                windows_path = self._to_windows_path(pdf_path)
+                if windows_path:
+                    self.logger.info(f"Opening PDF in viewer: {windows_path}")
+                    
+                    # Try PowerShell to open file (works from WSL)
+                    try:
+                        ps_command = f'Start-Process "{windows_path}"'
+                        proc = subprocess.Popen(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_command],
+                                                stdout=subprocess.DEVNULL, 
+                                                stderr=subprocess.DEVNULL)
+                        # Store process for later closing
+                        self._pdf_viewer_process = proc
+                        self._pdf_viewer_path = pdf_path
+                        
+                        # Wait a moment for window to open, then position it
+                        time.sleep(1.5)
+                        self._position_pdf_window(pdf_path)
+                        self.logger.info("PDF viewer opened successfully")
+                        return True
+                    except Exception as e:
+                        self.logger.warning(f"Failed to open PDF with PowerShell: {e}")
+                    
+                    # Fallback: try wslview if available
+                    try:
+                        proc = subprocess.Popen(['wslview', str(windows_path)], 
+                                                stdout=subprocess.DEVNULL, 
+                                                stderr=subprocess.DEVNULL)
+                        self._pdf_viewer_process = proc
+                        self._pdf_viewer_path = pdf_path
+                        time.sleep(1.5)
+                        self._position_pdf_window(pdf_path)
+                        return True
+                    except FileNotFoundError:
+                        self.logger.warning("wslview not found")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to open PDF with wslview: {e}")
+                else:
+                    self.logger.warning(f"Could not convert path to Windows format: {pdf_path}")
+                
+                # Last fallback: try xdg-open for Linux
+                try:
+                    self.logger.info(f"Trying xdg-open as fallback: {pdf_path}")
+                    proc = subprocess.Popen(['xdg-open', str(pdf_path)], 
+                                           stdout=subprocess.DEVNULL, 
+                                           stderr=subprocess.DEVNULL)
+                    self._pdf_viewer_process = proc
+                    self._pdf_viewer_path = pdf_path
+                    return True
+                except FileNotFoundError:
+                    self.logger.warning("xdg-open not found")
+            else:
+                # Windows: use startfile (non-blocking)
+                self.logger.info(f"Opening PDF in viewer: {pdf_path}")
+                os.startfile(str(pdf_path))
+                self._pdf_viewer_path = pdf_path
+                
+                # Wait a moment for window to open, then position it
+                time.sleep(1)
+                self._position_pdf_window(pdf_path)
+                self.logger.info("PDF viewer opened successfully")
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Could not open PDF in viewer: {e}")
+            return False
+        
+        self.logger.warning("All methods to open PDF viewer failed")
+        return False
+    
+    def _store_terminal_window_handle(self):
+        """Store terminal window handle at startup for later use."""
+        self.logger.info("Storing terminal window handle...")
+        try:
+            # Use PowerShell to find terminal window by process tree
+            # Get current Python process, find parent (WSL/bash), then find its parent (cmd.exe)
+            ps_script = '''
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+}
+public struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+}
+"@
+
+$found = $false
+
+# Strategy 1: Find by process tree - get cmd.exe that launched WSL
+$cmdProcesses = Get-Process -Name "cmd" -ErrorAction SilentlyContinue | Where-Object { 
+    $_.MainWindowHandle -ne [IntPtr]::Zero 
+} | Sort-Object StartTime -Descending
+
+Write-Host "Checking $($cmdProcesses.Count) cmd.exe processes..."
+foreach ($proc in $cmdProcesses) {
+    try {
+        $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($proc.Id)" -ErrorAction SilentlyContinue).CommandLine
+        Write-Host "Process $($proc.Id): $($proc.MainWindowTitle) - CmdLine: $cmdLine"
+        if ($cmdLine) {
+            $hasWsl = $cmdLine -like "*wsl*"
+            $hasDaemon = $cmdLine -like "*paper_processor_daemon*"
+            $notStatus = $cmdLine -notlike "*--status*"
+            Write-Host "  Has WSL: $hasWsl, Has daemon: $hasDaemon, Not status: $notStatus"
+            
+            if ($hasWsl -and $hasDaemon -and $notStatus) {
+                $hwnd = $proc.MainWindowHandle
+                $rect = New-Object RECT
+                if ([Win32]::GetWindowRect($hwnd, [ref]$rect)) {
+                    $width = $rect.Right - $rect.Left
+                    $height = $rect.Bottom - $rect.Top
+                    Write-Host "  Window size: ${width}x${height}"
+                    # Only use if reasonably sized
+                    if ($width -gt 100 -and $height -gt 100) {
+                        Write-Host "FOUND: $($hwnd.ToString())"
+                        $found = $true
+                        break
+                    }
+                }
+            }
+        }
+    } catch {
+        Write-Host "  Error: $_"
+        continue
+    }
+}
+
+# Strategy 2: Find console window by class name
+if (!$found) {
+    Write-Host "Trying console window class name..."
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32Find {
+    [DllImport("user32.dll")]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+}
+public struct RECT2 {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+}
+"@
+    $hwnd = [Win32Find]::FindWindow("ConsoleWindowClass", $null)
+    if ($hwnd -ne [IntPtr]::Zero) {
+        $rect = New-Object RECT2
+        if ([Win32Find]::GetWindowRect($hwnd, [ref]$rect)) {
+            $width = $rect.Right - $rect.Left
+            $height = $rect.Bottom - $rect.Top
+            Write-Host "Console window size: ${width}x${height}"
+            if ($width -gt 100 -and $height -gt 100) {
+                Write-Host "FOUND: $($hwnd.ToString())"
+                $found = $true
+            }
+        }
+    }
+}
+
+if (!$found) {
+    Write-Host "NOTFOUND"
+}
+'''
+            
+            result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, text=True)
+            
+            if result.stdout:
+                output = result.stdout.strip()
+                # Always log the output for debugging
+                self.logger.info(f"Terminal handle search output: {output}")
+                # Look for "FOUND: <handle>" in output
+                match = re.search(r'FOUND:\s*(\d+)', output)
+                if match:
+                    handle_str = match.group(1)
+                    self._terminal_window_handle = handle_str
+                    self.logger.info(f"Stored terminal window handle: {handle_str}")
+                elif "NOTFOUND" in output:
+                    self.logger.warning("Terminal window handle not found (NOTFOUND)")
+                else:
+                    # If we got output but no FOUND, log it for debugging
+                    self.logger.warning(f"Terminal handle search completed but no handle found. Output: {output[:500]}")
+            else:
+                self.logger.warning("Could not find terminal window handle (no output from script)")
+            if result.stderr:
+                self.logger.warning(f"Terminal handle search errors: {result.stderr.strip()}")
+            if result.returncode != 0:
+                self.logger.warning(f"Terminal handle search script exited with code: {result.returncode}")
+                
+        except Exception as e:
+            self.logger.warning(f"Could not store terminal window handle: {e}")
+    
+    def _position_terminal_window(self):
+        """Position terminal window on the right half of the screen using Windows Snap.
+        
+        Uses Windows keyboard shortcut (Win+Right) to snap window to right half.
+        This is more reliable than manual positioning and can create snap groups.
+        """
+        self.logger.info("Positioning terminal window to right half using Windows Snap...")
+        try:
+            # Use Windows keyboard shortcut to snap window to right half
+            # This uses Windows' native snap functionality which is more reliable
+            ps_script = '''
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+}
+"@
+
+# Find console window - try multiple strategies
+$hwnd = [IntPtr]::Zero
+
+# Strategy 1: Find console window by class name (most reliable)
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32Find {
+    [DllImport("user32.dll")]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+}
+"@
+$hwnd = [Win32Find]::FindWindow("ConsoleWindowClass", $null)
+if ($hwnd -ne [IntPtr]::Zero) {
+    Write-Host "Found console window by class name"
+}
+
+# Strategy 2: Find most recent cmd.exe window
+if ($hwnd -eq [IntPtr]::Zero) {
+    $cmdProcesses = Get-Process -Name "cmd" -ErrorAction SilentlyContinue | Where-Object { 
+        $_.MainWindowHandle -ne [IntPtr]::Zero 
+    } | Sort-Object StartTime -Descending | Select-Object -First 1
+    
+    if ($cmdProcesses) {
+        $hwnd = $cmdProcesses.MainWindowHandle
+        Write-Host "Found most recent cmd.exe window (PID: $($cmdProcesses.Id))"
+    }
+}
+
+# Strategy 3: Use foreground window if no console found (fallback)
+if ($hwnd -eq [IntPtr]::Zero) {
+    $hwnd = [Win32]::GetForegroundWindow()
+    if ($hwnd -ne [IntPtr]::Zero) {
+        Write-Host "Using foreground window as fallback"
+    }
+}
+
+if ($hwnd -ne [IntPtr]::Zero) {
+    # Bring window to foreground (if not already)
+    [Win32]::SetForegroundWindow($hwnd)
+    Start-Sleep -Milliseconds 150
+    
+    # Send Win+Right Arrow to snap to right half
+    # VK_LWIN = 0x5B, VK_RIGHT = 0x27
+    # KEYEVENTF_KEYUP = 0x0002
+    [Win32]::keybd_event(0x5B, 0, 0, 0)  # Win key down
+    Start-Sleep -Milliseconds 50
+    [Win32]::keybd_event(0x27, 0, 0, 0)  # Right arrow down
+    Start-Sleep -Milliseconds 50
+    [Win32]::keybd_event(0x27, 0, 0x0002, 0)  # Right arrow up
+    [Win32]::keybd_event(0x5B, 0, 0x0002, 0)  # Win key up
+    
+    Write-Host "SUCCESS"
+} else {
+    Write-Host "Could not find terminal window"
+}
+'''
+            
+            result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
+            
+            if result.stdout:
+                output = result.stdout.strip()
+                if "SUCCESS" in output:
+                    self.logger.info("Terminal window snapped to right half successfully")
+                else:
+                    self.logger.info(f"Terminal snap output: {output}")
+            if result.stderr:
+                self.logger.warning(f"Terminal snap errors: {result.stderr.strip()}")
+                
+        except subprocess.TimeoutExpired:
+            self.logger.warning("Terminal snap script timed out")
+        except Exception as e:
+            self.logger.warning(f"Could not snap terminal window: {e}")
+    
+    def _position_pdf_window(self, pdf_path: Path):
+        """Position PDF viewer window on the left half of the screen.
+        
+        Args:
+            pdf_path: Path to PDF file (used to find window by title)
+        """
+        # Retry logic: Sumatra may take a moment to open
+        max_retries = 3
+        retry_delay = 0.5
+        
+        for attempt in range(max_retries):
+            try:
+                if sys.platform != 'win32':
+                    windows_path = self._to_windows_path(pdf_path)
+                    if not windows_path:
+                        return
+                    filename = Path(windows_path).name
+                else:
+                    filename = pdf_path.name
+                
+                # PowerShell script to find and snap Sumatra PDF window to left half using Windows Snap
+                ps_script = f'''
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {{
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+}}
+"@
+
+$filename = "{filename}"
+
+# Find Sumatra PDF process specifically
+$sumatraProcesses = Get-Process -Name "SumatraPDF" -ErrorAction SilentlyContinue | Where-Object {{
+    $_.MainWindowHandle -ne [IntPtr]::Zero
+}}
+
+$hwnd = [IntPtr]::Zero
+foreach ($proc in $sumatraProcesses) {{
+    $title = $proc.MainWindowTitle
+    # Match by filename in title or just use first Sumatra window
+    if ($title -like "*$filename*" -or $sumatraProcesses.Count -eq 1) {{
+        $hwnd = $proc.MainWindowHandle
+        Write-Host "Found Sumatra PDF window: $title"
+        break
+    }}
+}}
+
+# Fallback: find any PDF viewer with filename in title
+if ($hwnd -eq [IntPtr]::Zero) {{
+    $processes = Get-Process | Where-Object {{
+        $_.MainWindowHandle -ne [IntPtr]::Zero -and
+        ($_.MainWindowTitle -like "*$filename*" -or $_.MainWindowTitle -like "*PDF*")
+    }} | Select-Object -First 1
+    
+    if ($processes) {{
+        $hwnd = $processes.MainWindowHandle
+        Write-Host "Found PDF viewer window: $($processes.ProcessName) - $($processes.MainWindowTitle)"
+    }}
+}}
+
+if ($hwnd -ne [IntPtr]::Zero) {{
+    # Bring window to foreground
+    [Win32]::SetForegroundWindow($hwnd)
+    Start-Sleep -Milliseconds 150
+    
+    # Send Win+Left Arrow to snap to left half
+    # VK_LWIN = 0x5B, VK_LEFT = 0x25
+    # KEYEVENTF_KEYUP = 0x0002
+    [Win32]::keybd_event(0x5B, 0, 0, 0)  # Win key down
+    Start-Sleep -Milliseconds 50
+    [Win32]::keybd_event(0x25, 0, 0, 0)  # Left arrow down
+    Start-Sleep -Milliseconds 50
+    [Win32]::keybd_event(0x25, 0, 0x0002, 0)  # Left arrow up
+    [Win32]::keybd_event(0x5B, 0, 0x0002, 0)  # Win key up
+    
+    Write-Host "SUCCESS"
+}} else {{
+    Write-Host "PDF viewer window not found"
+}}
+'''
+                
+                result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
+                
+                if result.stdout and "SUCCESS" in result.stdout:
+                    self.logger.info(f"PDF viewer positioned successfully (attempt {attempt + 1})")
+                    if result.stdout.strip():
+                        self.logger.debug(f"Positioning output: {result.stdout.strip()}")
+                    return
+                elif attempt < max_retries - 1:
+                    self.logger.debug(f"PDF viewer not found yet, retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                else:
+                    if result.stdout:
+                        self.logger.warning(f"PDF viewer positioning failed: {result.stdout.strip()}")
+                    if result.stderr:
+                        self.logger.warning(f"PDF viewer positioning errors: {result.stderr.strip()}")
+                        
+            except subprocess.TimeoutExpired:
+                self.logger.warning("PDF viewer positioning script timed out")
+            except Exception as e:
+                self.logger.debug(f"Could not position PDF window (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+    
+    def _close_previous_pdf_file(self):
+        """Close previous PDF file in Sumatra PDF before opening new one.
+        
+        This closes just the file (not the entire viewer) so only one file is open at a time.
+        """
+        if not hasattr(self, '_pdf_viewer_path') or not self._pdf_viewer_path:
+            return
+        
+        previous_path = self._pdf_viewer_path
+        self.logger.info(f"Closing previous PDF file in viewer: {previous_path.name}")
+        
+        try:
+            if sys.platform != 'win32':
+                windows_path = self._to_windows_path(previous_path)
+                if not windows_path:
+                    return
+                filename = Path(windows_path).name
+            else:
+                filename = previous_path.name
+            
+            # PowerShell script to close specific file in Sumatra PDF
+            ps_script = f'''
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {{
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+}}
+"@
+
+$filename = "{filename}"
+$WM_CLOSE = 0x0010
+
+# Find Sumatra PDF process with the specific file
+$sumatraProcesses = Get-Process -Name "SumatraPDF" -ErrorAction SilentlyContinue | Where-Object {{
+    $_.MainWindowHandle -ne [IntPtr]::Zero
+}}
+
+$closed = $false
+foreach ($proc in $sumatraProcesses) {{
+    $title = $proc.MainWindowTitle
+    # Check if this window has the filename in title
+    if ($title -like "*$filename*") {{
+        $hwnd = $proc.MainWindowHandle
+        Write-Host "Closing Sumatra PDF window: $title"
+        # Send WM_CLOSE to close just this file/tab
+        [Win32]::SendMessage($hwnd, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+        $closed = $true
+        Start-Sleep -Milliseconds 300
+        break
+    }}
+}}
+
+# If not found by title, try closing the most recent Sumatra window
+if (!$closed -and $sumatraProcesses.Count -gt 0) {{
+    $proc = $sumatraProcesses | Sort-Object StartTime -Descending | Select-Object -First 1
+    $hwnd = $proc.MainWindowHandle
+    Write-Host "Closing most recent Sumatra PDF window: $($proc.MainWindowTitle)"
+    [Win32]::SendMessage($hwnd, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+    $closed = $true
+}}
+
+if ($closed) {{
+    Write-Host "SUCCESS"
+}} else {{
+    Write-Host "No Sumatra PDF window found to close"
+}}
+'''
+            
+            result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
+            
+            if result.stdout and "SUCCESS" in result.stdout:
+                self.logger.info("Previous PDF file closed successfully")
+                # Wait a moment for file to close
+                time.sleep(0.3)
+            else:
+                if result.stdout:
+                    self.logger.debug(f"Close previous PDF output: {result.stdout.strip()}")
+                    
+        except Exception as e:
+            self.logger.debug(f"Could not close previous PDF file: {e}")
+    
+    def _return_focus_to_terminal(self):
+        """Return focus to terminal window after PDF viewer opens."""
+        self.logger.info("Returning focus to terminal window...")
+        try:
+            handle_arg = self._terminal_window_handle if self._terminal_window_handle else ""
+            ps_script = f'''
+param([string]$StoredHandle = "{handle_arg}")
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {{
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+}}
+"@
+
+$hwnd = [IntPtr]::Zero
+
+# Try stored handle first
+if ($StoredHandle -and $StoredHandle -ne "") {{
+    try {{
+        $hwnd = [IntPtr]::new([int64]$StoredHandle)
+        Write-Host "Using stored handle for focus: $StoredHandle"
+    }} catch {{
+        Write-Host "Invalid stored handle, finding window..."
+    }}
+}}
+
+# If no stored handle, find window
+if ($hwnd -eq [IntPtr]::Zero) {{
+    # Strategy 1: Find console window by class name
+    $hwnd = [Win32]::FindWindow("ConsoleWindowClass", $null)
+    if ($hwnd -ne [IntPtr]::Zero) {{
+        Write-Host "Found console window by class name"
+    }}
+}}
+
+# Strategy 2: Find cmd.exe with WSL
+if ($hwnd -eq [IntPtr]::Zero) {{
+    $cmdProcesses = Get-Process -Name "cmd" -ErrorAction SilentlyContinue | Where-Object {{ 
+        $_.MainWindowHandle -ne [IntPtr]::Zero 
+    }} | Sort-Object StartTime -Descending
+    
+    foreach ($proc in $cmdProcesses) {{
+        try {{
+            $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($proc.Id)" -ErrorAction SilentlyContinue).CommandLine
+            if ($cmdLine -and $cmdLine -like "*wsl*" -and $cmdLine -notlike "*--status*") {{
+                $hwnd = $proc.MainWindowHandle
+                Write-Host "Found cmd.exe window (PID: $($proc.Id))"
+                break
+            }}
+        }} catch {{
+            continue
+        }}
+    }}
+}}
+
+# Set focus
+if ($hwnd -ne [IntPtr]::Zero) {{
+    $result = [Win32]::SetForegroundWindow($hwnd)
+    if ($result) {{
+        Write-Host "SUCCESS"
+    }} else {{
+        Write-Host "SetForegroundWindow returned false"
+    }}
+}} else {{
+    Write-Host "Could not find terminal window"
+}}
+'''
+            
+            result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
+            
+            if result.stdout and "SUCCESS" in result.stdout:
+                self.logger.info("Focus returned to terminal successfully")
+            else:
+                if result.stdout:
+                    self.logger.debug(f"Focus management output: {result.stdout.strip()}")
+                    
+        except Exception as e:
+            self.logger.debug(f"Could not return focus to terminal: {e}")
+    
+    def _close_pdf_viewer(self):
+        """Close PDF viewer window when processing completes."""
+        try:
+            if not hasattr(self, '_pdf_viewer_path') or not self._pdf_viewer_path:
+                return
+            
+            pdf_path = self._pdf_viewer_path
+            
+            if sys.platform != 'win32':
+                # For WSL, close Windows viewer using PowerShell
+                windows_path = self._to_windows_path(pdf_path)
+                if not windows_path:
+                    return
+                
+                filename = Path(windows_path).name
+                ps_script = f'''$filename = "{filename}"; $processes = Get-Process | Where-Object {{ $_.MainWindowTitle -like "*$filename*" -or ($_.MainWindowTitle -like "*PDF*" -and ($_.Path -like "*Acrobat*" -or $_.Path -like "*Sumatra*" -or $_.Path -like "*Edge*")) }}; foreach ($proc in $processes) {{ if ($proc.MainWindowHandle -ne [IntPtr]::Zero) {{ $proc.CloseMainWindow(); Start-Sleep -Milliseconds 500; if (!$proc.HasExited) {{ $proc.Kill() }} }} }}'''
+                subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            else:
+                # Windows: close using PowerShell
+                filename = pdf_path.name
+                ps_script = f'''$filename = "{filename}"; $processes = Get-Process | Where-Object {{ $_.MainWindowTitle -like "*$filename*" -or ($_.MainWindowTitle -like "*PDF*" -and ($_.Path -like "*Acrobat*" -or $_.Path -like "*Sumatra*" -or $_.Path -like "*Edge*")) }}; foreach ($proc in $processes) {{ if ($proc.MainWindowHandle -ne [IntPtr]::Zero) {{ $proc.CloseMainWindow(); Start-Sleep -Milliseconds 500; if (!$proc.HasExited) {{ $proc.Kill() }} }} }}'''
+                subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            
+            # Clear tracking
+            if hasattr(self, '_pdf_viewer_process'):
+                delattr(self, '_pdf_viewer_process')
+            if hasattr(self, '_pdf_viewer_path'):
+                delattr(self, '_pdf_viewer_path')
+                
+        except Exception as e:
+            self.logger.debug(f"Could not close PDF viewer: {e}")
+    
     def process_existing_files(self):
         """Process existing PDF files in the watch directory."""
-        self.logger.info("🔍 Checking for existing PDF files to process...")
+        self.logger.info("Checking for existing PDF files to process...")
         
         existing_files = []
         for file_path in self.watch_dir.glob("*.pdf"):
@@ -5327,9 +6145,12 @@ class PaperProcessorDaemon:
             self.logger.info("No existing PDF files found to process.")
             return
         
-        self.logger.info(f"Found {len(existing_files)} existing PDF file(s) to process:")
+        # Sort by creation time (oldest first = scanning order)
+        existing_files.sort(key=lambda p: p.stat().st_ctime)
+        
+        self.logger.info(f"Found {len(existing_files)} existing PDF file(s) to process (ordered by scan time):")
         for i, file_path in enumerate(existing_files, 1):
-            self.logger.info(f"  {i}. {file_path.name}")
+            print(f"  {i}. {file_path.name}")
         
         choice = input(f"\nProcess existing files? [Y/n]: ").strip().lower()
         if choice and choice != 'y':
@@ -5347,7 +6168,7 @@ class PaperProcessorDaemon:
                 self.process_paper(file_path)
             except Exception as e:
                 self.logger.error(f"Error processing {file_path.name}: {e}")
-                print(f"❌ Error processing {file_path.name}: {e}")
+                print(f"Error processing {file_path.name}: {e}")
             
             self.logger.info("-"*60)
             self.logger.info("Ready for next scan")
@@ -7900,28 +8721,30 @@ class PaperProcessorDaemon:
         temp_file_patterns = ['_no_borders', '_split', '_from_page', '_no_page1']
         if target_filename and any(pattern in target_filename for pattern in temp_file_patterns):
             self.logger.warning(f"Target filename contains temp file pattern: {target_filename}")
-            # Regenerate filename from metadata if available
-            if metadata:
-                from shared_tools.utils.filename_generator import FilenameGenerator
-                filename_gen = FilenameGenerator()
-                zotero_authors = zotero_item.get('authors', [])
-                zotero_title = zotero_item.get('title', '')
-                zotero_year = zotero_item.get('year', zotero_item.get('date', ''))
-                zotero_item_type = zotero_item.get('itemType', 'journalArticle')
-                merged_metadata = {
-                    'title': zotero_title,
-                    'authors': zotero_authors,
-                    'year': zotero_year if zotero_year else 'Unknown',
-                    'document_type': zotero_item_type
-                }
-                target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
-                self.logger.info(f"Regenerated target filename: {target_filename}")
-            else:
-                self.logger.error("Cannot regenerate filename - no metadata available")
+            # ALWAYS regenerate filename from Zotero item (not from old metadata)
+            from shared_tools.utils.filename_generator import FilenameGenerator
+            filename_gen = FilenameGenerator()
+            zotero_authors = zotero_item.get('authors', [])
+            zotero_title = zotero_item.get('title', '')
+            zotero_year = zotero_item.get('year', zotero_item.get('date', ''))
+            zotero_item_type = zotero_item.get('itemType', 'journalArticle')
+            self.logger.info(f"Regenerating filename from Zotero item - Title: '{zotero_title}', Authors: {zotero_authors}, Year: {zotero_year}")
+            merged_metadata = {
+                'title': zotero_title,
+                'authors': zotero_authors,
+                'year': zotero_year if zotero_year else 'Unknown',
+                'document_type': zotero_item_type
+            }
+            target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
+            self.logger.info(f"Regenerated target filename: {target_filename}")
         
         # Log the filename being used for copy
+        # Verify we're using Zotero item data, not old metadata
+        zotero_title = zotero_item.get('title', '')
+        zotero_authors = zotero_item.get('authors', [])
         self.logger.info(f"Copying PDF to publications with filename: {target_filename}")
         self.logger.debug(f"Source PDF: {pdf_to_copy.name}, Target filename: {target_filename}")
+        self.logger.debug(f"Zotero item title: '{zotero_title}', authors: {zotero_authors}")
         
         # Step 2: Copy to publications directory via PowerShell
         print(f"2/4 Copying to publications directory...")
