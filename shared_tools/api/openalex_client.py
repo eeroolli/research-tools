@@ -91,50 +91,69 @@ class OpenAlexClient:
             # Build filters
             filters = []
             
-            if title:
-                # Use title search
-                filters.append(f'display_name.search:"{title}"')
+            # Normalize empty strings to None
+            if title and title.strip():
+                # Use title search - escape quotes in title
+                clean_title = title.strip().replace('"', '\\"')
+                filters.append(f'display_name.search:"{clean_title}"')
             
             if year:
-                filters.append(f'publication_year:{year}')
+                try:
+                    # Validate year is a valid integer
+                    year_int = int(str(year).strip())
+                    filters.append(f'publication_year:{year_int}')
+                except (ValueError, TypeError):
+                    # Invalid year, skip
+                    pass
             
-            if journal:
-                # Search in venue/source
-                filters.append(f'primary_location.source.display_name.search:"{journal}"')
+            if journal and journal.strip():
+                # Search in venue/source - escape quotes
+                clean_journal = journal.strip().replace('"', '\\"')
+                filters.append(f'primary_location.source.display_name.search:"{clean_journal}"')
             
             if authors and len(authors) > 0:
                 # Use first author for filtering
                 author_name = authors[0]
-                # Remove suffixes like "Jr." and split
-                author_name = author_name.replace(', Jr.', '').replace(' Jr.', '')
-                if ',' in author_name:
-                    parts = author_name.split(',')
-                    if len(parts) >= 2:
-                        lastname = parts[0].strip()
-                        firstname = parts[1].strip().split()[0] if parts[1].strip() else ''
-                        author_filter = f'author.display_name.search:"{lastname}, {firstname}"'
+                if author_name and author_name.strip():
+                    # Remove suffixes like "Jr." and split
+                    author_name = author_name.replace(', Jr.', '').replace(' Jr.', '').strip()
+                    if ',' in author_name:
+                        parts = author_name.split(',')
+                        if len(parts) >= 2:
+                            lastname = parts[0].strip()
+                            firstname = parts[1].strip().split()[0] if parts[1].strip() else ''
+                            if lastname:
+                                # Escape quotes
+                                lastname = lastname.replace('"', '\\"')
+                                firstname = firstname.replace('"', '\\"') if firstname else ''
+                                if firstname:
+                                    author_filter = f'author.display_name.search:"{lastname}, {firstname}"'
+                                else:
+                                    author_filter = f'author.display_name.search:"{lastname}"'
+                                filters.append(author_filter)
                     else:
-                        author_filter = f'author.display_name.search:"{author_name}"'
-                else:
-                    # Try to extract last name
-                    parts = author_name.split()
-                    if len(parts) > 0:
-                        author_filter = f'author.display_name.search:"{parts[-1]}"'
-                    else:
-                        author_filter = f'author.display_name.search:"{author_name}"'
-                filters.append(author_filter)
+                        # Try to extract last name
+                        parts = author_name.split()
+                        if len(parts) > 0:
+                            lastname = parts[-1].strip()
+                            if lastname:
+                                # Escape quotes
+                                lastname = lastname.replace('"', '\\"')
+                                author_filter = f'author.display_name.search:"{lastname}"'
+                                filters.append(author_filter)
+            
+            if not filters:
+                # No valid filters - return empty
+                return []
             
             params = {
-                'filter': ','.join(filters) if filters else None,
+                'filter': ','.join(filters),
                 'per_page': min(max_results, 10),  # API limits per_page to 200
                 'sort': 'relevance_score:desc'
             }
             
             if self.email:
                 params['mailto'] = self.email
-            
-            # Remove None values
-            params = {k: v for k, v in params.items() if v is not None}
             
             response = self.session.get(self.BASE_URL, params=params, timeout=self.timeout)
             

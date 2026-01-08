@@ -20,6 +20,9 @@ import numpy as np
 from PIL import Image
 import fitz  # PyMuPDF
 import io
+import json
+import time
+import os
 
 
 class BorderRemover:
@@ -234,11 +237,35 @@ class BorderRemover:
             
             # If initial region has enough dark pixels, scan to find exact border width
             if initial_dark_fraction >= min_dark_fraction:
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'B1',
+                            'location': 'border_remover.py:detect_borders:left',
+                            'message': 'Left border initial check passed',
+                            'data': {
+                                'initial_dark_fraction': float(initial_dark_fraction),
+                                'min_dark_fraction': float(min_dark_fraction),
+                                'dark_threshold': float(dark_threshold),
+                                'initial_check_width': int(initial_check_width),
+                                'max_border_check': int(max_border_check)
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
                 # Scan columns from left to right, find where dark pixels stop
                 dark_border_end = 0
+                col_dark_fractions = []
                 for col in range(max_border_check):
                     col_data = gray[:, col]
                     col_dark_fraction = np.sum(col_data <= dark_threshold) / col_data.size
+                    col_dark_fractions.append(float(col_dark_fraction))
                     if col_dark_fraction >= min_dark_fraction:
                         dark_border_end = col + 1
                     else:
@@ -246,8 +273,59 @@ class BorderRemover:
                         if dark_border_end > 0:
                             break
                 
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'B1',
+                            'location': 'border_remover.py:detect_borders:left',
+                            'message': 'Left border scan complete',
+                            'data': {
+                                'dark_border_end': int(dark_border_end),
+                                'max_col_dark_fraction': float(max(col_dark_fractions)) if col_dark_fractions else 0.0,
+                                'min_col_dark_fraction': float(min(col_dark_fractions)) if col_dark_fractions else 0.0,
+                                'avg_col_dark_fraction': float(np.mean(col_dark_fractions)) if col_dark_fractions else 0.0,
+                                'first_10_cols_dark_fractions': [float(x) for x in col_dark_fractions[:10]]
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
+                
                 if dark_border_end > 0:
                     verified_borders['left'] = dark_border_end
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        # Sample pixels in the detected border region to check for text
+                        border_region = gray[:, :dark_border_end]
+                        border_pixel_values = border_region.flatten()
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'B1',
+                                'location': 'border_remover.py:detect_borders:left',
+                                'message': 'Left border verified',
+                                'data': {
+                                    'border_width': int(dark_border_end),
+                                    'border_region_size': int(border_region.size),
+                                    'border_pixel_min': int(border_pixel_values.min()) if border_pixel_values.size > 0 else 0,
+                                    'border_pixel_max': int(border_pixel_values.max()) if border_pixel_values.size > 0 else 0,
+                                    'border_pixel_mean': float(border_pixel_values.mean()) if border_pixel_values.size > 0 else 0.0,
+                                    'border_pixel_std': float(border_pixel_values.std()) if border_pixel_values.size > 0 else 0.0,
+                                    'pixels_below_100': int(np.sum(border_pixel_values < 100)) if border_pixel_values.size > 0 else 0,
+                                    'pixels_below_150': int(np.sum(border_pixel_values < 150)) if border_pixel_values.size > 0 else 0
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except Exception:
+                        pass
+                    # #endregion
                     if debug:
                         self.logger.info(f"  -> VERIFIED: dark border width={dark_border_end}px "
                                        f"(initial check: {initial_dark_fraction:.3f} >= {min_dark_fraction})")

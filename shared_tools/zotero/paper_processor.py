@@ -570,10 +570,16 @@ class ZoteroPaperProcessor:
                 'tags': updated_tags
             }
             
+            # Prepare headers with If-Unmodified-Since-Version for key-based writes
+            update_headers = {
+                **self.headers,
+                'If-Unmodified-Since-Version': str(item_data['version'])
+            }
+            
             # Update item
             update_response = requests.patch(
                 f"{self.base_url}/items/{item_key}",
-                headers=self.headers,
+                headers=update_headers,
                 json=update_data,
                 timeout=10
             )

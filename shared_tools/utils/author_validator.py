@@ -261,6 +261,7 @@ class AuthorValidator:
         Suggest OCR correction for an extracted name using edit distance.
         
         Checks all Zotero authors for potential OCR errors.
+        Handles special characters and OCR artifacts (e.g., "$" -> "k").
         
         Args:
             extracted_name: The name extracted from OCR/AI
@@ -278,26 +279,54 @@ class AuthorValidator:
         
         extracted_lower = extracted_name.lower()
         
-        for author in self.zotero_authors:
-            author_name = author['name']
-            author_lower = author_name.lower()
-            
-            # Calculate similarity ratio
-            similarity = SequenceMatcher(None, extracted_lower, author_lower).ratio()
-            
-            # Calculate Levenshtein-like distance
-            if similarity > 0.8:  # Only consider good matches
-                distance = self._edit_distance(extracted_lower, author_lower)
+        # Try matching by lastname first (faster, handles OCR errors in first name)
+        lastname = self._extract_lastname(extracted_name)
+        if lastname and lastname in self.lastname_index:
+            # Found matching lastname - check if any author with this lastname is similar
+            for author in self.lastname_index[lastname]:
+                author_name = author['name']
+                author_lower = author_name.lower()
                 
-                if distance <= max_distance and similarity > best_similarity:
-                    best_similarity = similarity
-                    best_match = {
-                        'corrected_name': author_name,
-                        'confidence': int(similarity * 100),
-                        'distance': distance,
-                        'paper_count': author['paper_count'],
-                        'original_name': extracted_name
-                    }
+                # Calculate similarity ratio
+                similarity = SequenceMatcher(None, extracted_lower, author_lower).ratio()
+                
+                # Calculate Levenshtein-like distance
+                # Be more lenient for lastname matches (similarity > 0.7 instead of 0.8)
+                if similarity > 0.7:
+                    distance = self._edit_distance(extracted_lower, author_lower)
+                    
+                    if distance <= max_distance and similarity > best_similarity:
+                        best_similarity = similarity
+                        best_match = {
+                            'corrected_name': author_name,
+                            'confidence': int(similarity * 100),
+                            'distance': distance,
+                            'paper_count': author['paper_count'],
+                            'original_name': extracted_name
+                        }
+        
+        # If no lastname match, try all authors (slower but more comprehensive)
+        if not best_match:
+            for author in self.zotero_authors:
+                author_name = author['name']
+                author_lower = author_name.lower()
+                
+                # Calculate similarity ratio
+                similarity = SequenceMatcher(None, extracted_lower, author_lower).ratio()
+                
+                # Calculate Levenshtein-like distance
+                if similarity > 0.8:  # Only consider good matches
+                    distance = self._edit_distance(extracted_lower, author_lower)
+                    
+                    if distance <= max_distance and similarity > best_similarity:
+                        best_similarity = similarity
+                        best_match = {
+                            'corrected_name': author_name,
+                            'confidence': int(similarity * 100),
+                            'distance': distance,
+                            'paper_count': author['paper_count'],
+                            'original_name': extracted_name
+                        }
         
         return best_match
     

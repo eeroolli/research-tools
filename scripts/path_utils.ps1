@@ -58,11 +58,19 @@ function Convert-WSLToWindows {
         return "${driveLetter}:\${windowsPath}"
     }
     
-    # Handle other WSL paths (like /home/...)
+    # Handle other WSL paths (like /home/..., /tmp/...)
     # Try using wslpath if available, but don't fail if it's not
     try {
-        $result = wslpath -w $WSLPath 2>$null
-        if ($LASTEXITCODE -eq 0 -and $result) {
+        # Try calling wslpath via wsl.exe (works from PowerShell)
+        $wslResult = wsl wslpath -w $WSLPath 2>&1
+        $wslExitCode = $LASTEXITCODE
+        if ($wslExitCode -eq 0 -and $wslResult -and ($wslResult -notmatch '^/')) {
+            # Successfully converted - result should be Windows path
+            return $wslResult.Trim()
+        }
+        # If wslpath failed, try direct wslpath (might work in some environments)
+        $result = wslpath -w $WSLPath 2>&1
+        if ($LASTEXITCODE -eq 0 -and $result -and ($result -notmatch '^/')) {
             return $result.Trim()
         }
     } catch {

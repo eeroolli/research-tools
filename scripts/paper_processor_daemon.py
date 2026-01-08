@@ -4675,11 +4675,65 @@ class PaperProcessorDaemon:
         
         # Step 1: Remove borders if requested
         if border_removal:
+            # #region agent log
+            try:
+                import pdfplumber
+                with pdfplumber.open(str(current_pdf)) as pdf:
+                    if len(pdf.pages) > 0:
+                        orig_width = pdf.pages[0].width
+                        orig_height = pdf.pages[0].height
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'B1',
+                                'location': 'paper_processor_daemon.py:_preprocess_pdf_with_options',
+                                'message': 'Before border removal - page dimensions',
+                                'data': {
+                                    'pdf_path': str(current_pdf),
+                                    'page_width': float(orig_width),
+                                    'page_height': float(orig_height),
+                                    'aspect_ratio': float(orig_width / orig_height) if orig_height > 0 else 0.0
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             border_removed_pdf = self._check_and_remove_dark_borders(current_pdf)
             if border_removed_pdf:
                 current_pdf = border_removed_pdf
                 preprocessing_state['border_removal'] = True
                 self.logger.debug(f"Borders removed: {border_removed_pdf.name}")
+                # #region agent log
+                try:
+                    import pdfplumber
+                    with pdfplumber.open(str(current_pdf)) as pdf:
+                        if len(pdf.pages) > 0:
+                            new_width = pdf.pages[0].width
+                            new_height = pdf.pages[0].height
+                            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                            with open(log_path, 'a', encoding='utf-8') as f:
+                                f.write(json.dumps({
+                                    'sessionId': 'debug-session',
+                                    'runId': 'run1',
+                                    'hypothesisId': 'B1',
+                                    'location': 'paper_processor_daemon.py:_preprocess_pdf_with_options',
+                                    'message': 'After border removal - page dimensions',
+                                    'data': {
+                                        'pdf_path': str(current_pdf),
+                                        'page_width': float(new_width),
+                                        'page_height': float(new_height),
+                                        'aspect_ratio': float(new_width / new_height) if new_height > 0 else 0.0,
+                                        'width_change': float(new_width - orig_width) if 'orig_width' in locals() else None,
+                                        'height_change': float(new_height - orig_height) if 'orig_height' in locals() else None
+                                    },
+                                    'timestamp': int(time.time() * 1000)
+                                }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
         
         # Step 2: Check if splitting is needed and perform split
         if split_method != 'none':
@@ -4720,6 +4774,35 @@ class PaperProcessorDaemon:
                 # Track that split is being attempted - update state BEFORE calling _split_with_mutool
                 preprocessing_state['split_method'] = split_method
                 preprocessing_state['split_attempted'] = True
+                
+                # #region agent log
+                try:
+                    import pdfplumber
+                    with pdfplumber.open(str(current_pdf)) as pdf:
+                        if len(pdf.pages) > 0:
+                            split_input_width = pdf.pages[0].width
+                            split_input_height = pdf.pages[0].height
+                            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                            with open(log_path, 'a', encoding='utf-8') as f:
+                                f.write(json.dumps({
+                                    'sessionId': 'debug-session',
+                                    'runId': 'run1',
+                                    'hypothesisId': 'G',
+                                    'location': 'paper_processor_daemon.py:_preprocess_pdf_with_options',
+                                    'message': 'Before split - page dimensions',
+                                    'data': {
+                                        'pdf_path': str(current_pdf),
+                                        'page_width': float(split_input_width),
+                                        'page_height': float(split_input_height),
+                                        'landscape_width_param': float(landscape_width) if landscape_width else None,
+                                        'landscape_height_param': float(landscape_height) if landscape_height else None,
+                                        'split_method': split_method
+                                    },
+                                    'timestamp': int(time.time() * 1000)
+                                }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
                 
                 # Perform split
                 split_path = self._split_with_mutool(
@@ -4811,14 +4894,36 @@ class PaperProcessorDaemon:
             # Show menu - build dynamically based on current state
             print("Options:")
             print("  [1] Accept and proceed to Zotero")
+            
+            # Build dynamic options with sequential numbering
+            option_num = 1
+            option_map = {}  # Maps option number to action
+            
             if preprocessing_state.get('border_removal', False):
-                print("  [2] Drop border removal")
+                option_num += 1
+                option_map[option_num] = 'drop_border'
+                print(f"  [{option_num}] Drop border removal")
+            
             if preprocessing_state.get('split_method', 'none') != 'none':
-                print("  [3] Drop split")
+                option_num += 1
+                option_map[option_num] = 'drop_split'
+                print(f"  [{option_num}] Drop split")
+            
             if preprocessing_state.get('split_method', 'none') == 'auto':
-                print("  [4] Use 50/50 split instead")
+                option_num += 1
+                option_map[option_num] = 'use_5050'
+                print(f"  [{option_num}] Use 50/50 split instead")
+            
+            # Show "Add trimming" if not applied, "Drop trimming" if applied
             if preprocessing_state.get('trim_leading', False):
-                print("  [5] Drop trimming")
+                option_num += 1
+                option_map[option_num] = 'drop_trim'
+                print(f"  [{option_num}] Drop trimming")
+            else:
+                option_num += 1
+                option_map[option_num] = 'add_trim'
+                print(f"  [{option_num}] Add trimming")
+            
             print("  [z] Go back to metadata")
             print("  [q] Quit - move to manual review")
             print()
@@ -4833,72 +4938,98 @@ class PaperProcessorDaemon:
                 # Accept and proceed
                 return processed_pdf, preprocessing_state
             
-            elif choice == '2' and preprocessing_state.get('border_removal', False):
-                # Drop border removal
-                new_state = preprocessing_state.copy()
-                new_state['border_removal'] = False
-                print("\n🔄 Restarting preprocessing without border removal...")
-                processed_pdf, new_state = self._preprocess_pdf_with_options(
-                    original_pdf,
-                    border_removal=False,
-                    split_method=new_state.get('split_method', 'auto'),
-                    trim_leading=new_state.get('trim_leading', True)
-                )
-                preprocessing_state = new_state
-                # Continue loop to show preview again
-            
-            elif choice == '3' and preprocessing_state.get('split_method', 'none') != 'none':
-                # Drop split
-                new_state = preprocessing_state.copy()
-                new_state['split_method'] = 'none'
-                print("\n🔄 Restarting preprocessing without split...")
-                processed_pdf, new_state = self._preprocess_pdf_with_options(
-                    original_pdf,
-                    border_removal=new_state.get('border_removal', True),
-                    split_method='none',
-                    trim_leading=new_state.get('trim_leading', True)
-                )
-                preprocessing_state = new_state
-                # Continue loop to show preview again
-            
-            elif choice == '4' and preprocessing_state.get('split_method', 'none') == 'auto':
-                # Use 50/50 split instead
-                new_state = preprocessing_state.copy()
-                new_state['split_method'] = '50-50'
-                print("\n🔄 Restarting preprocessing with 50/50 split...")
-                processed_pdf, new_state = self._preprocess_pdf_with_options(
-                    original_pdf,
-                    border_removal=new_state.get('border_removal', True),
-                    split_method='50-50',
-                    trim_leading=new_state.get('trim_leading', True)
-                )
-                preprocessing_state = new_state
-                # Continue loop to show preview again
-            
-            elif choice == '5' and preprocessing_state.get('trim_leading', False):
-                # Drop trimming
-                new_state = preprocessing_state.copy()
-                new_state['trim_leading'] = False
-                print("\n🔄 Restarting preprocessing without trimming...")
-                processed_pdf, new_state = self._preprocess_pdf_with_options(
-                    original_pdf,
-                    border_removal=new_state.get('border_removal', True),
-                    split_method=new_state.get('split_method', 'auto'),
-                    trim_leading=False
-                )
-                preprocessing_state = new_state
-                # Continue loop to show preview again
-            
-            elif choice == 'z':
-                # Go back to metadata (caller should handle this)
-                return None, {'back': True}
-            
-            elif choice == 'q':
-                # Quit to manual review
-                return None, {'quit': True}
-            
-            else:
-                print("⚠️  Invalid choice. Please try again.")
+            # Handle numeric choices using option_map
+            try:
+                choice_num = int(choice)
+                if choice_num in option_map:
+                    action = option_map[choice_num]
+                    
+                    if action == 'drop_border':
+                        # Drop border removal
+                        new_state = preprocessing_state.copy()
+                        new_state['border_removal'] = False
+                        print("\n🔄 Restarting preprocessing without border removal...")
+                        processed_pdf, new_state = self._preprocess_pdf_with_options(
+                            original_pdf,
+                            border_removal=False,
+                            split_method=new_state.get('split_method', 'auto'),
+                            trim_leading=new_state.get('trim_leading', True)
+                        )
+                        preprocessing_state = new_state
+                        # Continue loop to show preview again
+                    
+                    elif action == 'drop_split':
+                        # Drop split
+                        new_state = preprocessing_state.copy()
+                        new_state['split_method'] = 'none'
+                        print("\n🔄 Restarting preprocessing without split...")
+                        processed_pdf, new_state = self._preprocess_pdf_with_options(
+                            original_pdf,
+                            border_removal=new_state.get('border_removal', True),
+                            split_method='none',
+                            trim_leading=new_state.get('trim_leading', True)
+                        )
+                        preprocessing_state = new_state
+                        # Continue loop to show preview again
+                    
+                    elif action == 'use_5050':
+                        # Use 50/50 split instead
+                        new_state = preprocessing_state.copy()
+                        new_state['split_method'] = '50-50'
+                        print("\n🔄 Restarting preprocessing with 50/50 split...")
+                        processed_pdf, new_state = self._preprocess_pdf_with_options(
+                            original_pdf,
+                            border_removal=new_state.get('border_removal', True),
+                            split_method='50-50',
+                            trim_leading=new_state.get('trim_leading', True)
+                        )
+                        preprocessing_state = new_state
+                        # Continue loop to show preview again
+                    
+                    elif action == 'drop_trim':
+                        # Drop trimming
+                        new_state = preprocessing_state.copy()
+                        new_state['trim_leading'] = False
+                        print("\n🔄 Restarting preprocessing without trimming...")
+                        processed_pdf, new_state = self._preprocess_pdf_with_options(
+                            original_pdf,
+                            border_removal=new_state.get('border_removal', True),
+                            split_method=new_state.get('split_method', 'auto'),
+                            trim_leading=False
+                        )
+                        preprocessing_state = new_state
+                        # Continue loop to show preview again
+                    
+                    elif action == 'add_trim':
+                        # Add trimming
+                        new_state = preprocessing_state.copy()
+                        new_state['trim_leading'] = True
+                        print("\n🔄 Restarting preprocessing with trimming...")
+                        processed_pdf, new_state = self._preprocess_pdf_with_options(
+                            original_pdf,
+                            border_removal=new_state.get('border_removal', True),
+                            split_method=new_state.get('split_method', 'auto'),
+                            trim_leading=True
+                        )
+                        preprocessing_state = new_state
+                        # Continue loop to show preview again
+                    
+                    else:
+                        print("⚠️  Invalid choice. Please try again.")
+                else:
+                    print("⚠️  Invalid choice. Please try again.")
+            except ValueError:
+                # Not a number, check for letter choices
+                if choice == 'z':
+                    # Go back to metadata (caller should handle this)
+                    return None, {'back': True}
+                
+                elif choice == 'q':
+                    # Quit to manual review
+                    return None, {'quit': True}
+                
+                else:
+                    print("⚠️  Invalid choice. Please try again.")
     
     def _detect_two_up_page(self, pdf_path: Path) -> tuple[bool, float, str]:
         """Heuristic detection of two-up layout on page 1.
@@ -5628,6 +5759,32 @@ class PaperProcessorDaemon:
                     new_doc.close()
                     return None
                 
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'G',
+                            'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                            'message': 'Splitting page at gutter position',
+                            'data': {
+                                'page_num': page_num,
+                                'page_width': float(page_width),
+                                'page_height': float(page_height),
+                                'gutter_x': float(gutter_x),
+                                'gutter_ratio': float(gutter_ratio),
+                                'left_page_width': float(gutter_x),
+                                'right_page_width': float(page_width - gutter_x),
+                                'left_page_ratio': float(gutter_x / page_width) if page_width > 0 else 0.0,
+                                'right_page_ratio': float((page_width - gutter_x) / page_width) if page_width > 0 else 0.0
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except: pass
+                # #endregion
+                
                 # Create left page (from 0 to gutter_x)
                 left_rect = fitz.Rect(0, 0, gutter_x, page_height)
                 left_page = new_doc.new_page(width=gutter_x, height=page_height)
@@ -5957,10 +6114,57 @@ class PaperProcessorDaemon:
                     with pdfplumber.open(str(pdf_path)) as pdf:
                         if len(pdf.pages) > 0:
                             width, height = pdf.pages[0].width, pdf.pages[0].height
+                            # #region agent log
+                            try:
+                                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                                with open(log_path, 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps({
+                                        'sessionId': 'debug-session',
+                                        'runId': 'run1',
+                                        'hypothesisId': 'G',
+                                        'location': 'paper_processor_daemon.py:_split_with_mutool:geometric',
+                                        'message': 'Page dimensions from PDF',
+                                        'data': {
+                                            'width': float(width),
+                                            'height': float(height),
+                                            'aspect_ratio': float(width / height) if height > 0 else 0.0,
+                                            'split_method': split_method,
+                                            'gutter_x_was_none': gutter_x is None
+                                        },
+                                        'timestamp': int(time.time() * 1000)
+                                    }) + '\n')
+                            except Exception:
+                                pass
+                            # #endregion
                 except Exception:
                     width = height = 0
             
             x, y = (2, 1) if (width and height and width > height) else (1, 2)
+            # #region agent log
+            try:
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                split_x = width / 2 if width else 0
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'G',
+                        'location': 'paper_processor_daemon.py:_split_with_mutool:geometric',
+                        'message': 'Geometric split calculation',
+                        'data': {
+                            'width': float(width) if width else 0.0,
+                            'height': float(height) if height else 0.0,
+                            'split_x': float(split_x),
+                            'split_ratio': float(split_x / width) if width > 0 else 0.0,
+                            'mutool_poster_params': f'{x}x{y}',
+                            'gutter_x_was_none': gutter_x is None,
+                            'page_width_from_gutter': float(page_width) if page_width else None
+                        },
+                        'timestamp': int(time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             # Create split in temp directory to avoid cluttering watch directory
             import tempfile
             temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'

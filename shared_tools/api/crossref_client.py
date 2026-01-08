@@ -220,7 +220,8 @@ class CrossRefClient:
         # CrossRef accepts a simple query string that searches across fields
         query_terms = []
         
-        if title:
+        # Normalize empty strings to None
+        if title and title.strip():
             # Clean and truncate title if too long (CrossRef has limits)
             # Remove special characters that might break the query
             clean_title = title.strip()
@@ -232,16 +233,18 @@ class CrossRefClient:
         if authors and len(authors) > 0:
             # Extract last name from first author
             first_author = authors[0]
-            # Handle "Last, First" or "First Last" formats
-            if ',' in first_author:
-                last_name = first_author.split(',')[0].strip()
-            elif ' ' in first_author:
-                last_name = first_author.split()[-1]
-            else:
-                last_name = first_author
-            query_terms.append(last_name)
+            if first_author and first_author.strip():
+                # Handle "Last, First" or "First Last" formats
+                if ',' in first_author:
+                    last_name = first_author.split(',')[0].strip()
+                elif ' ' in first_author:
+                    last_name = first_author.split()[-1].strip()
+                else:
+                    last_name = first_author.strip()
+                if last_name:
+                    query_terms.append(last_name)
         
-        if journal:
+        if journal and journal.strip():
             # Clean journal name
             clean_journal = journal.strip()
             if len(clean_journal) > 100:

@@ -1087,8 +1087,14 @@ class ZoteroAPIBookProcessor:
                 **current_data
             }
             
+            # Prepare headers with If-Unmodified-Since-Version for key-based writes
+            update_headers = {
+                **self.headers,
+                'If-Unmodified-Since-Version': str(item_data['version'])
+            }
+            
             update_response = requests.put(f"{self.base_url}/items/{item_key}",
-                                         headers=self.headers,
+                                         headers=update_headers,
                                          json=update_data)
             
             if update_response.status_code == 204:
@@ -1125,8 +1131,14 @@ class ZoteroAPIBookProcessor:
                     **current_data
                 }
                 
+                # Prepare headers with If-Unmodified-Since-Version for key-based writes
+                update_headers = {
+                    **self.headers,
+                    'If-Unmodified-Since-Version': str(item_data['version'])
+                }
+                
                 update_response = requests.put(f"{self.base_url}/items/{item_key}",
-                                             headers=self.headers,
+                                             headers=update_headers,
                                              json=update_data)
                 
                 if update_response.status_code == 204:
@@ -1166,8 +1178,14 @@ class ZoteroAPIBookProcessor:
                     **current_data
                 }
                 
+                # Prepare headers with If-Unmodified-Since-Version for key-based writes
+                update_headers = {
+                    **self.headers,
+                    'If-Unmodified-Since-Version': str(item_data['version'])
+                }
+                
                 update_response = requests.put(f"{self.base_url}/items/{item_key}",
-                                             headers=self.headers,
+                                             headers=update_headers,
                                              json=update_data)
                 
                 if update_response.status_code == 204:
@@ -1471,8 +1489,14 @@ class ZoteroAPIBookProcessor:
                 'tags': current_tags
             }
             
+            # Prepare headers with If-Unmodified-Since-Version for key-based writes
+            update_headers = {
+                **self.headers,
+                'If-Unmodified-Since-Version': str(item_data['version'])
+            }
+            
             update_response = requests.put(f"{self.base_url}/items/{item_key}",
-                                         headers=self.headers,
+                                         headers=update_headers,
                                          json=update_data)
             
             if update_response.status_code == 204:

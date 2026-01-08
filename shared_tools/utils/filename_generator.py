@@ -96,6 +96,30 @@ class FilenameGenerator:
         Returns:
             Cleaned text safe for filename
         """
+        # #region agent log
+        import json
+        from pathlib import Path
+        log_path = Path('.cursor/debug.log')
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'D',
+                    'location': 'filename_generator.py:89',
+                    'message': 'clean_title entry',
+                    'data': {
+                        'input_text': text,
+                        'input_text_length': len(text) if text else 0,
+                        'input_text_first_200_chars': text[:200] if text else ''
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+        except Exception:
+            pass
+        # #endregion
+        
         if not text:
             return ""
         
@@ -133,6 +157,27 @@ class FilenameGenerator:
         if len(text) > max_length:
             text = text[:max_length].rstrip('_')
         
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'D',
+                    'location': 'filename_generator.py:136',
+                    'message': 'clean_title exit',
+                    'data': {
+                        'output_text': text,
+                        'output_text_length': len(text) if text else 0,
+                        'output_text_first_200_chars': text[:200] if text else ''
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+        except Exception:
+            pass
+        # #endregion
+        
         return text
     
     def generate_filename(self, metadata: Dict, original_filename: str = None, is_scan: bool = False) -> str:
@@ -160,11 +205,57 @@ class FilenameGenerator:
         doi = metadata.get('doi', '')
         isbn = metadata.get('isbn', '')
         
+        # #region agent log
+        import json
+        from pathlib import Path
+        log_path = Path('.cursor/debug.log')
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'C',
+                    'location': 'filename_generator.py:159',
+                    'message': 'Title extracted from metadata before cleaning',
+                    'data': {
+                        'raw_title': title,
+                        'raw_title_length': len(title) if title else 0,
+                        'raw_title_first_100_chars': title[:100] if title else '',
+                        'metadata_keys': list(metadata.keys())
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+        except Exception:
+            pass
+        # #endregion
+        
         # Format authors
         author_part = self.format_authors(authors)
         
         # Clean title
         title_part = self.clean_title(title)
+        
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'C',
+                    'location': 'filename_generator.py:167',
+                    'message': 'Title after cleaning',
+                    'data': {
+                        'cleaned_title': title_part,
+                        'cleaned_title_length': len(title_part) if title_part else 0,
+                        'cleaned_title_first_100_chars': title_part[:100] if title_part else ''
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+        except Exception:
+            pass
+        # #endregion
         
         # Format year
         year_part = str(year) if year else 'Unknown'
@@ -187,6 +278,28 @@ class FilenameGenerator:
             doi_safe=doi_safe,
             isbn_safe=isbn_safe
         )
+        
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'C',
+                    'location': 'filename_generator.py:183',
+                    'message': 'Filename before _scan suffix',
+                    'data': {
+                        'filename_before_scan': filename,
+                        'title_part_used': title_part,
+                        'author_part': author_part,
+                        'year_part': year_part
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+        except Exception:
+            pass
+        # #endregion
         
         # Add _scan suffix if this is a scanned document
         if is_scan:
@@ -258,7 +371,52 @@ class FilenameGenerator:
         # CRITICAL: Authors, year, DOI, and ISBN are NEVER shortened - they must remain correct
         # These are passed through unchanged to ensure accuracy
         # Try Ollama shortening first (only on title_part, never on authors/year/DOI/ISBN)
+        
+        # #region agent log
+        import json
+        from pathlib import Path
+        log_path = Path('.cursor/debug.log')
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'E',
+                    'location': 'filename_generator.py:261',
+                    'message': 'Before Ollama title shortening',
+                    'data': {
+                        'title_part_to_shorten': title_part,
+                        'title_part_length': len(title_part) if title_part else 0
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+        except Exception:
+            pass
+        # #endregion
+        
         shortened_title = self._shorten_title_with_ollama(title_part)
+        
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'E',
+                    'location': 'filename_generator.py:261',
+                    'message': 'After Ollama title shortening',
+                    'data': {
+                        'shortened_title': shortened_title,
+                        'shortened_title_length': len(shortened_title) if shortened_title else 0,
+                        'shortened_title_first_200_chars': shortened_title[:200] if shortened_title else ''
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+        except Exception:
+            pass
+        # #endregion
         
         if shortened_title:
             # Get pattern template
@@ -309,12 +467,76 @@ class FilenameGenerator:
         Returns:
             Shortened title or None if Ollama unavailable/fails
         """
+        # #region agent log
+        import json
+        from pathlib import Path
+        log_path = Path('.cursor/debug.log')
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'E',
+                    'location': 'filename_generator.py:457',
+                    'message': '_shorten_title_with_ollama entry',
+                    'data': {
+                        'input_title': title,
+                        'input_title_length': len(title) if title else 0,
+                        'input_title_first_200_chars': title[:200] if title else ''
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+        except Exception:
+            pass
+        # #endregion
+        
         try:
             from shared_tools.ai.ollama_client import OllamaClient
             client = OllamaClient()
-            shortened = client.shorten_title(title, preserve_first_n_words=4)
+            shortened = client.shorten_title(title)  # Uses config value for preserve_first_n_words
+            
+            # #region agent log
+            try:
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    log_entry = {
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'E',
+                        'location': 'filename_generator.py:457',
+                        'message': '_shorten_title_with_ollama exit',
+                        'data': {
+                            'output_shortened': shortened,
+                            'output_shortened_length': len(shortened) if shortened else 0,
+                            'output_shortened_first_200_chars': shortened[:200] if shortened else ''
+                        },
+                        'timestamp': int(__import__('time').time() * 1000)
+                    }
+                    f.write(json.dumps(log_entry) + '\n')
+            except Exception:
+                pass
+            # #endregion
+            
             return shortened
-        except Exception:
+        except Exception as e:
+            # #region agent log
+            try:
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    log_entry = {
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'E',
+                        'location': 'filename_generator.py:457',
+                        'message': '_shorten_title_with_ollama exception',
+                        'data': {
+                            'exception': str(e)
+                        },
+                        'timestamp': int(__import__('time').time() * 1000)
+                    }
+                    f.write(json.dumps(log_entry) + '\n')
+            except Exception:
+                pass
+            # #endregion
             # Any error means Ollama is unavailable
             return None
     

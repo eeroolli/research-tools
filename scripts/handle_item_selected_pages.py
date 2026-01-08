@@ -701,9 +701,13 @@ def create_pdf_preview_page(daemon) -> Page:
             option_num += 1
             lines.append(f"  [{option_num}] Use 50/50 split instead")
         
+        # Show "Add trimming" if not applied, "Drop trimming" if applied
         if preprocessing_state.get('trim_leading', False):
             option_num += 1
             lines.append(f"  [{option_num}] Drop trimming")
+        else:
+            option_num += 1
+            lines.append(f"  [{option_num}] Add trimming")
         
         lines.append("  [z] Go back to proposed actions")
         lines.append("  [q] Quit - move to manual review")
@@ -737,6 +741,8 @@ def create_pdf_preview_page(daemon) -> Page:
                 return _handle_use_5050_split(ctx, daemon)
             elif action == 'drop_trim':
                 return _handle_drop_trimming(ctx, daemon)
+            elif action == 'add_trim':
+                return _handle_add_trimming(ctx, daemon)
             else:
                 print("⚠️  Invalid choice.")
                 return NavigationResult.show_page('pdf_preview')
@@ -784,7 +790,7 @@ def create_pdf_preview_page(daemon) -> Page:
 def _get_pdf_preview_option_action(option_num: int, preprocessing_state: dict) -> str:
     """Determine what action corresponds to an option number based on current state.
     
-    Returns: 'accept', 'drop_border', 'drop_split', 'use_5050', 'drop_trim', or None
+    Returns: 'accept', 'drop_border', 'drop_split', 'use_5050', 'drop_trim', 'add_trim', or None
     """
     if option_num == 1:
         return 'accept'
@@ -806,10 +812,13 @@ def _get_pdf_preview_option_action(option_num: int, preprocessing_state: dict) -
         if option_count == option_num:
             return 'use_5050'
     
-    if preprocessing_state.get('trim_leading', False):
-        option_count += 1
-        if option_count == option_num:
+    # Handle trimming: "Drop trimming" if applied, "Add trimming" if not applied
+    option_count += 1
+    if option_count == option_num:
+        if preprocessing_state.get('trim_leading', False):
             return 'drop_trim'
+        else:
+            return 'add_trim'
     
     return None
 
@@ -882,6 +891,24 @@ def _handle_drop_trimming(ctx, daemon):
         border_removal=preprocessing_state.get('border_removal', True),
         split_method=preprocessing_state.get('split_method', 'auto'),
         trim_leading=False
+    )
+    
+    ctx['processed_pdf'] = processed_pdf
+    ctx['preprocessing_state'] = new_state
+    return NavigationResult.show_page('pdf_preview')
+
+
+def _handle_add_trimming(ctx, daemon):
+    """Handler for adding trimming - reprocess PDF."""
+    original_pdf = ctx['pdf_path']
+    preprocessing_state = ctx.get('preprocessing_state', {}).copy()
+    print("\n🔄 Restarting preprocessing with trimming...")
+    
+    processed_pdf, new_state = daemon._preprocess_pdf_with_options(
+        original_pdf,
+        border_removal=preprocessing_state.get('border_removal', True),
+        split_method=preprocessing_state.get('split_method', 'auto'),
+        trim_leading=True
     )
     
     ctx['processed_pdf'] = processed_pdf
