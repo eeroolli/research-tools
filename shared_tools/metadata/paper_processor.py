@@ -81,6 +81,13 @@ class PaperMetadataProcessor:
             r'[A-Z][a-z]+,\s*[A-Z][a-z]+',  # Last, First
             r'[A-Z][a-z]+\s+[A-Z]\.\s*[A-Z][a-z]+',  # First M. Last
         ]
+        
+        # Common non-author words to filter (institutions, common phrases, etc.)
+        self.non_author_words = {
+            'foundation', 'grant', 'national', 'science', 'association', 'stable', 'statistics', 
+            'university', 'chicago', 'department', 'professor', 'methods', 'section', 'analysis',
+            'response', 'responses', 'multinomial', 'general', 'social', 'let', 'american', 'statistical'
+        }
     
     def _read_email_from_config(self) -> Optional[str]:
         """Read CrossRef email from config files.
@@ -106,6 +113,70 @@ class PaperMetadataProcessor:
         except Exception:
             return None
     
+    def _read_handwritten_threshold_from_config(self) -> int:
+        """Read handwritten note text threshold from config files.
+        
+        Returns:
+            Minimum text length threshold (default: 50 characters)
+        """
+        try:
+            config = configparser.ConfigParser()
+            
+            # Read both config files (personal overrides main)
+            root_dir = Path(__file__).parent.parent.parent
+            config.read([
+                root_dir / 'config.conf',
+                root_dir / 'config.personal.conf'
+            ])
+            
+            if config.has_option('METADATA', 'handwritten_note_text_threshold'):
+                threshold = config.getint('METADATA', 'handwritten_note_text_threshold')
+                return max(0, threshold)  # Ensure non-negative
+            
+            return 50  # Default threshold
+        except Exception:
+            return 50  # Default threshold
+    
+    def _check_if_handwritten_note(self, pdf_path: Path, page_offset: int = 0, max_pages_to_check: int = 2) -> bool:
+        """Check if PDF appears to be a handwritten note (very little OCR text).
+        
+        Args:
+            pdf_path: Path to PDF file
+            page_offset: 0-indexed page offset
+            max_pages_to_check: Maximum number of pages to check (default: 2)
+            
+        Returns:
+            True if appears to be handwritten note, False otherwise
+        """
+        try:
+            import pdfplumber
+            threshold = self._read_handwritten_threshold_from_config()
+            
+            with pdfplumber.open(pdf_path) as pdf:
+                if len(pdf.pages) == 0:
+                    return False
+                
+                # Check first few pages for text content
+                total_text_length = 0
+                pages_checked = 0
+                
+                for i in range(page_offset, min(page_offset + max_pages_to_check, len(pdf.pages))):
+                    page_text = pdf.pages[i].extract_text()
+                    if page_text:
+                        total_text_length += len(page_text.strip())
+                    pages_checked += 1
+                
+                # If average text per page is below threshold, likely handwritten
+                if pages_checked > 0:
+                    avg_text_per_page = total_text_length / pages_checked
+                    return avg_text_per_page < threshold
+                
+                return False
+                
+        except Exception as e:
+            print(f"  ⚠️  Error checking for handwritten note: {e}")
+            return False
+    
     def _extract_authors_with_regex(self, text: str) -> List[str]:
         """Extract authors using regex patterns as fallback.
         
@@ -118,7 +189,7 @@ class PaperMetadataProcessor:
         authors = set()
         
         # Try each pattern
-        for pattern in self.author_patterns:
+        for pattern_idx, pattern in enumerate(self.author_patterns):
             matches = re.findall(pattern, text, re.MULTILINE | re.IGNORECASE)
             for match in matches:
                 if isinstance(match, tuple):
@@ -134,6 +205,7 @@ class PaperMetadataProcessor:
         cleaned_authors = []
         for author in authors:
             # Remove common prefixes/suffixes
+            author_orig = author
             author = re.sub(r'^(By|Authors?|Author)\s*:?\s*', '', author, flags=re.IGNORECASE)
             author = re.sub(r'\s+', ' ', author.strip())
             
@@ -272,7 +344,7 @@ class PaperMetadataProcessor:
         authors = set()
         
         # Look for common academic name patterns
-        for pattern in self.name_patterns:
+        for pattern_idx, pattern in enumerate(self.name_patterns):
             matches = re.findall(pattern, text)
             for match in matches:
                 if match and len(match.strip()) > 3:
@@ -289,8 +361,17 @@ class PaperMetadataProcessor:
         # Clean up
         cleaned_authors = []
         for author in authors:
+            author_orig = author
             author = re.sub(r'\s+', ' ', author.strip())
-            if len(author.split()) >= 2 and len(author) > 3:
+            
+            # Check if author contains non-author words (institutions, common phrases)
+            author_words_lower = set(word.lower() for word in author.split())
+            has_non_author_word = bool(author_words_lower & self.non_author_words)
+            
+            # Reject if contains non-author words OR doesn't meet basic criteria
+            if has_non_author_word:
+                continue
+            elif len(author.split()) >= 2 and len(author) > 3:
                 cleaned_authors.append(author)
         
         # Remove duplicates
@@ -355,6 +436,27 @@ class PaperMetadataProcessor:
         print(f"\n{'='*80}")
         print(f"Processing: {pdf_path.name}")
         print(f"{'='*80}")
+        
+        # Step 0: Check if this appears to be a handwritten note
+        print("\n🔍 Step 0: Checking document type...")
+        try:
+            if self._check_if_handwritten_note(pdf_path, page_offset=page_offset):
+                print(f"  📝 Detected: Handwritten note (very little OCR text)")
+                print(f"  ⚠️  Skipping Ollama processing - no extractable text")
+                result['method'] = 'handwritten_note_detected'
+                result['metadata'] = {
+                    'document_type': 'handwritten_note',
+                    'title': '',
+                    'authors': [],
+                    'extraction_method': 'handwritten_note_detection'
+                }
+                result['success'] = False  # Mark as needing manual entry
+                result['processing_time_seconds'] = time.time() - start_time
+                return result
+        except Exception as e:
+            # If detection fails (e.g., pdfplumber not available), continue with normal processing
+            print(f"  ⚠️  Could not check for handwritten note: {e}")
+            print(f"  ℹ️  Continuing with normal processing...")
         
         # Step 1: Fast identifier extraction with regex
         print("\n📋 Step 1: Extracting identifiers with regex...")
@@ -578,19 +680,43 @@ class PaperMetadataProcessor:
                 return result
         
         # Step 5: Ollama fallback if no identifiers found at all (book chapters, scanned papers)
+        # Skip if we have a JSTOR ID - daemon will handle GROBID + metadata fetching
+        if result.get('jstor_id'):
+            # JSTOR ID found - return early so daemon can handle GROBID extraction
+            # and subsequent CrossRef/OpenAlex metadata fetching
+            result['processing_time_seconds'] = time.time() - start_time
+            return result
+        
         if use_ollama_fallback:
             print(f"\n🤖 Step 5: No identifiers found - trying regex first, then Ollama...")
             
-            # Try regex extraction first
-            print(f"  🔍 Trying regex author extraction...")
+            # Check text length before attempting Ollama
             import pdfplumber
             with pdfplumber.open(pdf_path) as pdf:
                 # Extract page at offset for regex
                 if len(pdf.pages) > page_offset:
-                    text_page1 = pdf.pages[page_offset].extract_text()
+                    text_page1 = pdf.pages[page_offset].extract_text() or ""
                 else:
                     text_page1 = ""
             
+            # Check if text is too short (likely handwritten note)
+            threshold = self._read_handwritten_threshold_from_config()
+            if len(text_page1.strip()) < threshold:
+                print(f"  📝 Very little text extracted ({len(text_page1.strip())} chars) - likely handwritten note")
+                print(f"  ⚠️  Skipping Ollama processing - no extractable text")
+                result['method'] = 'handwritten_note_detected'
+                result['metadata'] = {
+                    'document_type': 'handwritten_note',
+                    'title': '',
+                    'authors': [],
+                    'extraction_method': 'handwritten_note_detection'
+                }
+                result['success'] = False  # Mark as needing manual entry
+                result['processing_time_seconds'] = time.time() - start_time
+                return result
+            
+            # Try regex extraction first
+            print(f"  🔍 Trying regex author extraction...")
             regex_authors = self._extract_authors_with_regex_simple(text_page1)
             if regex_authors:
                 print(f"  ✅ Regex found {len(regex_authors)} author(s): {', '.join(regex_authors)}")
