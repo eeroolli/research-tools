@@ -40,6 +40,32 @@ def create_review_and_proceed_page(daemon) -> Page:
         zotero_year = selected_item.get('year', selected_item.get('date', ''))
         zotero_item_type = selected_item.get('itemType', 'journalArticle')
         
+        # #region agent log
+        import json
+        from pathlib import Path
+        log_path = Path('.cursor/debug.log')
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'B',
+                    'location': 'handle_item_selected_pages.py:39',
+                    'message': 'Zotero item title extracted',
+                    'data': {
+                        'zotero_title': zotero_title,
+                        'zotero_title_length': len(zotero_title),
+                        'zotero_authors': zotero_authors,
+                        'zotero_year': zotero_year,
+                        'selected_item_keys': list(selected_item.keys())
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+        except Exception:
+            pass
+        # #endregion
+        
         # Log extracted metadata for debugging
         daemon.logger.debug(f"Extracting metadata from Zotero item - Title: '{zotero_title}' (length: {len(zotero_title)}), Authors: {zotero_authors}, Year: {zotero_year}")
         
@@ -73,10 +99,53 @@ def create_review_and_proceed_page(daemon) -> Page:
             'document_type': zotero_item_type
         }
         
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'B',
+                    'location': 'handle_item_selected_pages.py:69',
+                    'message': 'Metadata built before filename generation',
+                    'data': {
+                        'merged_metadata_title': merged_metadata.get('title', 'MISSING'),
+                        'merged_metadata_title_length': len(merged_metadata.get('title', '')),
+                        'merged_metadata_authors': merged_metadata.get('authors', []),
+                        'merged_metadata_year': merged_metadata.get('year', 'MISSING')
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+        except Exception:
+            pass
+        # #endregion
+        
         # Generate target filename with _scan suffix
         daemon.logger.debug(f"Generating filename from metadata - Title: '{merged_metadata['title']}' (length: {len(merged_metadata['title'])})")
         filename_gen = FilenameGenerator()
         target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
+        
+        # #region agent log
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'B',
+                    'location': 'handle_item_selected_pages.py:79',
+                    'message': 'Filename generated',
+                    'data': {
+                        'target_filename': target_filename,
+                        'input_metadata_title': merged_metadata.get('title', 'MISSING')
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }
+                f.write(json.dumps(log_entry) + '\n')
+        except Exception:
+            pass
+        # #endregion
+        
         daemon.logger.debug(f"Generated filename: {target_filename}")
         
         # Store in context
@@ -85,6 +154,8 @@ def create_review_and_proceed_page(daemon) -> Page:
         ctx['zotero_year'] = zotero_year
         ctx['zotero_item_type'] = zotero_item_type
         ctx['target_filename'] = target_filename
+        # Store merged metadata for _process_selected_item (preserving original extracted metadata in ctx['metadata'])
+        ctx['merged_metadata'] = merged_metadata
         
         # Show what authors will be used in filename
         if zotero_authors:
@@ -243,9 +314,9 @@ def create_proceed_after_edit_page(daemon) -> Page:
     """
     def content(ctx):
         lines = [
-            "Tags have been updated.",
+            "Tag editing completed.",
             "  (y/Enter) Proceed with PDF attachment",
-            "  (n) Go back to review"
+            "  (n) Go back to tag editing"
         ]
         return lines
     
@@ -266,6 +337,104 @@ def create_proceed_after_edit_page(daemon) -> Page:
         zotero_year = selected_item.get('year', selected_item.get('date', ''))
         zotero_item_type = selected_item.get('itemType', 'journalArticle')
         
+        daemon.logger.debug(f"Extracting metadata from Zotero item - Title: '{zotero_title}' (length: {len(zotero_title)}), Authors: {zotero_authors}, Year: {zotero_year}")
+        
+        # Validate critical fields - use extracted metadata from context if Zotero item is missing fields
+        missing_fields = []
+        if not zotero_title:
+            missing_fields.append('title')
+        if not zotero_authors:
+            missing_fields.append('authors')
+        
+        # Preserve original extracted metadata before we modify anything
+        original_extracted_metadata = ctx.get('metadata', {})
+        
+        # If critical fields missing, use extracted metadata from context (already extracted from PDF)
+        if missing_fields:
+            extracted_metadata = original_extracted_metadata
+            
+            # Check if we have useful extracted metadata
+            has_extracted_metadata = extracted_metadata and (
+                extracted_metadata.get('title') or 
+                extracted_metadata.get('authors') or 
+                extracted_metadata.get('year')
+            )
+            
+            if has_extracted_metadata:
+                # Use extracted metadata to fill in missing fields
+                if 'title' in missing_fields and extracted_metadata.get('title'):
+                    title_from_extracted = extracted_metadata.get('title', '').strip()
+                    if title_from_extracted:
+                        zotero_title = title_from_extracted
+                        print(f"✓ Using extracted title: {zotero_title}")
+                
+                if 'authors' in missing_fields and extracted_metadata.get('authors'):
+                    authors_from_extracted = extracted_metadata.get('authors', [])
+                    if authors_from_extracted:
+                        # Handle different author formats: list of strings or list of dicts
+                        if isinstance(authors_from_extracted, list):
+                            normalized_authors = []
+                            for author in authors_from_extracted:
+                                if isinstance(author, dict):
+                                    # Dict with 'name' field (some API formats)
+                                    name = author.get('name', '')
+                                    if name:
+                                        normalized_authors.append(str(name).strip())
+                                    else:
+                                        # Try firstName/lastName structure
+                                        first = author.get('firstName', '')
+                                        last = author.get('lastName', '')
+                                        if first and last:
+                                            normalized_authors.append(f"{first} {last}".strip())
+                                        elif last:
+                                            normalized_authors.append(last.strip())
+                                elif isinstance(author, str) and author.strip():
+                                    normalized_authors.append(author.strip())
+                            
+                            if normalized_authors:
+                                zotero_authors = normalized_authors
+                                author_display = ', '.join(normalized_authors[:3])
+                                if len(normalized_authors) > 3:
+                                    author_display += '...'
+                                print(f"✓ Using extracted authors: {author_display}")
+                            elif isinstance(authors_from_extracted, str) and authors_from_extracted.strip():
+                                zotero_authors = [authors_from_extracted.strip()]
+                                print(f"✓ Using extracted author: {authors_from_extracted.strip()}")
+                        elif isinstance(authors_from_extracted, str) and authors_from_extracted.strip():
+                            zotero_authors = [authors_from_extracted.strip()]
+                            print(f"✓ Using extracted author: {authors_from_extracted.strip()}")
+                
+                if not zotero_year and extracted_metadata.get('year'):
+                    year_from_extracted = extracted_metadata.get('year')
+                    if year_from_extracted:
+                        zotero_year = str(year_from_extracted).strip()
+                        print(f"✓ Using extracted year: {zotero_year}")
+            else:
+                # No useful extracted metadata available - metadata extraction may have failed
+                print("⚠️  No extracted metadata available from PDF.")
+                print("   Metadata extraction may have failed or PDF may not contain metadata.")
+            
+            # Re-check if we still have missing fields
+            missing_fields = []
+            if not zotero_title:
+                missing_fields.append('title')
+            if not zotero_authors:
+                missing_fields.append('authors')
+            
+            # If still missing after using extracted metadata, use same validation as review_and_proceed
+            if missing_fields:
+                print(f"⚠️  WARNING: Missing: {', '.join(missing_fields)}")
+                print("   Cannot generate proper filename without this information.")
+                confirm_anyway = input("Proceed anyway with placeholder values? [y/n]: ").strip().lower()
+                if confirm_anyway != 'y':
+                    print("⬅️  Going back to tag editing...")
+                    return NavigationResult.show_page('edit_tags')
+                # Set placeholders
+                if 'title' in missing_fields:
+                    zotero_title = 'Unknown_Title'
+                if 'authors' in missing_fields:
+                    zotero_authors = ['Unknown_Author']
+        
         # Build metadata using ONLY Zotero data
         merged_metadata = {
             'title': zotero_title,
@@ -278,12 +447,18 @@ def create_proceed_after_edit_page(daemon) -> Page:
         filename_gen = FilenameGenerator()
         target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
         
-        # Store in context
+        # Store in context (including full metadata dict for _process_selected_item)
         ctx['zotero_authors'] = zotero_authors
         ctx['zotero_title'] = zotero_title
         ctx['zotero_year'] = zotero_year
         ctx['zotero_item_type'] = zotero_item_type
         ctx['target_filename'] = target_filename
+        # Store merged metadata separately, preserving original extracted metadata
+        ctx['merged_metadata'] = merged_metadata  # Final metadata for _process_selected_item
+        # Keep original extracted metadata in ctx['metadata'] for reference (don't overwrite)
+        if 'metadata' not in ctx or not ctx.get('metadata'):
+            # Only set if not already present (should already be set from ItemSelectedContext)
+            ctx['metadata'] = original_extracted_metadata
         
         # Show what authors will be used in filename
         if zotero_authors:
@@ -304,9 +479,9 @@ def create_proceed_after_edit_page(daemon) -> Page:
         return NavigationResult.show_page('proposed_actions')
     
     def handler_n(ctx):
-        """Go back to REVIEW & PROCEED."""
-        print("⬅️  Going back...")
-        return NavigationResult.show_page('review_and_proceed')
+        """Go back to EDIT TAGS."""
+        print("⬅️  Going back to tag editing...")
+        return NavigationResult.show_page('edit_tags')
     
     def quit_action(ctx):
         """Quit - move to manual review."""
@@ -325,7 +500,7 @@ def create_proceed_after_edit_page(daemon) -> Page:
             'n': handler_n
         },
         default='y',
-        back_page='review_and_proceed',
+        back_page='edit_tags',  # Go back to tag editing if user presses 'z'
         quit_action=quit_action
     )
 
@@ -361,14 +536,28 @@ def create_proposed_actions_page(daemon) -> Page:
         return lines
     
     def handler_y(ctx):
-        """Proceed - go to NOTE PROMPT."""
-        item_key = ctx.get('item_key') or ctx['selected_item'].get('key')
-        if item_key:
-            # Note prompt will be handled by NOTE_PROMPT_PAGE
-            return NavigationResult.show_page('note_prompt')
-        else:
-            # No item key, skip note and process directly
-            return NavigationResult.process_pdf()
+        """Proceed - do PDF preprocessing and go to PDF PREVIEW."""
+        daemon = ctx['daemon']
+        pdf_path = ctx['pdf_path']
+        
+        # Step 1: Preprocess PDF with default options
+        print("\n" + "="*70)
+        print("PDF PREPROCESSING")
+        print("="*70)
+        processed_pdf, preprocessing_state = daemon._preprocess_pdf_with_options(
+            pdf_path,
+            border_removal=True,
+            split_method='auto',
+            trim_leading=True
+        )
+        
+        # Store processed PDF and state in context for preview page
+        ctx['processed_pdf'] = processed_pdf
+        ctx['original_pdf'] = pdf_path
+        ctx['preprocessing_state'] = preprocessing_state
+        
+        # Navigate to PDF preview page
+        return NavigationResult.show_page('pdf_preview')
     
     def handler_z(ctx):
         """Go back to REVIEW & PROCEED."""
@@ -422,9 +611,9 @@ def create_note_prompt_page(daemon) -> Page:
         return NavigationResult.show_page('note_input')
     
     def handler_z(ctx):
-        """Cancel - go back to PROPOSED ACTIONS."""
+        """Cancel - go back to PDF PREVIEW."""
         print("⬅️  Cancelling note addition")
-        return NavigationResult.show_page('proposed_actions')
+        return NavigationResult.show_page('pdf_preview')
     
     def quit_action(ctx):
         """Quit - move to manual review."""
@@ -444,9 +633,260 @@ def create_note_prompt_page(daemon) -> Page:
             'z': handler_z
         },
         default='',  # Enter is default
-        back_page='proposed_actions',
+        back_page='pdf_preview',
         quit_action=quit_action
     )
+
+
+def create_pdf_preview_page(daemon) -> Page:
+    """Create PDF PREVIEW page.
+    
+    Shows processed PDF preview and allows user to modify preprocessing options.
+    """
+    def content(ctx):
+        daemon = ctx['daemon']
+        processed_pdf = ctx.get('processed_pdf')
+        preprocessing_state = ctx.get('preprocessing_state', {})
+        
+        if not processed_pdf:
+            return ["❌ Error: No processed PDF found in context"]
+        
+        # Open PDF in viewer
+        daemon._open_pdf_in_viewer(processed_pdf)
+        
+        # Build status lines
+        border_status = "✓ Applied" if preprocessing_state.get('border_removal', False) else "✗ Not applied"
+        split_method = preprocessing_state.get('split_method', 'none')
+        split_attempted = preprocessing_state.get('split_attempted', False)
+        
+        # Determine split status
+        if split_method == 'auto' and split_attempted:
+            split_status = "✓ Applied (gutter detection)"
+        elif split_method == '50-50' and split_attempted:
+            split_status = "✓ Applied (50/50 geometric)"
+        elif split_method != 'none' and split_attempted:
+            split_status = f"✗ Attempted ({split_method}) but failed/cancelled"
+        elif split_attempted:
+            split_status = "✗ Attempted but cancelled"
+        else:
+            split_status = "✗ Not applied"
+        
+        trim_status = "✓ Applied" if preprocessing_state.get('trim_leading', False) else "✗ Not applied"
+        
+        lines = [
+            "",
+            "Opening processed PDF in viewer...",
+            "",
+            "Current preprocessing:",
+            f"  - Border removal: {border_status}",
+            f"  - Split: {split_status}",
+            f"  - Trimming: {trim_status}",
+            "",
+            "Options:",
+            "  [1] Accept and proceed to Zotero"
+        ]
+        
+        # Build dynamic options based on current state
+        option_num = 1
+        
+        if preprocessing_state.get('border_removal', False):
+            option_num += 1
+            lines.append(f"  [{option_num}] Drop border removal")
+        
+        if preprocessing_state.get('split_method', 'none') != 'none':
+            option_num += 1
+            lines.append(f"  [{option_num}] Drop split")
+        
+        if preprocessing_state.get('split_method', 'none') == 'auto':
+            option_num += 1
+            lines.append(f"  [{option_num}] Use 50/50 split instead")
+        
+        if preprocessing_state.get('trim_leading', False):
+            option_num += 1
+            lines.append(f"  [{option_num}] Drop trimming")
+        
+        lines.append("  [z] Go back to proposed actions")
+        lines.append("  [q] Quit - move to manual review")
+        
+        return lines
+    
+    def handler_1(ctx):
+        """Accept and proceed."""
+        item_key = ctx.get('item_key') or ctx.get('selected_item', {}).get('key')
+        # Store final processed PDF and preprocessing_state in context for use in final processing
+        ctx['final_processed_pdf'] = ctx.get('processed_pdf')
+        ctx['preprocessing_state'] = ctx.get('preprocessing_state', {})  # Ensure it's available
+        if item_key:
+            return NavigationResult.show_page('note_prompt')
+        else:
+            return NavigationResult.process_pdf()
+    
+    def make_handler(option_num):
+        """Create a handler for a specific option number."""
+        def handler(ctx):
+            preprocessing_state = ctx.get('preprocessing_state', {})
+            action = _get_pdf_preview_option_action(option_num, preprocessing_state)
+            
+            if action == 'accept':
+                return handler_1(ctx)
+            elif action == 'drop_border':
+                return _handle_drop_border_removal(ctx, daemon)
+            elif action == 'drop_split':
+                return _handle_drop_split(ctx, daemon)
+            elif action == 'use_5050':
+                return _handle_use_5050_split(ctx, daemon)
+            elif action == 'drop_trim':
+                return _handle_drop_trimming(ctx, daemon)
+            else:
+                print("⚠️  Invalid choice.")
+                return NavigationResult.show_page('pdf_preview')
+        return handler
+    
+    handler_2 = make_handler(2)
+    handler_3 = make_handler(3)
+    handler_4 = make_handler(4)
+    handler_5 = make_handler(5)
+    
+    def handler_z(ctx):
+        """Go back to PROPOSED ACTIONS."""
+        print("⬅️  Going back to proposed actions...")
+        return NavigationResult.show_page('proposed_actions')
+    
+    def quit_action(ctx):
+        """Quit - move to manual review."""
+        daemon = ctx['daemon']
+        pdf_path = ctx['pdf_path']
+        print("📝 Moving to manual review")
+        daemon.move_to_manual_review(pdf_path)
+        return NavigationResult.quit_scan(move_to_manual=True)
+    
+    return Page(
+        page_id='pdf_preview',
+        title='PDF PREVIEW',
+        content=content,
+        prompt='\nEnter your choice: ',
+        valid_inputs=['1', '2', '3', '4', '5', 'z', 'q'],
+        handlers={
+            '1': handler_1,
+            '2': handler_2,
+            '3': handler_3,
+            '4': handler_4,
+            '5': handler_5,
+            'z': handler_z
+        },
+        default='1',
+        back_page='pdf_preview',
+        quit_action=quit_action,
+        timeout_seconds=daemon.prompt_timeout * 2  # 2x timeout for PDF inspection
+    )
+
+
+def _get_pdf_preview_option_action(option_num: int, preprocessing_state: dict) -> str:
+    """Determine what action corresponds to an option number based on current state.
+    
+    Returns: 'accept', 'drop_border', 'drop_split', 'use_5050', 'drop_trim', or None
+    """
+    if option_num == 1:
+        return 'accept'
+    
+    option_count = 1  # Option 1 is always "Accept"
+    
+    if preprocessing_state.get('border_removal', False):
+        option_count += 1
+        if option_count == option_num:
+            return 'drop_border'
+    
+    if preprocessing_state.get('split_method', 'none') != 'none':
+        option_count += 1
+        if option_count == option_num:
+            return 'drop_split'
+    
+    if preprocessing_state.get('split_method', 'none') == 'auto':
+        option_count += 1
+        if option_count == option_num:
+            return 'use_5050'
+    
+    if preprocessing_state.get('trim_leading', False):
+        option_count += 1
+        if option_count == option_num:
+            return 'drop_trim'
+    
+    return None
+
+
+def _handle_drop_border_removal(ctx, daemon):
+    """Handler for dropping border removal - reprocess PDF."""
+    original_pdf = ctx['pdf_path']
+    preprocessing_state = ctx.get('preprocessing_state', {}).copy()
+    preprocessing_state['border_removal'] = False
+    print("\n🔄 Restarting preprocessing without border removal...")
+    
+    processed_pdf, new_state = daemon._preprocess_pdf_with_options(
+        original_pdf,
+        border_removal=False,
+        split_method=preprocessing_state.get('split_method', 'auto'),
+        trim_leading=preprocessing_state.get('trim_leading', True)
+    )
+    
+    ctx['processed_pdf'] = processed_pdf
+    ctx['preprocessing_state'] = new_state
+    # Stay on preview page to show updated result
+    return NavigationResult.show_page('pdf_preview')
+
+
+def _handle_drop_split(ctx, daemon):
+    """Handler for dropping split - reprocess PDF."""
+    original_pdf = ctx['pdf_path']
+    preprocessing_state = ctx.get('preprocessing_state', {}).copy()
+    preprocessing_state['split_method'] = 'none'
+    print("\n🔄 Restarting preprocessing without split...")
+    
+    processed_pdf, new_state = daemon._preprocess_pdf_with_options(
+        original_pdf,
+        border_removal=preprocessing_state.get('border_removal', True),
+        split_method='none',
+        trim_leading=preprocessing_state.get('trim_leading', True)
+    )
+    
+    ctx['processed_pdf'] = processed_pdf
+    ctx['preprocessing_state'] = new_state
+    return NavigationResult.show_page('pdf_preview')
+
+
+def _handle_use_5050_split(ctx, daemon):
+    """Handler for using 50/50 split instead - reprocess PDF."""
+    original_pdf = ctx['pdf_path']
+    preprocessing_state = ctx.get('preprocessing_state', {}).copy()
+    print("\n🔄 Restarting preprocessing with 50/50 split...")
+    
+    processed_pdf, new_state = daemon._preprocess_pdf_with_options(
+        original_pdf,
+        border_removal=preprocessing_state.get('border_removal', True),
+        split_method='50-50',
+        trim_leading=preprocessing_state.get('trim_leading', True)
+    )
+    
+    ctx['processed_pdf'] = processed_pdf
+    ctx['preprocessing_state'] = new_state
+    return NavigationResult.show_page('pdf_preview')
+
+
+def _handle_drop_trimming(ctx, daemon):
+    """Handler for dropping trimming - reprocess PDF."""
+    original_pdf = ctx['pdf_path']
+    preprocessing_state = ctx.get('preprocessing_state', {}).copy()
+    print("\n🔄 Restarting preprocessing without trimming...")
+    
+    processed_pdf, new_state = daemon._preprocess_pdf_with_options(
+        original_pdf,
+        border_removal=preprocessing_state.get('border_removal', True),
+        split_method=preprocessing_state.get('split_method', 'auto'),
+        trim_leading=False
+    )
+    
+    ctx['processed_pdf'] = processed_pdf
+    ctx['preprocessing_state'] = new_state
+    return NavigationResult.show_page('pdf_preview')
 
 
 def create_note_input_page(daemon) -> Page:
@@ -513,6 +953,7 @@ def create_all_pages(daemon) -> Dict[str, Page]:
         'edit_tags': create_edit_tags_page(daemon),
         'proceed_after_edit': create_proceed_after_edit_page(daemon),
         'proposed_actions': create_proposed_actions_page(daemon),
+        'pdf_preview': create_pdf_preview_page(daemon),
         'note_prompt': create_note_prompt_page(daemon),
         'note_input': create_note_input_page(daemon),
     }

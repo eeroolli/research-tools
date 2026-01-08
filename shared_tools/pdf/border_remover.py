@@ -40,7 +40,7 @@ class BorderRemover:
         self.max_border_width = self.config.get('max_border_width', 300)
         # Page-edge specific configuration
         self.page_white_delta = self.config.get('page_white_delta', 8)   # tolerance below page white (tighter)
-        self.dark_threshold = self.config.get('dark_threshold', 60)       # scanner bed / dark area (stricter)
+        self.dark_threshold = self.config.get('dark_threshold', 55)       # scanner bed / dark area (stricter - lowered from 60)
         self.sustained_run = self.config.get('sustained_run', 24)         # min consecutive white pixels (stricter)
         self.sustained_text = self.config.get('sustained_text', 20)      # min consecutive text-like pixels (stricter)
         self.max_check_percentage = self.config.get('max_check_percentage', 0.25)  # scan up to 25% of side (reduced)
@@ -123,7 +123,7 @@ class BorderRemover:
         verified_borders = {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}
         
         # Sample pixels in border regions - require at least some dark pixels
-        min_dark_fraction = 0.10  # Lowered from 0.15 to 0.10 - at least 10% should be dark
+        min_dark_fraction = 0.20  # Increased from 0.10 to 0.20 - at least 20% should be dark to avoid false positives
         # For edges: check from edge inward, looking for dark borders even beyond white margins
         # White copier margins are typically 5-20 pixels, so check up to max_border_width from edge
         max_border_check = min(self.max_border_width, w // 2, h // 2)
@@ -1237,7 +1237,7 @@ class BorderRemover:
             doc.close()
     
     def process_entire_pdf(self, pdf_path: Path, output_path: Path,
-                          zoom: float = 2.0, pages: Optional[list] = None) -> Dict[str, Any]:
+                          zoom: float = 2.0, pages: Optional[list] = None) -> Optional[Dict[str, Any]]:
         """Process entire PDF and save with borders removed.
         
         Args:
@@ -1300,7 +1300,21 @@ class BorderRemover:
             
             # Save output PDF
             output_doc.save(str(output_path))
+            
+            # Validate: output should have same number of pages as input
+            output_page_count = len(output_doc)
+            input_page_count = len(process_pages) if isinstance(process_pages, list) else len(doc)
             output_doc.close()
+            
+            if output_page_count != input_page_count:
+                self.logger.error(f"Border removal created {output_page_count} pages from {input_page_count} - this is a bug, skipping border removal")
+                # Delete the invalid output file
+                try:
+                    output_path.unlink()
+                except Exception as e:
+                    self.logger.warning(f"Failed to delete invalid output file: {e}")
+                doc.close()
+                return None  # Return None to skip border removal
             
             self.logger.debug(f"Processed {stats['pages_processed']} pages, "
                              f"removed {stats['total_border_pixels']} border pixels")

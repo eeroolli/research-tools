@@ -4663,9 +4663,13 @@ class PaperProcessorDaemon:
             preprocessing_state is a dict with keys: border_removal, split_method, trim_leading
         """
         current_pdf = pdf_path
+        # Store original filename for _double.pdf detection (before any renaming)
+        original_filename_lower = pdf_path.name.lower()
+        
         preprocessing_state = {
             'border_removal': False,
             'split_method': 'none',
+            'split_attempted': False,
             'trim_leading': False
         }
         
@@ -4680,15 +4684,17 @@ class PaperProcessorDaemon:
         # Step 2: Check if splitting is needed and perform split
         if split_method != 'none':
             # Check if PDF is landscape/two-up
-            name_lower = current_pdf.name.lower()
+            # Use original filename for _double.pdf detection (before border removal renamed it)
+            name_lower = original_filename_lower
+            # Also check if '_double' appears anywhere in original filename, not just endswith
             needs_split = False
             landscape_width = None
             landscape_height = None
             
-            if name_lower.endswith('_double.pdf'):
-                # Always split on _double.pdf
+            if name_lower.endswith('_double.pdf') or '_double' in name_lower:
+                # Always split on _double.pdf or files with _double in name
                 needs_split = True
-                self.logger.info("_double.pdf detected - will split")
+                self.logger.info(f"_double detected in original filename '{pdf_path.name}' - will split")
             else:
                 # Check if page is landscape/two-up
                 try:
@@ -4711,6 +4717,10 @@ class PaperProcessorDaemon:
                     self.logger.debug(f"Landscape detection skipped: {e}")
             
             if needs_split:
+                # Track that split is being attempted - update state BEFORE calling _split_with_mutool
+                preprocessing_state['split_method'] = split_method
+                preprocessing_state['split_attempted'] = True
+                
                 # Perform split
                 split_path = self._split_with_mutool(
                     current_pdf, 
@@ -4720,8 +4730,12 @@ class PaperProcessorDaemon:
                 )
                 if split_path:
                     current_pdf = split_path
-                    preprocessing_state['split_method'] = split_method
+                    # split_method already set above, just log success
                     self.logger.info(f"Split completed: {split_path.name}")
+                else:
+                    # Split was attempted but failed or was cancelled
+                    # Keep split_method in state to show what was attempted
+                    self.logger.info(f"Split attempted with method '{split_method}' but did not complete (user cancelled or failed)")
         
         # Step 3: Trim leading pages if requested
         if trim_leading:
@@ -4770,12 +4784,23 @@ class PaperProcessorDaemon:
             print("\nCurrent preprocessing:")
             border_status = "✓ Applied" if preprocessing_state.get('border_removal', False) else "✗ Not applied"
             split_method = preprocessing_state.get('split_method', 'none')
-            if split_method == 'auto':
+            split_attempted = preprocessing_state.get('split_attempted', False)
+            
+            # Determine split status based on method and whether it was attempted/succeeded
+            # If split_method is 'none' but split_attempted is True, user cancelled
+            if split_method == 'auto' and split_attempted:
                 split_status = "✓ Applied (gutter detection)"
-            elif split_method == '50-50':
+            elif split_method == '50-50' and split_attempted:
                 split_status = "✓ Applied (50/50 geometric)"
+            elif split_method != 'none' and split_attempted:
+                # Split was attempted with a method but may have failed or been cancelled
+                split_status = f"✗ Attempted ({split_method}) but failed/cancelled"
+            elif split_attempted:
+                # Split was attempted but method is 'none' (user cancelled)
+                split_status = "✗ Attempted but cancelled"
             else:
                 split_status = "✗ Not applied"
+            
             trim_status = "✓ Applied" if preprocessing_state.get('trim_leading', False) else "✗ Not applied"
             
             print(f"  - Border removal: {border_status}")
@@ -5270,7 +5295,7 @@ class PaperProcessorDaemon:
                             'runId': 'run1',
                             'hypothesisId': 'G',
                             'location': 'paper_processor_daemon.py:_find_gutter_position',
-                            'message': 'Gutter position accepted (not printout, not edge)',
+                            'message': 'Gutter position candidate (passed printout check)',
                             'data': {
                                 'page_num': page_num,
                                 'min_idx': int(min_idx),
@@ -5283,11 +5308,123 @@ class PaperProcessorDaemon:
                         }) + '\n')
                 except: pass
                 # #endregion
+                
+                # Validate using shape analysis: reject column edges, accept real gutters
+                # Shape analysis metrics help distinguish:
+                # - Real gutters: gradual valley (low gradient, wide valley, smooth transition)
+                # - Column edges: sharp drop (high gradient, narrow valley, sudden transition)
+                is_column_edge = False
+                is_real_gutter = False
+                has_sufficient_data = len(region_around_min) > 2
+                
+                if has_sufficient_data:  # Only validate if we have sufficient shape analysis data
+                    # Reject as column edge if:
+                    # 1. Sharp, narrow transition (high gradient AND narrow valley)
+                    # 2. Very sharp corner (very high gradient AND high curvature)
+                    if (avg_gradient > 1000 and valley_width_ratio < 0.5) or \
+                       (max_gradient > 5000 and avg_second_deriv > 1000):
+                        is_column_edge = True
+                    
+                    # Accept as real gutter if:
+                    # Gradual, wide valley with smooth transition
+                    if avg_gradient < 500 and valley_width_ratio > 0.6 and avg_second_deriv < 500:
+                        is_real_gutter = True
+                else:
+                    # Insufficient data for validation - default to accepting (conservative approach)
+                    # Log this case for debugging
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'G',
+                                'location': 'paper_processor_daemon.py:_find_gutter_position',
+                                'message': 'Shape validation skipped - insufficient data',
+                                'data': {
+                                    'page_num': page_num,
+                                    'region_size': len(region_around_min),
+                                    'reason': 'Region around minimum too small for shape analysis',
+                                    'default_action': 'accept_position'
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
+                
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'G',
+                            'location': 'paper_processor_daemon.py:_find_gutter_position',
+                            'message': 'Shape validation result',
+                            'data': {
+                                'page_num': page_num,
+                                'has_sufficient_data': has_sufficient_data,
+                                'is_column_edge': is_column_edge,
+                                'is_real_gutter': is_real_gutter,
+                                'will_accept_position': not is_column_edge,
+                                'validation_status': 'validated_real_gutter' if is_real_gutter else ('insufficient_data' if not has_sufficient_data else 'default_accept'),
+                                'shape_analysis': {
+                                    'avg_gradient': float(avg_gradient),
+                                    'max_gradient': float(max_gradient),
+                                    'avg_second_deriv': float(avg_second_deriv),
+                                    'valley_width_ratio': float(valley_width_ratio),
+                                    'region_size': len(region_around_min)
+                                }
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except: pass
+                # #endregion
+                
+                # Skip column edges - they're not real gutters
+                if is_column_edge:
+                    self.logger.info(f"Rejected detected position on page {page_num} as column edge (not a gutter) - avg_gradient={avg_gradient:.1f}, valley_width_ratio={valley_width_ratio:.3f}, max_gradient={max_gradient:.1f}, avg_second_deriv={avg_second_deriv:.1f}")
+                    continue  # Skip this page, don't add to gutter_positions
+                
                 # Convert pixel position back to PDF coordinates
                 # Use page-relative coordinates: min_idx is within content area,
                 # content_left_px is where content starts on the page
                 gutter_px_page_relative = content_left_px + min_idx
                 gutter_pdf_points = (gutter_px_page_relative / img_width) * page_width
+                
+                # Log final acceptance status
+                if is_real_gutter:
+                    validation_status_msg = "validated as real gutter"
+                elif not has_sufficient_data:
+                    validation_status_msg = "accepted (insufficient shape data for validation)"
+                else:
+                    validation_status_msg = "accepted (default - not identified as column edge)"
+                
+                self.logger.debug(f"Gutter position on page {page_num} accepted - {validation_status_msg} at {gutter_pdf_points:.1f} points")
+                
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'G',
+                            'location': 'paper_processor_daemon.py:_find_gutter_position',
+                            'message': 'Gutter position accepted',
+                            'data': {
+                                'page_num': page_num,
+                                'gutter_pdf_points': float(gutter_pdf_points),
+                                'validation_status': validation_status_msg,
+                                'is_real_gutter': is_real_gutter,
+                                'has_sufficient_data': has_sufficient_data
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except: pass
+                # #endregion
                 
                 gutter_positions.append(gutter_pdf_points)
             
@@ -9985,18 +10122,26 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             if not metadata.get('authors'):
                 self.logger.warning("Processing item without selected authors - metadata may be incomplete")
             
-            self._process_selected_item(pdf_path, selected_item, target_filename, metadata)
+            # Check if we have a preprocessed PDF from PDF preview
+            final_processed_pdf = ctx_dict.get('final_processed_pdf')
+            preprocessing_state_from_context = ctx_dict.get('preprocessing_state', {})
+            # Use merged_metadata if available (from proceed_after_edit), otherwise use metadata from context or original
+            metadata_to_use = ctx_dict.get('merged_metadata') or ctx_dict.get('metadata', metadata)
+            # Use the preprocessed PDF if available, otherwise will do preprocessing
+            self._process_selected_item(pdf_path, selected_item, target_filename, metadata_to_use, 
+                                      preprocessed_pdf=final_processed_pdf, 
+                                      preprocessing_state=preprocessing_state_from_context)
             return
         
         # Should not reach here
         print("⚠️  Unexpected navigation result")
         return
     
-    def _process_selected_item(self, pdf_path: Path, zotero_item: dict, target_filename: str, metadata: dict = None):
+    def _process_selected_item(self, pdf_path: Path, zotero_item: dict, target_filename: str, metadata: dict = None, preprocessed_pdf: Path = None, preprocessing_state: dict = None):
         """Process selected Zotero item: copy PDF and attach.
         
         Steps:
-        1. Check if PDF should be split for Zotero attachment
+        1. Check if PDF should be split for Zotero attachment (or use preprocessed PDF)
         2. Copy PDF to publications directory (via PowerShell)
         3. Attach as linked file in Zotero
         4. Update URL field if missing and available
@@ -10007,6 +10152,8 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             zotero_item: Selected Zotero item dict
             target_filename: Generated filename for publications dir
             metadata: Extracted metadata (optional, may contain URL to add)
+            preprocessed_pdf: Optional preprocessed PDF (if provided, skips preprocessing step)
+            preprocessing_state: Optional preprocessing state dict (required if preprocessed_pdf is provided)
         """
         item_key = zotero_item.get('key') or zotero_item.get('item_key')
         if not item_key:
@@ -10016,56 +10163,82 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         print("\n📋 Executing actions...")
         
-        # Step 1: Determine which PDF to use (original or page-offset temp)
-        # Check if there's a temporary PDF created from page offset
-        pdf_to_copy = getattr(self, '_temp_pdf_path', None)
-        # Determine original PDF (before any preprocessing)
-        original_pdf = pdf_path
-        if pdf_to_copy is None or not pdf_to_copy.exists():
-            # No temp PDF, use original
-            pdf_to_copy = pdf_path
-        else:
-            self.logger.info(f"Using temporary PDF from page offset: {pdf_to_copy.name}")
-            # Keep original for preprocessing, but use pdf_to_copy as starting point if from offset
-            # For preprocessing preview workflow, we want to work from original after page offset
-            original_pdf = pdf_to_copy
+        # Initialize final_state early (will be populated from context or preprocessing)
+        final_state = {}
         
-        # Step 1: Preprocess PDF with default options
-        print("\n" + "="*70)
-        print("PDF PREPROCESSING")
-        print("="*70)
-        processed_pdf, preprocessing_state = self._preprocess_pdf_with_options(
-            original_pdf,
-            border_removal=True,
-            split_method='auto',
-            trim_leading=True
-        )
-        
-        # Step 2: Preview and allow modification
-        final_pdf, final_state = self._preview_and_modify_preprocessing(
-            original_pdf,
-            processed_pdf,
-            preprocessing_state
-        )
-        
-        # Handle user choices
-        if final_pdf is None:
-            if final_state.get('back'):
-                # User wants to go back to metadata
-                print("\n⬅️  Going back to metadata...")
-                return
-            elif final_state.get('quit'):
-                # User wants to quit to manual review
-                self.move_to_manual_review(pdf_path)
-                print("✅ Moved to manual review")
-                return
+        # Step 1: Determine which PDF to use (original or page-offset temp or preprocessed)
+        if preprocessed_pdf and preprocessed_pdf.exists():
+            # Use preprocessed PDF from navigation flow (skip preprocessing)
+            pdf_to_copy = preprocessed_pdf
+            self.logger.info(f"Using preprocessed PDF from navigation: {pdf_to_copy.name}")
+            
+            # Create final_state from preprocessing_state passed from context
+            if preprocessing_state:
+                final_state = {
+                    'split_method': preprocessing_state.get('split_method', 'none'),
+                    'border_removal': preprocessing_state.get('border_removal', False),
+                    'trim_leading': preprocessing_state.get('trim_leading', False),
+                    'split_attempted': preprocessing_state.get('split_attempted', False)
+                }
             else:
-                # Cancelled or error
-                print("❌ Processing cancelled")
-                return
-        
-        # Use final processed PDF
-        pdf_to_copy = final_pdf
+                # Fallback: initialize with defaults if preprocessing_state not provided
+                final_state = {
+                    'split_method': 'none',
+                    'border_removal': False,
+                    'trim_leading': False,
+                    'split_attempted': False
+                }
+        else:
+            # Determine which PDF to use (original or page-offset temp)
+            # Check if there's a temporary PDF created from page offset
+            pdf_to_copy = getattr(self, '_temp_pdf_path', None)
+            # Determine original PDF (before any preprocessing)
+            original_pdf = pdf_path
+            if pdf_to_copy is None or not pdf_to_copy.exists():
+                # No temp PDF, use original
+                pdf_to_copy = pdf_path
+            else:
+                self.logger.info(f"Using temporary PDF from page offset: {pdf_to_copy.name}")
+                # Keep original for preprocessing, but use pdf_to_copy as starting point if from offset
+                # For preprocessing preview workflow, we want to work from original after page offset
+                original_pdf = pdf_to_copy
+            
+            # Step 1: Preprocess PDF with default options
+            print("\n" + "="*70)
+            print("PDF PREPROCESSING")
+            print("="*70)
+            processed_pdf, preprocessing_state = self._preprocess_pdf_with_options(
+                original_pdf,
+                border_removal=True,
+                split_method='auto',
+                trim_leading=True
+            )
+            
+            # Step 2: Preview and allow modification
+            final_pdf, final_state = self._preview_and_modify_preprocessing(
+                original_pdf,
+                processed_pdf,
+                preprocessing_state
+            )
+            
+            # Handle user choices
+            if final_pdf is None:
+                if final_state.get('back'):
+                    # User wants to go back to metadata
+                    print("\n⬅️  Going back to metadata...")
+                    return
+                elif final_state.get('quit'):
+                    # User wants to quit to manual review
+                    self.move_to_manual_review(pdf_path)
+                    print("✅ Moved to manual review")
+                    return
+                else:
+                    # Cancelled or error
+                    print("❌ Processing cancelled")
+                    return
+            
+            # Use final processed PDF
+            pdf_to_copy = final_pdf
         name_lower = pdf_to_copy.name.lower()
         
         # Step 2: Check if target file exists and show comparison/choice if needed

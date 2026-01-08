@@ -100,6 +100,7 @@ class Page:
     - What inputs are valid
     - How to handle each input (handlers)
     - Navigation behavior (back page, quit action, default)
+    - Optional custom timeout (if None, uses engine timeout)
     """
     page_id: str
     title: str
@@ -110,6 +111,7 @@ class Page:
     default: Optional[str] = None  # Default choice for Enter key
     back_page: Optional[str] = None  # Page to go back to (for 'z' command)
     quit_action: Optional[Callable[[dict], NavigationResult]] = None  # Action for 'q' command
+    timeout_seconds: Optional[int] = None  # Custom timeout for this page (None = use engine timeout)
     
     def __post_init__(self):
         """Validate page configuration."""
@@ -210,14 +212,17 @@ class NavigationEngine:
             # Get input with optional timeout
             # Check if page has a default (including empty string '')
             has_default = page.default is not None
-            if self.timeout_seconds > 0 and HAS_SELECT and has_default:
+            # Use page-specific timeout if available, otherwise use engine timeout
+            timeout_to_use = page.timeout_seconds if page.timeout_seconds is not None else self.timeout_seconds
+            
+            if timeout_to_use > 0 and HAS_SELECT and has_default:
                 # Use timeout with default (no warning message - just timeout if needed)
                 # Remove leading newline from prompt if present (we already have spacing)
                 prompt_text = page.prompt.lstrip('\n') if page.prompt.startswith('\n') else page.prompt
                 print(prompt_text, end='', flush=True)
                 
                 try:
-                    ready, _, _ = select.select([sys.stdin], [], [], self.timeout_seconds)
+                    ready, _, _ = select.select([sys.stdin], [], [], timeout_to_use)
                     if ready:
                         user_input = sys.stdin.readline().strip()
                     else:
