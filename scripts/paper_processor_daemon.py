@@ -114,9 +114,6 @@ class PaperProcessorDaemon:
         # Window management
         self._terminal_window_handle = None  # Store terminal window handle for positioning
         
-        # Track last processed Zotero item for Appendix feature
-        self._last_processed_item = None  # {'item_key': str, 'authors': str, 'year': str}
-        
         # Initialize local Zotero search (read-only) - this is fast
         try:
             self.local_zotero = ZoteroLocalSearch()
@@ -902,8 +899,7 @@ class PaperProcessorDaemon:
             '7': ('news_article', 'News Article'),
             '8': ('working_paper', 'Working Paper'),
             '9': ('unknown', 'Other'),
-            '0': ('unknown', 'Other'),  # Alias for 9
-            'A': ('appendix', 'Appendix to previous scan')  # Special: attach to previous item
+            '0': ('unknown', 'Other')  # Alias for 9
         }
         
         # Reverse mapping: document_type -> number choice
@@ -926,7 +922,6 @@ class PaperProcessorDaemon:
             print()
             print(Colors.colorize("[Enter] = Keep this type", ColorScheme.LIST))
             print(Colors.colorize("[1-9] = Change to a different type", ColorScheme.LIST))
-            print(Colors.colorize("[A] = Appendix to previous scan", ColorScheme.LIST))
             print(Colors.colorize("[q] = Cancel and skip this document", ColorScheme.LIST))
             print()
             
@@ -947,12 +942,6 @@ class PaperProcessorDaemon:
                     # Keep detected type
                     print(f"✅ Keeping: {current_name}")
                     metadata['_type_confirmed'] = True
-                    return metadata
-                elif choice.upper() == 'A':
-                    # Special handling for Appendix
-                    metadata['document_type'] = 'appendix'
-                    metadata['_type_confirmed'] = True
-                    metadata['_is_appendix'] = True  # Flag to skip normal workflow
                     return metadata
                 elif choice in doc_type_map:
                     # Change type
@@ -981,19 +970,12 @@ class PaperProcessorDaemon:
             print(Colors.colorize("[7] News Article", ColorScheme.LIST))
             print(Colors.colorize("[8] Working Paper/preprint", ColorScheme.LIST))
             print(Colors.colorize("[9] Other", ColorScheme.LIST))
-            print(Colors.colorize("[A] Appendix to previous scan", ColorScheme.LIST))
             print()
             
             try:
                 while True:
                     choice = input("Document type: ").strip()
-                    if choice.upper() == 'A':
-                        # Special handling for Appendix
-                        metadata['document_type'] = 'appendix'
-                        metadata['_type_confirmed'] = True
-                        metadata['_is_appendix'] = True  # Flag to skip normal workflow
-                        return metadata
-                    elif choice in doc_type_map:
+                    if choice in doc_type_map:
                         doc_type, doc_type_name = doc_type_map[choice]
                         metadata['document_type'] = doc_type
                         print(f"✅ Selected: {doc_type_name}")
@@ -1002,7 +984,7 @@ class PaperProcessorDaemon:
                     elif choice.lower() in ['q', 'quit', 'cancel']:
                         return None
                     else:
-                        print("⚠️  Invalid choice. Please enter 1-9, A, or 'q' to cancel.")
+                        print("⚠️  Invalid choice. Please enter 1-9 or 'q' to cancel.")
                         
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Cancelled")
@@ -1411,6 +1393,19 @@ class PaperProcessorDaemon:
             # Update metadata with edited/selected authors
             # This preserves any author edits made in select_authors_for_search()
             metadata['authors'] = selected_authors
+            
+            # Update _all_authors to include manually added authors so they're preserved for option 'a'
+            if metadata.get('_all_authors'):
+                # Merge current authors with _all_authors, preserving manually added ones
+                all_authors_set = set(metadata['_all_authors'])
+                selected_authors_set = set(selected_authors)
+                # Add any new authors that were manually added
+                new_authors = selected_authors_set - all_authors_set
+                if new_authors:
+                    metadata['_all_authors'].extend(list(new_authors))
+            else:
+                # First time - save the selected authors (including manually added ones)
+                metadata['_all_authors'] = selected_authors.copy()
             
             # Step 4: Show quick search results first (if any), then fall back to author-based search
             if quick_matches:
@@ -2080,7 +2075,6 @@ class PaperProcessorDaemon:
         print(Colors.colorize("[8] Working Paper/preprint", ColorScheme.LIST))
         print(Colors.colorize("[9] Handwritten Note", ColorScheme.LIST))
         print(Colors.colorize("[0] Other", ColorScheme.LIST))
-        print(Colors.colorize("[A] Appendix to previous scan", ColorScheme.LIST))
         print()
         
         doc_type_map = {
@@ -2093,17 +2087,12 @@ class PaperProcessorDaemon:
             '7': ('news_article', 'News Article'),
             '8': ('working_paper', 'Working Paper'),
             '9': ('handwritten_note', 'Handwritten Note'),
-            '0': ('unknown', 'Other'),
-            'A': ('appendix', 'Appendix to previous scan')
+            '0': ('unknown', 'Other')
         }
         
         while True:
             type_choice = input("Document type: ").strip()
-            if type_choice.upper() == 'A':
-                # Special handling for Appendix
-                metadata = {'document_type': 'appendix', '_is_appendix': True}
-                return metadata
-            elif type_choice in doc_type_map:
+            if type_choice in doc_type_map:
                 doc_type, doc_type_name = doc_type_map[type_choice]
                 break
             print("Invalid choice. Please try again.")
@@ -2397,7 +2386,7 @@ class PaperProcessorDaemon:
         except Exception:
             return "unknown"
     
-    def edit_metadata_interactively(self, metadata: dict, online_metadata: dict = None, local_metadata: dict = None, online_source: str = None) -> dict:
+    def edit_metadata_interactively(self, metadata: dict, online_metadata: dict = None, local_metadata: dict = None, online_source: str = None, zotero_item: dict = None) -> dict:
         """Allow user to edit metadata fields with intelligent merging from multiple sources.
         
         Args:
@@ -2405,6 +2394,7 @@ class PaperProcessorDaemon:
             online_metadata: Optional metadata from online libraries (CrossRef, arXiv, etc.)
             local_metadata: Optional metadata from local Zotero database
             online_source: Source of online metadata (e.g., 'crossref_api', 'arxiv_api')
+            zotero_item: Optional Zotero item dict - if provided and titles differ, will prompt for filename title override
             
         Returns:
             Edited metadata dict
@@ -2507,6 +2497,47 @@ class PaperProcessorDaemon:
         elif local_metadata and local_metadata.get('title') and not edited.get('title'):
             edited['title'] = local_metadata['title']
             print(f"✅ Auto-filled from local: {local_metadata['title']}")
+        
+        # Filename title override: if Zotero item provided and titles differ, ask which to use for filename
+        if zotero_item:
+            zotero_title = zotero_item.get('title', '').strip()
+            metadata_title = edited.get('title', '').strip()
+            if zotero_title and metadata_title and zotero_title != metadata_title:
+                print("\n" + "-" * 60)
+                print("📄 FILENAME TITLE")
+                print("-" * 60)
+                print(f"Zotero item title: {zotero_title}")
+                print(f"Metadata title:     {metadata_title}")
+                print()
+                print("The PDF filename can use either title, or a custom title.")
+                print("  (z) Use Zotero title for filename (default)")
+                print("  (m) Use metadata title for filename")
+                print("  (c) Enter custom title for filename")
+                print("  (Enter) Skip - use Zotero title")
+                print()
+                
+                while True:
+                    choice = input("Filename title choice [z/m/c/Enter]: ").strip().lower()
+                    if choice == '' or choice == 'z':
+                        # Use Zotero title (default) - don't set override
+                        print("✅ Will use Zotero title for filename")
+                        break
+                    elif choice == 'm':
+                        # Use metadata title for filename
+                        edited['_filename_title_override'] = metadata_title
+                        print(f"✅ Will use metadata title for filename: {metadata_title}")
+                        break
+                    elif choice == 'c':
+                        # Custom title
+                        custom_title = input("Enter custom title for filename: ").strip()
+                        if custom_title:
+                            edited['_filename_title_override'] = custom_title
+                            print(f"✅ Will use custom title for filename: {custom_title}")
+                            break
+                        else:
+                            print("⚠️  Custom title cannot be empty. Please enter a title or choose another option.")
+                    else:
+                        print("⚠️  Invalid choice. Please enter 'z', 'm', 'c', or press Enter.")
         
         # Authors
         current_authors = ', '.join(edited.get('authors', []))
@@ -4057,11 +4088,6 @@ class PaperProcessorDaemon:
                         self.move_to_failed(pdf_path)
                         return
                 
-                # Check if user selected Appendix - handle separately
-                if metadata.get('_is_appendix'):
-                    self.handle_appendix_scan(pdf_path)
-                    return
-                
                 self.display_metadata(metadata, pdf_path, extraction_time)
             else:
                 # Extraction failed - use guided workflow
@@ -4075,11 +4101,6 @@ class PaperProcessorDaemon:
                     return
                 
                 if metadata:
-                    # Check if user selected Appendix - handle separately
-                    if metadata.get('_is_appendix'):
-                        self.handle_appendix_scan(pdf_path)
-                        return
-                    
                     # Document type was already set during handle_failed_extraction
                     # (No need to confirm again)
                     
@@ -4119,7 +4140,10 @@ class PaperProcessorDaemon:
                 # User selected an item - offer to attach PDF
                 self.handle_item_selected(pdf_path, updated_metadata, selected_item)
             elif action == 'search':
-                # User wants to search again - reset authors to full set if available, then recursive call
+                # User wants to search again - allow year editing by clearing confirmation flag
+                if updated_metadata.get('_year_confirmed'):
+                    updated_metadata.pop('_year_confirmed', None)
+                # Reset authors to full set if available, then recursive call
                 if updated_metadata.get('_all_authors'):
                     updated_metadata['authors'] = updated_metadata['_all_authors'].copy()
                 action2, selected_item2, updated_metadata = self.search_and_display_local_zotero(updated_metadata)
@@ -4701,11 +4725,16 @@ class PaperProcessorDaemon:
             except Exception:
                 pass
             # #endregion
-            border_removed_pdf = self._check_and_remove_dark_borders(current_pdf)
+            border_removed_pdf, border_detection_stats = self._check_and_remove_dark_borders(current_pdf)
             if border_removed_pdf:
                 current_pdf = border_removed_pdf
                 preprocessing_state['border_removal'] = True
                 self.logger.debug(f"Borders removed: {border_removed_pdf.name}")
+            
+            # Store border detection stats even if removal was rejected
+            if border_detection_stats:
+                preprocessing_state['border_detection_stats'] = border_detection_stats
+                self.logger.debug(f"Border detection stats stored: {border_detection_stats}")
                 # #region agent log
                 try:
                     import pdfplumber
@@ -4804,12 +4833,14 @@ class PaperProcessorDaemon:
                     pass
                 # #endregion
                 
-                # Perform split
+                # Perform split - pass border detection stats if available
+                border_detection_stats = preprocessing_state.get('border_detection_stats')
                 split_path = self._split_with_mutool(
                     current_pdf, 
                     width=landscape_width, 
                     height=landscape_height,
-                    split_method=split_method
+                    split_method=split_method,
+                    border_detection_stats=border_detection_stats
                 )
                 if split_path:
                     current_pdf = split_path
@@ -4871,7 +4902,13 @@ class PaperProcessorDaemon:
             
             # Determine split status based on method and whether it was attempted/succeeded
             # If split_method is 'none' but split_attempted is True, user cancelled
-            if split_method == 'auto' and split_attempted:
+            if split_method == 'manual' and split_attempted:
+                manual_ratio = preprocessing_state.get('manual_split_ratio')
+                if manual_ratio:
+                    split_status = f"✓ Applied (manual {manual_ratio:.0f}/{100-manual_ratio:.0f})"
+                else:
+                    split_status = "✓ Applied (manual)"
+            elif split_method == 'auto' and split_attempted:
                 split_status = "✓ Applied (gutter detection)"
             elif split_method == '50-50' and split_attempted:
                 split_status = "✓ Applied (50/50 geometric)"
@@ -4923,6 +4960,17 @@ class PaperProcessorDaemon:
                 option_num += 1
                 option_map[option_num] = 'add_trim'
                 print(f"  [{option_num}] Add trimming")
+            
+            # Manual split option - always available
+            option_num += 1
+            manual_split_option_num = option_num
+            manual_split_ratio = preprocessing_state.get('manual_split_ratio')
+            if manual_split_ratio:
+                option_map[option_num] = 'manual_split'
+                print(f"  [{option_num}] Split by manual definition ({manual_split_ratio:.0f}/{100-manual_split_ratio:.0f})")
+            else:
+                option_map[option_num] = 'manual_split'
+                print(f"  [{option_num}] Split by manual definition (e.g., 55/45)")
             
             print("  [z] Go back to metadata")
             print("  [q] Quit - move to manual review")
@@ -5012,6 +5060,98 @@ class PaperProcessorDaemon:
                             trim_leading=True
                         )
                         preprocessing_state = new_state
+                        # Continue loop to show preview again
+                    
+                    elif action == 'manual_split':
+                        # Manual split definition
+                        border_detection_stats = preprocessing_state.get('border_detection_stats')
+                        
+                        print("\n📐 Manual Split Definition")
+                        print("=" * 60)
+                        print("Enter the split ratio as a single number (e.g., 55 for 55/45 split).")
+                        print("The number represents the percentage for the left page.")
+                        print("Valid range: 30-70 (to ensure reasonable split)")
+                        
+                        while True:
+                            try:
+                                ratio_input = input("\nEnter split ratio (30-70, or 'c' to cancel): ").strip().lower()
+                                
+                                if ratio_input == 'c':
+                                    print("Cancelled manual split")
+                                    break  # Continue loop to show preview again
+                                
+                                ratio = float(ratio_input)
+                                
+                                if ratio < 30 or ratio > 70:
+                                    print(f"⚠️  Ratio must be between 30 and 70. You entered {ratio:.1f}")
+                                    continue
+                                
+                                # Get page width from PDF
+                                try:
+                                    import fitz  # PyMuPDF
+                                    doc = fitz.open(str(processed_pdf))
+                                    if len(doc.pages) == 0:
+                                        print("❌ Error: PDF has no pages")
+                                        doc.close()
+                                        break
+                                    
+                                    page_width = doc[0].rect.width
+                                    doc.close()
+                                except ImportError:
+                                    print("❌ Error: PyMuPDF not available")
+                                    break
+                                except Exception as e:
+                                    print(f"❌ Error reading PDF: {e}")
+                                    break
+                                
+                                # Calculate split point
+                                if border_detection_stats:
+                                    avg_left = border_detection_stats.get('avg_left_border_px', 0)
+                                    avg_right = border_detection_stats.get('avg_right_border_px', 0)
+                                    page_width_px = border_detection_stats.get('page_width_px', 0)
+                                    
+                                    if page_width_px > 0:
+                                        # Convert borders to PDF points
+                                        left_border_pts = (avg_left / page_width_px) * page_width
+                                        right_border_pts = (avg_right / page_width_px) * page_width
+                                        
+                                        # Calculate content center and manual offset
+                                        content_center = page_width / 2 + (left_border_pts - right_border_pts) / 2
+                                        manual_offset = (ratio - 50) / 100 * page_width
+                                        split_x = content_center + manual_offset
+                                        print(f"📊 Split point: {split_x:.1f} (content center: {content_center:.1f}, manual offset: {manual_offset:.1f})")
+                                    else:
+                                        # Fallback to simple calculation
+                                        split_x = page_width * (ratio / 100)
+                                        print(f"📊 Split point: {split_x:.1f} (page width: {page_width:.1f}, ratio: {ratio}%)")
+                                else:
+                                    # No borders detected, use simple calculation
+                                    split_x = page_width * (ratio / 100)
+                                    print(f"📊 Split point: {split_x:.1f} (page width: {page_width:.1f}, ratio: {ratio}%)")
+                                
+                                # Perform split
+                                print("\n🔄 Performing manual split...")
+                                split_path = self._split_with_custom_gutter(processed_pdf, split_x)
+                                
+                                if split_path:
+                                    # Update preprocessing state
+                                    preprocessing_state['split_method'] = 'manual'
+                                    preprocessing_state['split_attempted'] = True
+                                    preprocessing_state['manual_split_ratio'] = ratio
+                                    preprocessing_state['border_detection_stats'] = border_detection_stats  # Preserve border stats
+                                    
+                                    processed_pdf = split_path
+                                    print(f"✅ Manual split completed: {ratio:.0f}/{100-ratio:.0f}")
+                                else:
+                                    print("❌ Manual split failed")
+                                
+                                break  # Exit ratio input loop
+                            except ValueError:
+                                print("⚠️  Please enter a valid number between 30 and 70")
+                            except (KeyboardInterrupt, EOFError):
+                                print("\n❌ Cancelled")
+                                break  # Continue loop to show preview again
+                        
                         # Continue loop to show preview again
                     
                     else:
@@ -5964,12 +6104,12 @@ class PaperProcessorDaemon:
             self.logger.error(f"Custom split failed: {e}")
             return None
     
-    def _split_with_mutool(self, pdf_path: Path, width: Optional[float] = None, height: Optional[float] = None, split_method: str = 'auto') -> Optional[Path]:
-        """Split a two-up PDF using intelligent gutter detection or mutool poster as fallback.
+    def _split_with_mutool(self, pdf_path: Path, width: Optional[float] = None, height: Optional[float] = None, split_method: str = 'auto', border_detection_stats: Optional[dict] = None) -> Optional[Path]:
+        """Split a two-up PDF using intelligent gutter detection or geometric split as fallback.
         
         First attempts to detect the actual gutter position using image analysis.
-        If detection fails, falls back to geometric split at 50% width.
-        Assumes borders have already been removed from the PDF.
+        If detection fails, falls back to geometric split at content center (if borders detected) or page center.
+        Always uses _split_with_custom_gutter() for actual splitting.
         
         Args:
             pdf_path: Path to PDF file
@@ -5977,6 +6117,7 @@ class PaperProcessorDaemon:
             height: Optional page height (for geometric split)
             split_method: Split method - 'auto' (gutter detection with fallback),
                          '50-50' (geometric split directly), 'none' (skip splitting)
+            border_detection_stats: Optional dict with avg_left_border_px, avg_right_border_px, page_width_px
         
         Returns:
             Path to split PDF or None if skipped/failed
@@ -6107,129 +6248,49 @@ class PaperProcessorDaemon:
                     return result
                 # If custom split failed, fall through to geometric split
             
-            # Fallback to geometric split with mutool
+            # Fallback to geometric split (50/50 or content center)
             if width is None or height is None:
                 try:
                     import pdfplumber
                     with pdfplumber.open(str(pdf_path)) as pdf:
                         if len(pdf.pages) > 0:
                             width, height = pdf.pages[0].width, pdf.pages[0].height
-                            # #region agent log
-                            try:
-                                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                                with open(log_path, 'a', encoding='utf-8') as f:
-                                    f.write(json.dumps({
-                                        'sessionId': 'debug-session',
-                                        'runId': 'run1',
-                                        'hypothesisId': 'G',
-                                        'location': 'paper_processor_daemon.py:_split_with_mutool:geometric',
-                                        'message': 'Page dimensions from PDF',
-                                        'data': {
-                                            'width': float(width),
-                                            'height': float(height),
-                                            'aspect_ratio': float(width / height) if height > 0 else 0.0,
-                                            'split_method': split_method,
-                                            'gutter_x_was_none': gutter_x is None
-                                        },
-                                        'timestamp': int(time.time() * 1000)
-                                    }) + '\n')
-                            except Exception:
-                                pass
-                            # #endregion
                 except Exception:
                     width = height = 0
             
-            x, y = (2, 1) if (width and height and width > height) else (1, 2)
-            # #region agent log
-            try:
-                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                split_x = width / 2 if width else 0
-                with open(log_path, 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({
-                        'sessionId': 'debug-session',
-                        'runId': 'run1',
-                        'hypothesisId': 'G',
-                        'location': 'paper_processor_daemon.py:_split_with_mutool:geometric',
-                        'message': 'Geometric split calculation',
-                        'data': {
-                            'width': float(width) if width else 0.0,
-                            'height': float(height) if height else 0.0,
-                            'split_x': float(split_x),
-                            'split_ratio': float(split_x / width) if width > 0 else 0.0,
-                            'mutool_poster_params': f'{x}x{y}',
-                            'gutter_x_was_none': gutter_x is None,
-                            'page_width_from_gutter': float(page_width) if page_width else None
-                        },
-                        'timestamp': int(time.time() * 1000)
-                    }) + '\n')
-            except Exception:
-                pass
-            # #endregion
-            # Create split in temp directory to avoid cluttering watch directory
-            import tempfile
-            temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            out_path = temp_dir / f"{pdf_path.stem}_split.pdf"
-            
-            # #region agent log
-            try:
-                file_existed_before = out_path.exists()
-                file_size_before = out_path.stat().st_size if file_existed_before else 0
-                with open(r'f:\prog\research-tools\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({
-                        'sessionId': 'debug-session',
-                        'runId': 'run1',
-                        'hypothesisId': 'G',
-                        'location': 'paper_processor_daemon.py:_split_with_mutool',
-                        'message': 'Before geometric split',
-                        'data': {
-                            'out_path': str(out_path),
-                            'file_existed_before': file_existed_before,
-                            'file_size_before': file_size_before,
-                            'split_method': split_method,
-                            'x': x,
-                            'y': y,
-                            'source_pdf': str(pdf_path)
-                        },
-                        'timestamp': int(time.time() * 1000)
-                    }) + '\n')
-            except: pass
-            # #endregion
-            
-            cmd = [
-                'mutool', 'poster', '-x', str(x), '-y', str(y),
-                str(pdf_path), str(out_path)
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            # #region agent log
-            try:
-                file_size_after = out_path.stat().st_size if out_path.exists() else 0
-                with open(r'f:\prog\research-tools\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({
-                        'sessionId': 'debug-session',
-                        'runId': 'run1',
-                        'hypothesisId': 'G',
-                        'location': 'paper_processor_daemon.py:_split_with_mutool',
-                        'message': 'After geometric split',
-                        'data': {
-                            'out_path': str(out_path),
-                            'file_size_after': file_size_after,
-                            'file_was_overwritten': file_existed_before,
-                            'size_changed': (file_size_after != file_size_before) if file_existed_before else True,
-                            'mutool_returncode': result.returncode,
-                            'mutool_stderr': result.stderr[:200] if result.stderr else None
-                        },
-                        'timestamp': int(time.time() * 1000)
-                    }) + '\n')
-            except: pass
-            # #endregion
-            if result.returncode != 0:
-                self.logger.error(f"mutool poster failed: {result.stderr.strip()}")
+            if not width:
+                self.logger.error("Cannot determine page width for split")
                 return None
-            # Use split file for downstream processing
-            self.logger.info(f"Split PDF created (geometric): {out_path.name}")
-            return out_path
+            
+            # Calculate split point: content center if borders detected, page center otherwise
+            if border_detection_stats:
+                avg_left = border_detection_stats.get('avg_left_border_px', 0)
+                avg_right = border_detection_stats.get('avg_right_border_px', 0)
+                page_width_px = border_detection_stats.get('page_width_px', 0)
+                
+                if page_width_px > 0:
+                    # Convert borders to PDF points
+                    left_border_pts = (avg_left / page_width_px) * width
+                    right_border_pts = (avg_right / page_width_px) * width
+                    
+                    # Calculate content center: page_center + (left_border - right_border) / 2
+                    page_center = width / 2
+                    split_x = page_center + (left_border_pts - right_border_pts) / 2
+                    self.logger.info(f"Using content center for split: {split_x:.1f} (page center: {page_center:.1f}, adjustment: {(left_border_pts - right_border_pts) / 2:.1f})")
+                else:
+                    # Fallback to page center if conversion fails
+                    split_x = width / 2
+                    self.logger.warning("Border stats available but page_width_px is 0, using page center")
+            else:
+                # No borders detected, use page center
+                split_x = width / 2
+                self.logger.info(f"Using page center for split: {split_x:.1f}")
+            
+            # Always use _split_with_custom_gutter() for splitting
+            result = self._split_with_custom_gutter(pdf_path, split_x)
+            if result:
+                self.logger.info(f"Split PDF created (geometric): {result.name}")
+            return result
         except FileNotFoundError:
             self.logger.warning("mutool not found; skipping two-up split")
             # #region agent log
@@ -6825,23 +6886,27 @@ class PaperProcessorDaemon:
                     pass  # Ignore errors during cleanup
             return None
     
-    def _check_and_remove_dark_borders(self, pdf_path: Path) -> Optional[Path]:
+    def _check_and_remove_dark_borders(self, pdf_path: Path) -> tuple[Optional[Path], Optional[dict]]:
         """Check for dark borders and optionally remove them.
         
         Checks first 4 pages for borders. If borders detected, prompts user
         to confirm removal. Returns path to cleaned PDF or None if no action taken.
+        Also returns border detection statistics even if removal is rejected.
         
         Args:
             pdf_path: Path to PDF file
             
         Returns:
-            Path to cleaned PDF if borders removed, None if skipped
+            Tuple of (output_pdf_path, border_detection_stats):
+            - output_pdf_path: Path to cleaned PDF if borders removed, None if skipped
+            - border_detection_stats: Dict with avg_left_border_px, avg_right_border_px, page_width_px
+              or None if no borders detected
         """
         try:
             import fitz  # PyMuPDF
         except ImportError:
             self.logger.error("PyMuPDF (fitz) not available - cannot check borders")
-            return None
+            return None, None
         
         print("\n🔍 Checking for dark borders (pages 1-4)...")
         
@@ -6849,6 +6914,7 @@ class PaperProcessorDaemon:
         borders_detected = False
         pages_with_borders = []
         all_borders_info = []
+        page_width_px = None
         
         try:
             doc = fitz.open(str(pdf_path))
@@ -6859,6 +6925,10 @@ class PaperProcessorDaemon:
                     processed_image, borders = self.border_remover.process_pdf_page(
                         pdf_path, page_num, zoom=2.0
                     )
+                    
+                    # Get page width in pixels from processed image (first page only)
+                    if page_num == 0 and processed_image is not None:
+                        page_width_px = processed_image.shape[1]  # width is second dimension
                     
                     # Check if any borders were detected
                     if any(borders.values()):
@@ -6889,9 +6959,26 @@ class PaperProcessorDaemon:
             
             doc.close()
             
+            # Calculate border detection stats from detected borders
+            border_detection_stats = None
+            if all_borders_info and page_width_px:
+                # Calculate average left and right border widths
+                left_borders = [borders['left'] for _, borders in all_borders_info if borders['left'] > 0]
+                right_borders = [borders['right'] for _, borders in all_borders_info if borders['right'] > 0]
+                
+                avg_left_border_px = sum(left_borders) / len(left_borders) if left_borders else 0.0
+                avg_right_border_px = sum(right_borders) / len(right_borders) if right_borders else 0.0
+                
+                border_detection_stats = {
+                    'avg_left_border_px': avg_left_border_px,
+                    'avg_right_border_px': avg_right_border_px,
+                    'page_width_px': page_width_px
+                }
+                self.logger.debug(f"Border detection stats: {border_detection_stats}")
+            
             if not borders_detected:
                 print("\nℹ️  No dark borders detected - skipping removal")
-                return None
+                return None, border_detection_stats
             
             # Report to user
             pages_str = ", ".join(str(p) for p in pages_with_borders)
@@ -6900,7 +6987,7 @@ class PaperProcessorDaemon:
             choice = input("Remove dark borders from the whole PDF? [Y/n]: ").strip().lower()
             if choice == 'n':
                 print("Skipping border removal")
-                return None
+                return None, border_detection_stats
             
             # Process entire PDF with border removal
             print("\n🔄 Processing all pages...")
@@ -6928,15 +7015,15 @@ class PaperProcessorDaemon:
                 else:
                     print(f"✅ Borders removed from {stats['pages_processed']} pages")
                 self.logger.debug(f"Created PDF without borders: {out_path.name}")
-                return out_path
+                return out_path, border_detection_stats
             else:
                 print("⚠️  No pages were processed")
-                return None
+                return None, border_detection_stats
                 
         except Exception as e:
             self.logger.error(f"Error during border removal: {e}")
             print(f"⚠️  Border removal failed: {e}")
-            return None
+            return None, border_detection_stats
     
     def start(self):
         """Start the daemon."""
@@ -10650,70 +10737,6 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         print(f"   📚 Zotero: Linked file attached")
         print(f"   ✅ Scan: Moved to done/")
         
-        # Store last processed item for Appendix feature
-        zotero_authors = zotero_item.get('authors', [])
-        if isinstance(zotero_authors, list) and zotero_authors:
-            # Format authors for filename (use first author's surname)
-            first_author = zotero_authors[0] if isinstance(zotero_authors[0], str) else str(zotero_authors[0])
-            # Extract surname (before comma if present, otherwise last word)
-            if ',' in first_author:
-                authors_str = first_author.split(',')[0].strip()
-            else:
-                # For "First Last" format, take the last word (surname)
-                parts = first_author.split()
-                authors_str = parts[-1].strip() if parts else 'Unknown'
-        else:
-            authors_str = 'Unknown'
-        
-        zotero_year = zotero_item.get('year', zotero_item.get('date', ''))
-        if zotero_year and len(str(zotero_year)) >= 4:
-            year_str = str(zotero_year)[:4]
-        else:
-            year_str = 'Unknown'
-        
-        self._last_processed_item = {
-            'item_key': item_key,
-            'authors': authors_str,
-            'year': year_str,
-            'zotero_item': zotero_item  # Store full item for later use
-        }
-        self.logger.info(f"Stored last processed item: {authors_str}_{year_str} (key: {item_key})")
-    
-    def handle_appendix_scan(self, pdf_path: Path):
-        """Handle Appendix scan - attach to previous Zotero item with Appendix filename.
-        
-        Args:
-            pdf_path: Path to scanned PDF
-        """
-        if not self._last_processed_item:
-            print("\n❌ No previous scan found in this session.")
-            print("   Please process a normal scan first, then use 'A' for Appendix.")
-            print("   Processing this as a normal scan instead...")
-            # Continue with normal processing by returning None
-            # The caller should handle this
-            self.move_to_manual_review(pdf_path)
-            return
-        
-        print("\n" + "="*60)
-        print("📎 APPENDIX SCAN")
-        print("="*60)
-        print(f"Attaching to previous item:")
-        print(f"  Authors: {self._last_processed_item['authors']}")
-        print(f"  Year: {self._last_processed_item['year']}")
-        print()
-        
-        # Generate Appendix filename
-        authors_str = self._last_processed_item['authors']
-        year_str = self._last_processed_item['year']
-        target_filename = f"{authors_str}_{year_str}_Appendix.pdf"
-        
-        # Get the previous Zotero item
-        zotero_item = self._last_processed_item['zotero_item']
-        
-        # Process the appendix scan (skip metadata extraction, go straight to attachment)
-        print("📋 Processing appendix scan...")
-        self._process_selected_item(pdf_path, zotero_item, target_filename, metadata=None)
-    
     def _display_zotero_item_details(self, zotero_item: dict):
         """Display detailed information about a Zotero item for review.
         
