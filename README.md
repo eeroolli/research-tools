@@ -138,8 +138,16 @@ When a Zotero match is found, users get a sophisticated 3-step process:
 - Integration with existing interactive tag system
 - Tag groups, online tags, and custom tag management
 
-#### Step 3: PDF Attachment
-- PDF conflict resolution (keep both/replace/cancel)
+#### Step 3: Filename Editing
+- Filename preview and editing before processing
+- Choose between Zotero-based or OCR-based filename
+- Terminal editing for full control
+- Automatic validation and sanitization
+
+#### Step 4: PDF Attachment
+- PDF preprocessing (border removal, splitting, trimming)
+- Preview and modify preprocessing options
+- Conflict resolution with filename editing (when file exists)
 - Smart filename generation and duplicate handling
 - Complete file management and cleanup
 
