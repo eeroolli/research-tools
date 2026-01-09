@@ -589,27 +589,27 @@ class PaperProcessorDaemon:
             extraction_time: Time taken for extraction
         """
         print("\n" + "="*60)
-        print(f"SCANNED DOCUMENT: {pdf_path.name}")
+        print(Colors.colorize(f"SCANNED DOCUMENT: {pdf_path.name}", ColorScheme.PAGE_TITLE))
         print("="*60)
-        print(f"\nMetadata extracted in {extraction_time:.1f}s")
+        print(Colors.colorize(f"\nMetadata extracted in {extraction_time:.1f}s", ColorScheme.ACTION))
         
         # Show data source
         source = metadata.get('source', 'OCR extraction')
         method = metadata.get('method', 'unknown')
-        print(f"Data source: {source} ({method})")
+        print(Colors.colorize(f"Data source: {source} ({method})", ColorScheme.ACTION))
         
         # Show filtering notice if authors were cleaned
         if metadata.get('_filtered'):
-            print(f"📝 Note: {metadata.get('_filtering_reason', 'Authors filtered')}")
+            print(Colors.colorize(f"📝 Note: {metadata.get('_filtering_reason', 'Authors filtered')}", ColorScheme.ACTION))
         
-        print("\nEXTRACTED METADATA:")
+        print(Colors.colorize("\nEXTRACTED METADATA:", ColorScheme.PAGE_TITLE))
         print("-" * 40)
         
         # Universal field display using smart grouping
         self._display_metadata_universal(metadata)
         
         print("-" * 40)
-        print("💡 Tip: You can edit any field (including year) by choosing option [2] Edit metadata")
+        print(Colors.colorize("💡 Tip: You can edit any field (including year) by choosing option [2] Edit metadata", ColorScheme.ACTION))
     
     def prompt_for_year(self, metadata: dict, allow_back: bool = False, force_prompt: bool = False) -> dict:
         """Prompt user for publication year if missing.
@@ -632,10 +632,10 @@ class PaperProcessorDaemon:
             return metadata
         
         if current_year:
-            print(f"\n📅 Current publication year: {current_year}", flush=True)
+            print(Colors.colorize(f"\n📅 Current publication year: {current_year}", ColorScheme.ACTION), flush=True)
             hint = "(Enter to keep current"
         else:
-            print("\n📅 Publication year not found in scan", flush=True)
+            print(Colors.colorize("\n📅 Publication year not found in scan", ColorScheme.ACTION), flush=True)
             hint = "(or press Enter to skip"
         
         if allow_back:
@@ -908,10 +908,10 @@ class PaperProcessorDaemon:
         current_type = metadata.get('document_type', '').lower()
         
         print("\n" + "="*60, flush=True)
-        print("📚 DOCUMENT TYPE", flush=True)
+        print(Colors.colorize("📚 DOCUMENT TYPE", ColorScheme.PAGE_TITLE), flush=True)
         print("="*60, flush=True)
-        print("Getting the document type right helps guide search strategies.", flush=True)
-        print("This ensures we search the right APIs and ask for relevant fields.", flush=True)
+        print(Colors.colorize("Getting the document type right helps guide search strategies.", ColorScheme.ACTION), flush=True)
+        print(Colors.colorize("This ensures we search the right APIs and ask for relevant fields.", ColorScheme.ACTION), flush=True)
         print(flush=True)
         
         if current_type and current_type in reverse_map:
@@ -930,7 +930,7 @@ class PaperProcessorDaemon:
                 if num == '0':  # Skip 0, it's just an alias
                     continue
                 marker = " ← detected" if typ == current_type else ""
-                print(f"  [{num}] {name}{marker}")
+                print(Colors.colorize(f"  [{num}] {name}{marker}", ColorScheme.LIST))
             print()
             
             try:
@@ -1254,8 +1254,8 @@ class PaperProcessorDaemon:
         Returns:
             User's menu choice as string
         """
-        print("\n🎯 ZOTERO MATCH FOUND!")
-        print("What would you like to do with the scanned PDF?")
+        print(Colors.colorize("\n🎯 ZOTERO MATCH FOUND!", ColorScheme.PAGE_TITLE))
+        print(Colors.colorize("What would you like to do with the scanned PDF?", ColorScheme.ACTION))
         print()
         print(Colors.colorize("[1] 📎 Attach PDF to existing Zotero item", ColorScheme.LIST))
         print(Colors.colorize("[2] ✏️  Edit metadata before attaching", ColorScheme.LIST))
@@ -1278,7 +1278,7 @@ class PaperProcessorDaemon:
         Returns:
             User's menu choice as string
         """
-        print("\nWHAT WOULD YOU LIKE TO DO?")
+        print(Colors.colorize("\nWHAT WOULD YOU LIKE TO DO?", ColorScheme.PAGE_TITLE))
         print()
         print(Colors.colorize("[1] 📄 Create new Zotero item with extracted metadata", ColorScheme.LIST))
         print(Colors.colorize("[2] ✏️  Edit metadata before creating item", ColorScheme.LIST))
@@ -2057,8 +2057,8 @@ class PaperProcessorDaemon:
         Returns:
             Manually entered metadata dict
         """
-        print("\n⚠️  METADATA EXTRACTION FAILED")
-        print("Let's gather information manually to help identify this document.")
+        print(Colors.colorize("\n⚠️  METADATA EXTRACTION FAILED", ColorScheme.PAGE_TITLE))
+        print(Colors.colorize("Let's gather information manually to help identify this document.", ColorScheme.ACTION))
         print()
         
         # Step 1: Document type selection
@@ -2284,15 +2284,15 @@ class PaperProcessorDaemon:
         final_path = self.publications_dir / proposed_filename
         
         if final_path.exists():
-            print(f"\n⚠️  FILE ALREADY EXISTS: {proposed_filename}")
+            print(Colors.colorize(f"\n⚠️  FILE ALREADY EXISTS: {proposed_filename}", ColorScheme.PAGE_TITLE))
             print(f"   Existing: {self.get_file_info(final_path)}")
             print(f"   Scanned:  {self.get_file_info(pdf_path)}")
             print()
-            print("What would you like to do?")
-            print("[1] Keep both (rename scan with _scanned suffix)")
-            print("[2] Replace original with scan")
-            print("[3] Keep original, discard scan")
-            print("[4] Manual review later")
+            print(Colors.colorize("What would you like to do?", ColorScheme.ACTION))
+            print(Colors.colorize("[1] Keep both (rename scan with _scanned suffix)", ColorScheme.LIST))
+            print(Colors.colorize("[2] Replace original with scan", ColorScheme.LIST))
+            print(Colors.colorize("[3] Keep original, discard scan", ColorScheme.LIST))
+            print(Colors.colorize("[4] Manual review later", ColorScheme.LIST))
             
             dup_choice = input("\nChoice: ").strip()
             
@@ -4430,9 +4430,9 @@ class PaperProcessorDaemon:
         
         # User wants to edit - show options
         print()
-        print("Choose filename source:")
-        print("  [a] Default: Zotero-based filename (current)")
-        print("  [b] OCR-based: Use extracted title from PDF")
+        print(Colors.colorize("Choose filename source:", ColorScheme.ACTION))
+        print(Colors.colorize("  [a] Default: Zotero-based filename (current)", ColorScheme.LIST))
+        print(Colors.colorize("  [b] OCR-based: Use extracted title from PDF", ColorScheme.LIST))
         print()
         
         source_choice = input("Your choice [a/b]: ").strip().lower()
@@ -5024,8 +5024,8 @@ class PaperProcessorDaemon:
             print()
             
             # Show menu - build dynamically based on current state
-            print("Options:")
-            print("  [1] Accept and proceed to Zotero")
+            print(Colors.colorize("Options:", ColorScheme.ACTION))
+            print(Colors.colorize("  [1] Accept and proceed to Zotero", ColorScheme.LIST))
             
             # Build dynamic options with sequential numbering
             option_num = 1
@@ -5034,27 +5034,27 @@ class PaperProcessorDaemon:
             if preprocessing_state.get('border_removal', False):
                 option_num += 1
                 option_map[option_num] = 'drop_border'
-                print(f"  [{option_num}] Drop border removal")
+                print(Colors.colorize(f"  [{option_num}] Drop border removal", ColorScheme.LIST))
             
             if preprocessing_state.get('split_method', 'none') != 'none':
                 option_num += 1
                 option_map[option_num] = 'drop_split'
-                print(f"  [{option_num}] Drop split")
+                print(Colors.colorize(f"  [{option_num}] Drop split", ColorScheme.LIST))
             
             if preprocessing_state.get('split_method', 'none') == 'auto':
                 option_num += 1
                 option_map[option_num] = 'use_5050'
-                print(f"  [{option_num}] Use 50/50 split instead")
+                print(Colors.colorize(f"  [{option_num}] Use 50/50 split instead", ColorScheme.LIST))
             
             # Show "Add trimming" if not applied, "Drop trimming" if applied
             if preprocessing_state.get('trim_leading', False):
                 option_num += 1
                 option_map[option_num] = 'drop_trim'
-                print(f"  [{option_num}] Drop trimming")
+                print(Colors.colorize(f"  [{option_num}] Drop trimming", ColorScheme.LIST))
             else:
                 option_num += 1
                 option_map[option_num] = 'add_trim'
-                print(f"  [{option_num}] Add trimming")
+                print(Colors.colorize(f"  [{option_num}] Add trimming", ColorScheme.LIST))
             
             # Manual split option - always available
             option_num += 1
@@ -5062,13 +5062,13 @@ class PaperProcessorDaemon:
             manual_split_ratio = preprocessing_state.get('manual_split_ratio')
             if manual_split_ratio:
                 option_map[option_num] = 'manual_split'
-                print(f"  [{option_num}] Split by manual definition ({manual_split_ratio:.0f}/{100-manual_split_ratio:.0f})")
+                print(Colors.colorize(f"  [{option_num}] Split by manual definition ({manual_split_ratio:.0f}/{100-manual_split_ratio:.0f})", ColorScheme.LIST))
             else:
                 option_map[option_num] = 'manual_split'
-                print(f"  [{option_num}] Split by manual definition (e.g., 55/45)")
+                print(Colors.colorize(f"  [{option_num}] Split by manual definition (e.g., 55/45)", ColorScheme.LIST))
             
-            print("  [z] Go back to metadata")
-            print("  [q] Quit - move to manual review")
+            print(Colors.colorize("  [z] Go back to metadata", ColorScheme.LIST))
+            print(Colors.colorize("  [q] Quit - move to manual review", ColorScheme.LIST))
             print()
             
             try:
@@ -5159,6 +5159,8 @@ class PaperProcessorDaemon:
                     
                     elif action == 'manual_split':
                         # Manual split definition
+                        # CRITICAL: Always use original_pdf for manual split, not processed_pdf
+                        # processed_pdf may already be split, which would give wrong dimensions
                         border_detection_stats = preprocessing_state.get('border_detection_stats')
                         
                         print("\n📐 Manual Split Definition")
@@ -5181,11 +5183,11 @@ class PaperProcessorDaemon:
                                     print(f"⚠️  Ratio must be between 30 and 70. You entered {ratio:.1f}")
                                     continue
                                 
-                                # Get page width from PDF
+                                # Get page width from ORIGINAL PDF (not processed_pdf which may be already split)
                                 try:
                                     import fitz  # PyMuPDF
-                                    doc = fitz.open(str(processed_pdf))
-                                    if len(doc.pages) == 0:
+                                    doc = fitz.open(str(original_pdf))
+                                    if len(doc) == 0:
                                         print("❌ Error: PDF has no pages")
                                         doc.close()
                                         break
@@ -5200,6 +5202,29 @@ class PaperProcessorDaemon:
                                     break
                                 
                                 # Calculate split point
+                                # #region agent log
+                                try:
+                                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                                    with open(log_path, 'a', encoding='utf-8') as f:
+                                        f.write(json.dumps({
+                                            'sessionId': 'debug-session',
+                                            'runId': 'run1',
+                                            'hypothesisId': 'A',
+                                            'location': 'paper_processor_daemon.py:manual_split',
+                                            'message': 'Before calculating split point',
+                                            'data': {
+                                                'ratio': float(ratio),
+                                                'page_width': float(page_width),
+                                                'has_border_stats': bool(border_detection_stats),
+                                                'original_pdf': str(original_pdf),
+                                                'original_pdf_exists': original_pdf.exists() if original_pdf else False,
+                                                'processed_pdf': str(processed_pdf),
+                                                'processed_pdf_is_split': '_split' in str(processed_pdf)
+                                            },
+                                            'timestamp': int(time.time() * 1000)
+                                        }) + '\n')
+                                except: pass
+                                # #endregion
                                 if border_detection_stats:
                                     avg_left = border_detection_stats.get('avg_left_border_px', 0)
                                     avg_right = border_detection_stats.get('avg_right_border_px', 0)
@@ -5215,18 +5240,126 @@ class PaperProcessorDaemon:
                                         manual_offset = (ratio - 50) / 100 * page_width
                                         split_x = content_center + manual_offset
                                         print(f"📊 Split point: {split_x:.1f} (content center: {content_center:.1f}, manual offset: {manual_offset:.1f})")
+                                        # #region agent log
+                                        try:
+                                            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                                            with open(log_path, 'a', encoding='utf-8') as f:
+                                                f.write(json.dumps({
+                                                    'sessionId': 'debug-session',
+                                                    'runId': 'run1',
+                                                    'hypothesisId': 'B',
+                                                    'location': 'paper_processor_daemon.py:manual_split',
+                                                    'message': 'Calculated split_x with border stats',
+                                                    'data': {
+                                                        'split_x': float(split_x),
+                                                        'page_width': float(page_width),
+                                                        'gutter_ratio': float(split_x / page_width) if page_width > 0 else 0.0,
+                                                        'content_center': float(content_center),
+                                                        'manual_offset': float(manual_offset),
+                                                        'left_border_pts': float(left_border_pts),
+                                                        'right_border_pts': float(right_border_pts),
+                                                        'avg_left_px': float(avg_left),
+                                                        'avg_right_px': float(avg_right),
+                                                        'page_width_px': float(page_width_px)
+                                                    },
+                                                    'timestamp': int(time.time() * 1000)
+                                                }) + '\n')
+                                        except: pass
+                                        # #endregion
                                     else:
                                         # Fallback to simple calculation
                                         split_x = page_width * (ratio / 100)
                                         print(f"📊 Split point: {split_x:.1f} (page width: {page_width:.1f}, ratio: {ratio}%)")
+                                        # #region agent log
+                                        try:
+                                            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                                            with open(log_path, 'a', encoding='utf-8') as f:
+                                                f.write(json.dumps({
+                                                    'sessionId': 'debug-session',
+                                                    'runId': 'run1',
+                                                    'hypothesisId': 'C',
+                                                    'location': 'paper_processor_daemon.py:manual_split',
+                                                    'message': 'Calculated split_x without border stats (page_width_px=0)',
+                                                    'data': {
+                                                        'split_x': float(split_x),
+                                                        'page_width': float(page_width),
+                                                        'gutter_ratio': float(split_x / page_width) if page_width > 0 else 0.0,
+                                                        'ratio': float(ratio)
+                                                    },
+                                                    'timestamp': int(time.time() * 1000)
+                                                }) + '\n')
+                                        except: pass
+                                        # #endregion
                                 else:
                                     # No borders detected, use simple calculation
                                     split_x = page_width * (ratio / 100)
                                     print(f"📊 Split point: {split_x:.1f} (page width: {page_width:.1f}, ratio: {ratio}%)")
+                                    # #region agent log
+                                    try:
+                                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                                        with open(log_path, 'a', encoding='utf-8') as f:
+                                            f.write(json.dumps({
+                                                'sessionId': 'debug-session',
+                                                'runId': 'run1',
+                                                'hypothesisId': 'D',
+                                                'location': 'paper_processor_daemon.py:manual_split',
+                                                'message': 'Calculated split_x without border stats (no stats)',
+                                                'data': {
+                                                    'split_x': float(split_x),
+                                                    'page_width': float(page_width),
+                                                    'gutter_ratio': float(split_x / page_width) if page_width > 0 else 0.0,
+                                                    'ratio': float(ratio)
+                                                },
+                                                'timestamp': int(time.time() * 1000)
+                                            }) + '\n')
+                                    except: pass
+                                    # #endregion
                                 
-                                # Perform split
+                                # Perform split on ORIGINAL PDF (not processed_pdf which may be already split)
                                 print("\n🔄 Performing manual split...")
-                                split_path = self._split_with_custom_gutter(processed_pdf, split_x)
+                                # #region agent log
+                                try:
+                                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                                    with open(log_path, 'a', encoding='utf-8') as f:
+                                        f.write(json.dumps({
+                                            'sessionId': 'debug-session',
+                                            'runId': 'run1',
+                                            'hypothesisId': 'E',
+                                            'location': 'paper_processor_daemon.py:manual_split',
+                                            'message': 'Before calling _split_with_custom_gutter',
+                                            'data': {
+                                                'original_pdf': str(original_pdf),
+                                                'processed_pdf': str(processed_pdf),
+                                                'using_original_for_split': True,
+                                                'split_x': float(split_x),
+                                                'page_width': float(page_width),
+                                                'gutter_ratio': float(split_x / page_width) if page_width > 0 else 0.0
+                                            },
+                                            'timestamp': int(time.time() * 1000)
+                                        }) + '\n')
+                                except: pass
+                                # #endregion
+                                split_path, error_msg = self._split_with_custom_gutter(original_pdf, split_x)
+                                # #region agent log
+                                try:
+                                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                                    with open(log_path, 'a', encoding='utf-8') as f:
+                                        f.write(json.dumps({
+                                            'sessionId': 'debug-session',
+                                            'runId': 'run1',
+                                            'hypothesisId': 'F',
+                                            'location': 'paper_processor_daemon.py:manual_split',
+                                            'message': 'After calling _split_with_custom_gutter',
+                                            'data': {
+                                                'split_path': str(split_path) if split_path else None,
+                                                'split_path_exists': split_path.exists() if split_path else False,
+                                                'split_succeeded': bool(split_path),
+                                                'error_msg': error_msg
+                                            },
+                                            'timestamp': int(time.time() * 1000)
+                                        }) + '\n')
+                                except: pass
+                                # #endregion
                                 
                                 if split_path:
                                     # Update preprocessing state
@@ -5238,7 +5371,10 @@ class PaperProcessorDaemon:
                                     processed_pdf = split_path
                                     print(f"✅ Manual split completed: {ratio:.0f}/{100-ratio:.0f}")
                                 else:
-                                    print("❌ Manual split failed")
+                                    if error_msg:
+                                        print(f"❌ Manual split failed: {error_msg}")
+                                    else:
+                                        print("❌ Manual split failed")
                                 
                                 break  # Exit ratio input loop
                             except ValueError:
@@ -5687,8 +5823,20 @@ class PaperProcessorDaemon:
                     # Reject as column edge if:
                     # 1. Sharp, narrow transition (high gradient AND narrow valley)
                     # 2. Very sharp corner (very high gradient AND high curvature)
-                    if (avg_gradient > 1000 and valley_width_ratio < 0.5) or \
-                       (max_gradient > 5000 and avg_second_deriv > 1000):
+                    # BUT: For physical book scans, gutters can have high gradients too
+                    # So we need to be more lenient - only reject if BOTH conditions are extreme
+                    # AND the position is near the edge (likely a column edge, not a gutter)
+                    # min_idx_ratio is already calculated above (line 5785)
+                    near_edge = min_idx_ratio < 0.2 or min_idx_ratio > 0.8
+                    
+                    # More lenient: Only reject if it's a sharp corner AND near edge (likely column edge)
+                    # OR if it's both sharp AND narrow AND near edge
+                    # For positions in the middle (20-80%), be more lenient - these are likely real gutters
+                    if near_edge and ((avg_gradient > 1000 and valley_width_ratio < 0.4) or \
+                       (max_gradient > 10000 and avg_second_deriv > 2000)):
+                        is_column_edge = True
+                    # Also reject if it's extremely sharp even in middle (likely column edge in two-column layout)
+                    elif not near_edge and max_gradient > 20000 and avg_second_deriv > 3000 and valley_width_ratio < 0.3:
                         is_column_edge = True
                     
                     # Accept as real gutter if:
@@ -5926,7 +6074,7 @@ class PaperProcessorDaemon:
         
         return is_valid, warnings
     
-    def _split_with_custom_gutter(self, pdf_path: Path, gutter_x: float) -> Optional[Path]:
+    def _split_with_custom_gutter(self, pdf_path: Path, gutter_x: float) -> Tuple[Optional[Path], Optional[str]]:
         """Split a two-up PDF at a custom X coordinate using PyMuPDF.
         
         Args:
@@ -5934,13 +6082,14 @@ class PaperProcessorDaemon:
             gutter_x: X coordinate in PDF points where to split
             
         Returns:
-            Path to split PDF or None if failed
+            Tuple of (Path to split PDF or None if failed, error message or None)
         """
         try:
             import fitz  # PyMuPDF
         except ImportError:
-            self.logger.warning("PyMuPDF not available for custom split")
-            return None
+            error_msg = "PyMuPDF not available for custom split"
+            self.logger.warning(error_msg)
+            return None, error_msg
         
         try:
             doc = fitz.open(str(pdf_path))
@@ -5966,7 +6115,7 @@ class PaperProcessorDaemon:
             # #endregion
             if len(doc) == 0:
                 doc.close()
-                return None
+                return None, "PDF has no pages"
             
             # Create new document for split pages
             new_doc = fitz.open()
@@ -5981,18 +6130,87 @@ class PaperProcessorDaemon:
                 # Validate gutter position is reasonable (30-70% of page width)
                 gutter_ratio = gutter_x / page_width
                 
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'G',
+                            'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                            'message': 'Validating gutter position',
+                            'data': {
+                                'page_num': page_num,
+                                'gutter_x': float(gutter_x),
+                                'page_width': float(page_width),
+                                'gutter_ratio': float(gutter_ratio),
+                                'ratio_valid': (0.3 <= gutter_ratio <= 0.7),
+                                'min_page_width': float(min(gutter_x, page_width - gutter_x)),
+                                'min_width_valid': (min(gutter_x, page_width - gutter_x) >= 0.3 * page_width)
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except: pass
+                # #endregion
+                
                 if gutter_ratio < 0.3 or gutter_ratio > 0.7:
-                    self.logger.warning(f"Gutter position {gutter_ratio:.1%} outside reasonable range (30-70%)")
+                    error_msg = f"Gutter position {gutter_ratio:.1%} outside reasonable range (30-70%). Calculated split at {gutter_x:.1f} points on page {page_num + 1} (page width: {page_width:.1f} points)."
+                    self.logger.warning(error_msg)
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'H',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Gutter ratio validation failed',
+                                'data': {
+                                    'page_num': page_num,
+                                    'gutter_ratio': float(gutter_ratio),
+                                    'gutter_x': float(gutter_x),
+                                    'page_width': float(page_width),
+                                    'reason': 'gutter_ratio_outside_30_70_percent'
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
                     doc.close()
                     new_doc.close()
-                    return None
+                    return None, error_msg
                 
                 min_page_width = min(gutter_x, page_width - gutter_x)
                 if min_page_width < 0.3 * page_width:
-                    self.logger.warning(f"Split would create page < 30% width")
+                    error_msg = f"Split would create a page < 30% width on page {page_num + 1}. Left page: {gutter_x:.1f} points ({gutter_x/page_width:.1%}), right page: {page_width - gutter_x:.1f} points ({(page_width - gutter_x)/page_width:.1%})."
+                    self.logger.warning(error_msg)
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'I',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Min page width validation failed',
+                                'data': {
+                                    'page_num': page_num,
+                                    'min_page_width': float(min_page_width),
+                                    'required_min': float(0.3 * page_width),
+                                    'gutter_x': float(gutter_x),
+                                    'page_width': float(page_width),
+                                    'reason': 'min_page_width_less_than_30_percent'
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
                     doc.close()
                     new_doc.close()
-                    return None
+                    return None, error_msg
                 
                 # #region agent log
                 try:
@@ -6030,6 +6248,35 @@ class PaperProcessorDaemon:
                 right_page = new_doc.new_page(width=page_width - gutter_x, height=page_height)
                 right_page.show_pdf_page(right_rect, doc, page_num, clip=right_rect)
                 pages_created += 2
+                
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    # Check content of both pages immediately after creation
+                    left_text = left_page.get_text()
+                    right_text = right_page.get_text()
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'K',
+                            'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                            'message': 'After creating left and right pages',
+                            'data': {
+                                'page_num': page_num,
+                                'left_page_idx': len(new_doc) - 2,
+                                'right_page_idx': len(new_doc) - 1,
+                                'left_text_length': len(left_text.strip()) if left_text else 0,
+                                'right_text_length': len(right_text.strip()) if right_text else 0,
+                                'gutter_x': float(gutter_x),
+                                'page_width': float(page_width),
+                                'left_page_width': float(gutter_x),
+                                'right_page_width': float(page_width - gutter_x)
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except: pass
+                # #endregion
             
             # Check if we have the expected number of pages (2 per original)
             expected_pages = len(doc) * 2
@@ -6109,6 +6356,31 @@ class PaperProcessorDaemon:
                     # 2. Very little image content (< 10% non-white pixels)
                     # CRITICAL: All pages are same size as original (not thin slices) - must check content density
                     is_empty = text_length < 50 and content_ratio < 0.1
+                    
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'L',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Empty page detection check',
+                                'data': {
+                                    'page_idx': page_idx,
+                                    'text_length': text_length,
+                                    'content_ratio': float(content_ratio),
+                                    'white_ratio': float(white_ratio),
+                                    'is_empty': is_empty,
+                                    'will_remove': is_empty,
+                                    'page_is_left': (page_idx % 2 == 0),  # Even indices are left pages
+                                    'page_is_right': (page_idx % 2 == 1)  # Odd indices are right pages
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
                     
                     if is_empty:
                         pages_to_remove.append(page_idx)
@@ -6193,11 +6465,32 @@ class PaperProcessorDaemon:
             doc.close()
             
             self.logger.info(f"Split PDF created with custom gutter: {out_path.name}")
-            return out_path
+            return out_path, None
             
         except Exception as e:
-            self.logger.error(f"Custom split failed: {e}")
-            return None
+            error_msg = f"Custom split failed: {e}"
+            self.logger.error(error_msg)
+            # #region agent log
+            try:
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'J',
+                        'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                        'message': 'Exception in _split_with_custom_gutter',
+                        'data': {
+                            'exception_type': type(e).__name__,
+                            'exception_message': str(e),
+                            'pdf_path': str(pdf_path),
+                            'gutter_x': float(gutter_x) if 'gutter_x' in locals() else None
+                        },
+                        'timestamp': int(time.time() * 1000)
+                    }) + '\n')
+            except: pass
+            # #endregion
+            return None, error_msg
     
     def _split_with_mutool(self, pdf_path: Path, width: Optional[float] = None, height: Optional[float] = None, split_method: str = 'auto', border_detection_stats: Optional[dict] = None) -> Optional[Path]:
         """Split a two-up PDF using intelligent gutter detection or geometric split as fallback.
@@ -6338,9 +6631,11 @@ class PaperProcessorDaemon:
                             return None
                 
                 # Use custom split at detected gutter
-                result = self._split_with_custom_gutter(pdf_path, gutter_x)
+                result, error_msg = self._split_with_custom_gutter(pdf_path, gutter_x)
                 if result:
                     return result
+                if error_msg:
+                    self.logger.warning(f"Custom split failed: {error_msg}")
                 # If custom split failed, fall through to geometric split
             
             # Fallback to geometric split (50/50 or content center)
@@ -6382,9 +6677,11 @@ class PaperProcessorDaemon:
                 self.logger.info(f"Using page center for split: {split_x:.1f}")
             
             # Always use _split_with_custom_gutter() for splitting
-            result = self._split_with_custom_gutter(pdf_path, split_x)
+            result, error_msg = self._split_with_custom_gutter(pdf_path, split_x)
             if result:
                 self.logger.info(f"Split PDF created (geometric): {result.name}")
+            elif error_msg:
+                self.logger.warning(f"Geometric split failed: {error_msg}")
             return result
         except FileNotFoundError:
             self.logger.warning("mutool not found; skipping two-up split")
@@ -6797,12 +7094,12 @@ class PaperProcessorDaemon:
             return pdf_path, False
         
         print("\n" + "=" * 70)
-        print("OPTIONAL: TRIM PAGES")
+        print(Colors.colorize("OPTIONAL: TRIM PAGES", ColorScheme.PAGE_TITLE))
         print("=" * 70)
-        print("Press Enter to keep the PDF exactly as it is.")
-        print("Enter a positive number to drop that many leading pages (e.g., '3' = drop first 3 pages).")
-        print("Enter a negative number to drop that many trailing pages (e.g., '-2' = drop last 2 pages).")
-        print("We'll show you a preview of the trimmed PDF before anything is changed.")
+        print(Colors.colorize("Press Enter to keep the PDF exactly as it is.", ColorScheme.ACTION))
+        print(Colors.colorize("Enter a positive number to drop that many leading pages (e.g., '3' = drop first 3 pages).", ColorScheme.ACTION))
+        print(Colors.colorize("Enter a negative number to drop that many trailing pages (e.g., '-2' = drop last 2 pages).", ColorScheme.ACTION))
+        print(Colors.colorize("We'll show you a preview of the trimmed PDF before anything is changed.", ColorScheme.ACTION))
         print("=" * 70)
         
         # Small delay to ensure user sees the prompt and any previous input is cleared
@@ -8134,16 +8431,16 @@ if ($hwnd -ne [IntPtr]::Zero) {{
     
     def _display_metadata_comparison(self, extracted: dict, zotero: dict):
         """Display side-by-side metadata comparison."""
-        print("\nEXTRACTED METADATA:")
+        print(Colors.colorize("\nEXTRACTED METADATA:", ColorScheme.PAGE_TITLE))
         print("-" * 30)
         self._display_metadata_universal(extracted)
         
-        print("\nZOTERO ITEM METADATA:")
+        print(Colors.colorize("\nZOTERO ITEM METADATA:", ColorScheme.PAGE_TITLE))
         print("-" * 30)
         self._display_metadata_universal(zotero)
         
         # Show key differences
-        print("\n🔍 KEY DIFFERENCES:")
+        print(Colors.colorize("\n🔍 KEY DIFFERENCES:", ColorScheme.ACTION))
         print("-" * 30)
         
         fields_to_compare = ['title', 'authors', 'year', 'journal', 'doi']
@@ -8165,14 +8462,14 @@ if ($hwnd -ne [IntPtr]::Zero) {{
     
     def _get_metadata_comparison_choice(self) -> str:
         """Present metadata comparison menu and get user input."""
-        print("\nWhat would you like to do?")
-        print("[1] Use extracted metadata (Replace in Zotero, but keep Zotero tags)")
-        print("[2] Use Zotero metadata as it is (Keep existing Zotero item unchanged)")
-        print("[3] Merge both (show field-by-field comparison)")
-        print("[4] Edit manually")
-        print("[5] 🔍 Search for more metadata online (CrossRef, arXiv, PubMed)")
-        print("[6] 📝 Manual processing later (too similar to decide)")
-        print("[7] 📄 Create new Zotero item from extracted metadata")
+        print(Colors.colorize("\nWhat would you like to do?", ColorScheme.ACTION))
+        print(Colors.colorize("[1] Use extracted metadata (Replace in Zotero, but keep Zotero tags)", ColorScheme.LIST))
+        print(Colors.colorize("[2] Use Zotero metadata as it is (Keep existing Zotero item unchanged)", ColorScheme.LIST))
+        print(Colors.colorize("[3] Merge both (show field-by-field comparison)", ColorScheme.LIST))
+        print(Colors.colorize("[4] Edit manually", ColorScheme.LIST))
+        print(Colors.colorize("[5] 🔍 Search for more metadata online (CrossRef, arXiv, PubMed)", ColorScheme.LIST))
+        print(Colors.colorize("[6] 📝 Manual processing later (too similar to decide)", ColorScheme.LIST))
+        print(Colors.colorize("[7] 📄 Create new Zotero item from extracted metadata", ColorScheme.LIST))
         print()
         
         while True:
@@ -8215,7 +8512,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
     
     def _merge_metadata_sources(self, extracted: dict, zotero: dict) -> dict:
         """Merge metadata from both sources with field-by-field comparison."""
-        print("\n🔀 FIELD-BY-FIELD MERGE")
+        print(Colors.colorize("\n🔀 FIELD-BY-FIELD MERGE", ColorScheme.PAGE_TITLE))
         print("=" * 40)
         
         merged = {}
@@ -8286,21 +8583,21 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         print(Colors.colorize("🌐 ONLINE METADATA FOUND", ColorScheme.PAGE_TITLE))
         print("="*60)
         
-        print("\nExtracted (from scan):")
+        print(Colors.colorize("\nExtracted (from scan):", ColorScheme.ACTION))
         self._display_metadata_universal(extracted)
         
-        print("\nZotero (existing item):")
+        print(Colors.colorize("\nZotero (existing item):", ColorScheme.ACTION))
         self._display_metadata_universal(zotero)
         
-        print("\nOnline (CrossRef/arXiv/etc):")
+        print(Colors.colorize("\nOnline (CrossRef/arXiv/etc):", ColorScheme.ACTION))
         self._display_metadata_universal(online_metadata)
         
-        print("\nWhich metadata to use?")
-        print("[1] Use online metadata")
-        print("[2] Use online + merge with Zotero")
-        print("[3] Use online + merge with extracted")
-        print("[4] Edit manually with online as reference")
-        print("[5] Cancel (use Zotero metadata)")
+        print(Colors.colorize("\nWhich metadata to use?", ColorScheme.ACTION))
+        print(Colors.colorize("[1] Use online metadata", ColorScheme.LIST))
+        print(Colors.colorize("[2] Use online + merge with Zotero", ColorScheme.LIST))
+        print(Colors.colorize("[3] Use online + merge with extracted", ColorScheme.LIST))
+        print(Colors.colorize("[4] Edit manually with online as reference", ColorScheme.LIST))
+        print(Colors.colorize("[5] Cancel (use Zotero metadata)", ColorScheme.LIST))
         print()
         
         while True:
@@ -8342,7 +8639,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         item_title = zotero_item.get('title', 'Unknown')
         item_key = zotero_item.get('key')
         
-        print(f"\n📎 PROCESSING: {item_title}")
+        print(Colors.colorize(f"\n📎 PROCESSING: {item_title}", ColorScheme.PAGE_TITLE))
         print("=" * 60)
         
         # STEP 1: Metadata Comparison
@@ -8437,11 +8734,11 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             except Exception as e:
                 self.logger.debug(f"Enhanced comparison failed: {e}")
             
-            print("What would you like to do?")
-            print("[1] Keep both (add scanned version)")
-            print("[2] Replace existing PDF with scan")
-            print("[3] Skip attaching and finish")
-            print("  (z) Cancel (keep original)")
+            print(Colors.colorize("What would you like to do?", ColorScheme.ACTION))
+            print(Colors.colorize("[1] Keep both (add scanned version)", ColorScheme.LIST))
+            print(Colors.colorize("[2] Replace existing PDF with scan", ColorScheme.LIST))
+            print(Colors.colorize("[3] Skip attaching and finish", ColorScheme.LIST))
+            print(Colors.colorize("  (z) Cancel (keep original)", ColorScheme.LIST))
             print()
             
             pdf_choice = input("Enter your choice: ").strip().lower()
@@ -8713,7 +9010,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         while True:
             # Clear screen output area (reprint the header each time)
-            print("\n🔍 Search for item in Zotero by selecting authors:")
+            print(Colors.colorize("\n🔍 Search for item in Zotero by selecting authors:", ColorScheme.ACTION))
             
             # Rebuild author_map each iteration (in case authors were edited)
             author_map = {}
@@ -9062,7 +9359,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         enhanced_metadata = extracted_metadata.copy()
         
         # Prompt for fields (allow override if already present)
-        print("Enter or correct information (press Enter to keep existing or skip):")
+        print(Colors.colorize("Enter or correct information (press Enter to keep existing or skip):", ColorScheme.ACTION))
         print()
         
         # Title
@@ -9084,9 +9381,9 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             if current_authors:
                 # Use semicolons to separate author names (since names may contain commas)
                 print(f"\nCurrent authors: {'; '.join(current_authors)}")
-                print("Enter authors (one per line, empty line to keep current):")
+                print(Colors.colorize("Enter authors (one per line, empty line to keep current):", ColorScheme.ACTION))
             else:
-                print("\nEnter authors (one per line, empty line to finish):")
+                print(Colors.colorize("\nEnter authors (one per line, empty line to finish):", ColorScheme.ACTION))
             authors = []
             while True:
                 try:
@@ -10062,7 +10359,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         """
         
         print("\n" + "="*60)
-        print("📄 CREATE NEW ZOTERO ITEM")
+        print(Colors.colorize("📄 CREATE NEW ZOTERO ITEM", ColorScheme.PAGE_TITLE))
         print("="*60)
         
         # Step 1: Quick manual entry
@@ -10075,8 +10372,8 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         # Step 2: Search online libraries (optional)
         print(Colors.colorize("\n🌐 Step 2: Online Library Search (Optional)", ColorScheme.PAGE_TITLE))
-        print("This step searches CrossRef and arXiv to enrich metadata from online sources.")
-        print("You can skip this if your manual entry is complete.")
+        print(Colors.colorize("This step searches CrossRef and arXiv to enrich metadata from online sources.", ColorScheme.ACTION))
+        print(Colors.colorize("You can skip this if your manual entry is complete.", ColorScheme.ACTION))
         print()
         
         while True:
@@ -10103,19 +10400,19 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         if online_metadata:
             # Show comparison and let user choose
-            print("\nComparing metadata:")
+            print(Colors.colorize("\nComparing metadata:", ColorScheme.ACTION))
             print("-" * 40)
-            print("Manual + Extracted:")
+            print(Colors.colorize("Manual + Extracted:", ColorScheme.ACTION))
             self._display_metadata_universal(combined_metadata)
-            print("\nOnline Library:")
+            print(Colors.colorize("\nOnline Library:", ColorScheme.ACTION))
             self._display_metadata_universal(online_metadata)
             print()
             
-            print("Which metadata to use?")
-            print("[1] Use manual/extracted metadata")
-            print("[2] Use online library metadata")
-            print("[3] Merge both (field-by-field)")
-            print("[4] Edit manually")
+            print(Colors.colorize("Which metadata to use?", ColorScheme.ACTION))
+            print(Colors.colorize("[1] Use manual/extracted metadata", ColorScheme.LIST))
+            print(Colors.colorize("[2] Use online library metadata", ColorScheme.LIST))
+            print(Colors.colorize("[3] Merge both (field-by-field)", ColorScheme.LIST))
+            print(Colors.colorize("[4] Edit manually", ColorScheme.LIST))
             print()
             
             choice = input("Enter your choice: ").strip()
