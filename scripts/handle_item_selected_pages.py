@@ -91,9 +91,19 @@ def create_review_and_proceed_page(daemon) -> Page:
             if 'authors' in missing_fields:
                 zotero_authors = ['Unknown_Author']
         
-        # Build metadata using ONLY Zotero data
+        # Check for filename title override (set in filename_title_override page or edit_metadata)
+        filename_title_override = ctx.get('filename_title_override')
+        if not filename_title_override:
+            # Also check metadata for override (from edit_metadata_interactively)
+            metadata = ctx.get('metadata', {})
+            filename_title_override = metadata.get('_filename_title_override')
+        
+        # Use override title if present, otherwise use Zotero title
+        title_for_filename = filename_title_override if filename_title_override else zotero_title
+        
+        # Build metadata using title for filename (override or Zotero title)
         merged_metadata = {
-            'title': zotero_title,
+            'title': title_for_filename,
             'authors': zotero_authors,
             'year': zotero_year if zotero_year else 'Unknown',
             'document_type': zotero_item_type
@@ -157,6 +167,14 @@ def create_review_and_proceed_page(daemon) -> Page:
         # Store merged metadata for _process_selected_item (preserving original extracted metadata in ctx['metadata'])
         ctx['merged_metadata'] = merged_metadata
         
+        # Check if titles differ - if so, show filename override page
+        metadata = ctx.get('metadata', {})
+        metadata_title = metadata.get('title', '').strip()
+        if metadata_title and metadata_title != zotero_title:
+            # Titles differ - navigate to filename override page
+            return NavigationResult.show_page('filename_title_override')
+        
+        # Titles are the same - proceed directly to proposed actions
         # Show what authors will be used in filename
         if zotero_authors:
             author_display = '_'.join([a.split()[-1] if ' ' in a else a for a in zotero_authors[:2]])
@@ -435,9 +453,19 @@ def create_proceed_after_edit_page(daemon) -> Page:
                 if 'authors' in missing_fields:
                     zotero_authors = ['Unknown_Author']
         
-        # Build metadata using ONLY Zotero data
+        # Check for filename title override (set in filename_title_override page or edit_metadata)
+        filename_title_override = ctx.get('filename_title_override')
+        if not filename_title_override:
+            # Also check metadata for override (from edit_metadata_interactively)
+            original_extracted_metadata = ctx.get('metadata', {})
+            filename_title_override = original_extracted_metadata.get('_filename_title_override')
+        
+        # Use override title if present, otherwise use Zotero title
+        title_for_filename = filename_title_override if filename_title_override else zotero_title
+        
+        # Build metadata using title for filename (override or Zotero title)
         merged_metadata = {
-            'title': zotero_title,
+            'title': title_for_filename,
             'authors': zotero_authors,
             'year': zotero_year if zotero_year else 'Unknown',
             'document_type': zotero_item_type
@@ -501,6 +529,190 @@ def create_proceed_after_edit_page(daemon) -> Page:
         },
         default='y',
         back_page='edit_tags',  # Go back to tag editing if user presses 'z'
+        quit_action=quit_action
+    )
+
+
+def create_filename_title_override_page(daemon) -> Page:
+    """Create FILENAME TITLE OVERRIDE page.
+    
+    Allows user to choose which title to use for the PDF filename when
+    Zotero item title and extracted metadata title differ.
+    """
+    def content(ctx):
+        selected_item = ctx['selected_item']
+        metadata = ctx.get('metadata', {})
+        
+        zotero_title = selected_item.get('title', '').strip()
+        metadata_title = metadata.get('title', '').strip()
+        
+        lines = [
+            "📄 FILENAME TITLE",
+            "",
+            f"Zotero item title: {zotero_title}",
+        ]
+        
+        if metadata_title and metadata_title != zotero_title:
+            lines.append(f"Metadata title:     {metadata_title}")
+            lines.append("")
+            lines.append("The PDF filename can use either title, or a custom title.")
+        else:
+            lines.append("")
+            lines.append("You can use the Zotero title or enter a custom title for the filename.")
+        
+        # Show filename previews
+        filename_gen = FilenameGenerator()
+        zotero_authors = selected_item.get('authors', [])
+        zotero_year = selected_item.get('year', selected_item.get('date', ''))
+        zotero_item_type = selected_item.get('itemType', 'journalArticle')
+        
+        # Preview with Zotero title
+        metadata_zotero = {
+            'title': zotero_title,
+            'authors': zotero_authors,
+            'year': zotero_year if zotero_year else 'Unknown',
+            'document_type': zotero_item_type
+        }
+        filename_zotero = filename_gen.generate(metadata_zotero, is_scan=True) + '.pdf'
+        lines.append(f"  With Zotero title:  {filename_zotero}")
+        
+        if metadata_title and metadata_title != zotero_title:
+            # Preview with metadata title
+            metadata_meta = {
+                'title': metadata_title,
+                'authors': zotero_authors,
+                'year': zotero_year if zotero_year else 'Unknown',
+                'document_type': zotero_item_type
+            }
+            filename_meta = filename_gen.generate(metadata_meta, is_scan=True) + '.pdf'
+            lines.append(f"  With metadata title: {filename_meta}")
+        
+        lines.extend([
+            "",
+            "  (z/Enter) Use Zotero title (default)",
+        ])
+        
+        if metadata_title and metadata_title != zotero_title:
+            lines.append("  (m) Use metadata title")
+        
+        lines.extend([
+            "  (c) Enter custom title",
+            "  (q) Quit - move to manual review"
+        ])
+        
+        return lines
+    
+    def handler_z(ctx):
+        """Use Zotero title - proceed to proposed actions."""
+        # Don't set override - will use Zotero title by default
+        return NavigationResult.show_page('proposed_actions')
+    
+    def handler_m(ctx):
+        """Use metadata title for filename."""
+        daemon = ctx['daemon']
+        selected_item = ctx['selected_item']
+        metadata = ctx.get('metadata', {})
+        
+        metadata_title = metadata.get('title', '').strip()
+        zotero_title = selected_item.get('title', '').strip()
+        
+        # Check if metadata title is available and differs from Zotero title
+        if not metadata_title:
+            print("⚠️  No metadata title available. Using Zotero title instead.")
+            return NavigationResult.show_page('proposed_actions')
+        
+        if metadata_title == zotero_title:
+            print("ℹ️  Metadata title is the same as Zotero title. Using Zotero title.")
+            return NavigationResult.show_page('proposed_actions')
+        
+        # Store override in context
+        ctx['filename_title_override'] = metadata_title
+        
+        # Regenerate filename with metadata title
+        zotero_authors = selected_item.get('authors', [])
+        zotero_year = selected_item.get('year', selected_item.get('date', ''))
+        zotero_item_type = selected_item.get('itemType', 'journalArticle')
+        
+        filename_gen = FilenameGenerator()
+        merged_metadata = {
+            'title': metadata_title,
+            'authors': zotero_authors,
+            'year': zotero_year if zotero_year else 'Unknown',
+            'document_type': zotero_item_type
+        }
+        target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
+        ctx['target_filename'] = target_filename
+        ctx['merged_metadata'] = merged_metadata
+        
+        print(f"✅ Will use metadata title for filename: {metadata_title}")
+        return NavigationResult.show_page('proposed_actions')
+    
+    def handler_c(ctx):
+        """Enter custom title for filename."""
+        daemon = ctx['daemon']
+        selected_item = ctx['selected_item']
+        
+        print("\n📝 Enter custom title for PDF filename:")
+        custom_title = input("Custom title: ").strip()
+        
+        if not custom_title:
+            print("⚠️  Custom title cannot be empty. Using Zotero title instead.")
+            return NavigationResult.show_page('proposed_actions')
+        
+        # Store override in context
+        ctx['filename_title_override'] = custom_title
+        
+        # Regenerate filename with custom title
+        zotero_authors = selected_item.get('authors', [])
+        zotero_year = selected_item.get('year', selected_item.get('date', ''))
+        zotero_item_type = selected_item.get('itemType', 'journalArticle')
+        
+        filename_gen = FilenameGenerator()
+        merged_metadata = {
+            'title': custom_title,
+            'authors': zotero_authors,
+            'year': zotero_year if zotero_year else 'Unknown',
+            'document_type': zotero_item_type
+        }
+        target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
+        ctx['target_filename'] = target_filename
+        ctx['merged_metadata'] = merged_metadata
+        
+        print(f"✅ Will use custom title for filename: {custom_title}")
+        return NavigationResult.show_page('proposed_actions')
+    
+    def quit_action(ctx):
+        """Quit - move to manual review."""
+        daemon = ctx['daemon']
+        daemon.move_to_manual_review(ctx['pdf_path'])
+        return NavigationResult.quit_scan(move_to_manual=True)
+    
+    # Determine valid inputs based on whether metadata title differs
+    def get_valid_inputs(ctx):
+        metadata = ctx.get('metadata', {})
+        zotero_title = ctx['selected_item'].get('title', '').strip()
+        metadata_title = metadata.get('title', '').strip()
+        
+        if metadata_title and metadata_title != zotero_title:
+            return ['z', 'm', 'c', 'q']
+        else:
+            return ['z', 'c', 'q']
+    
+    # Create page with dynamic valid inputs
+    # We'll use a lambda to get valid inputs from context
+    return Page(
+        page_id='filename_title_override',
+        title='📄 FILENAME TITLE',
+        content=content,
+        prompt='\nChoose filename title [z/m/c/q]: ',
+        valid_inputs=['z', 'm', 'c', 'q'],  # Will handle 'm' gracefully if not applicable
+        handlers={
+            'z': handler_z,
+            'm': handler_m,
+            'c': handler_c
+        },
+        default='z',
+        back_page='review_and_proceed',
         quit_action=quit_action
     )
 
@@ -660,7 +872,13 @@ def create_pdf_preview_page(daemon) -> Page:
         split_attempted = preprocessing_state.get('split_attempted', False)
         
         # Determine split status
-        if split_method == 'auto' and split_attempted:
+        if split_method == 'manual' and split_attempted:
+            manual_ratio = preprocessing_state.get('manual_split_ratio')
+            if manual_ratio:
+                split_status = f"✓ Applied (manual {manual_ratio:.0f}/{100-manual_ratio:.0f})"
+            else:
+                split_status = "✓ Applied (manual)"
+        elif split_method == 'auto' and split_attempted:
             split_status = "✓ Applied (gutter detection)"
         elif split_method == '50-50' and split_attempted:
             split_status = "✓ Applied (50/50 geometric)"
@@ -709,6 +927,15 @@ def create_pdf_preview_page(daemon) -> Page:
             option_num += 1
             lines.append(f"  [{option_num}] Add trimming")
         
+        # Manual split option - always available
+        option_num += 1
+        manual_split_option_num = option_num
+        manual_split_ratio = preprocessing_state.get('manual_split_ratio')
+        if manual_split_ratio:
+            lines.append(f"  [{option_num}] Split by manual definition ({manual_split_ratio:.0f}/{100-manual_split_ratio:.0f})")
+        else:
+            lines.append(f"  [{option_num}] Split by manual definition (e.g., 55/45)")
+        
         lines.append("  [z] Go back to proposed actions")
         lines.append("  [q] Quit - move to manual review")
         
@@ -743,6 +970,8 @@ def create_pdf_preview_page(daemon) -> Page:
                 return _handle_drop_trimming(ctx, daemon)
             elif action == 'add_trim':
                 return _handle_add_trimming(ctx, daemon)
+            elif action == 'manual_split':
+                return _handle_manual_split(ctx, daemon)
             else:
                 print("⚠️  Invalid choice.")
                 return NavigationResult.show_page('pdf_preview')
@@ -752,6 +981,7 @@ def create_pdf_preview_page(daemon) -> Page:
     handler_3 = make_handler(3)
     handler_4 = make_handler(4)
     handler_5 = make_handler(5)
+    handler_6 = make_handler(6)
     
     def handler_z(ctx):
         """Go back to PROPOSED ACTIONS."""
@@ -771,13 +1001,14 @@ def create_pdf_preview_page(daemon) -> Page:
         title='PDF PREVIEW',
         content=content,
         prompt='\nEnter your choice: ',
-        valid_inputs=['1', '2', '3', '4', '5', 'z', 'q'],
+        valid_inputs=['1', '2', '3', '4', '5', '6', 'z', 'q'],
         handlers={
             '1': handler_1,
             '2': handler_2,
             '3': handler_3,
             '4': handler_4,
             '5': handler_5,
+            '6': handler_6,
             'z': handler_z
         },
         default='1',
@@ -790,7 +1021,7 @@ def create_pdf_preview_page(daemon) -> Page:
 def _get_pdf_preview_option_action(option_num: int, preprocessing_state: dict) -> str:
     """Determine what action corresponds to an option number based on current state.
     
-    Returns: 'accept', 'drop_border', 'drop_split', 'use_5050', 'drop_trim', 'add_trim', or None
+    Returns: 'accept', 'drop_border', 'drop_split', 'use_5050', 'drop_trim', 'add_trim', 'manual_split', or None
     """
     if option_num == 1:
         return 'accept'
@@ -819,6 +1050,11 @@ def _get_pdf_preview_option_action(option_num: int, preprocessing_state: dict) -
             return 'drop_trim'
         else:
             return 'add_trim'
+    
+    # Manual split option - always available
+    option_count += 1
+    if option_count == option_num:
+        return 'manual_split'
     
     return None
 
@@ -916,6 +1152,104 @@ def _handle_add_trimming(ctx, daemon):
     return NavigationResult.show_page('pdf_preview')
 
 
+def _handle_manual_split(ctx, daemon):
+    """Handler for manual split definition - prompt for ratio and perform split."""
+    original_pdf = ctx['pdf_path']
+    preprocessing_state = ctx.get('preprocessing_state', {}).copy()
+    border_detection_stats = preprocessing_state.get('border_detection_stats')
+    
+    print("\n📐 Manual Split Definition")
+    print("=" * 60)
+    print("Enter the split ratio as a single number (e.g., 55 for 55/45 split).")
+    print("The number represents the percentage for the left page.")
+    print("Valid range: 30-70 (to ensure reasonable split)")
+    
+    while True:
+        try:
+            ratio_input = input("\nEnter split ratio (30-70, or 'c' to cancel): ").strip().lower()
+            
+            if ratio_input == 'c':
+                print("Cancelled manual split")
+                return NavigationResult.show_page('pdf_preview')
+            
+            ratio = float(ratio_input)
+            
+            if ratio < 30 or ratio > 70:
+                print(f"⚠️  Ratio must be between 30 and 70. You entered {ratio:.1f}")
+                continue
+            
+            break
+        except ValueError:
+            print("⚠️  Please enter a valid number between 30 and 70")
+        except (KeyboardInterrupt, EOFError):
+            print("\n❌ Cancelled")
+            return NavigationResult.show_page('pdf_preview')
+    
+    # Get page width from PDF
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(str(original_pdf))
+        if len(doc.pages) == 0:
+            print("❌ Error: PDF has no pages")
+            doc.close()
+            return NavigationResult.show_page('pdf_preview')
+        
+        page_width = doc[0].rect.width
+        doc.close()
+    except ImportError:
+        print("❌ Error: PyMuPDF not available")
+        return NavigationResult.show_page('pdf_preview')
+    except Exception as e:
+        print(f"❌ Error reading PDF: {e}")
+        return NavigationResult.show_page('pdf_preview')
+    
+    # Calculate split point
+    if border_detection_stats:
+        avg_left = border_detection_stats.get('avg_left_border_px', 0)
+        avg_right = border_detection_stats.get('avg_right_border_px', 0)
+        page_width_px = border_detection_stats.get('page_width_px', 0)
+        
+        if page_width_px > 0:
+            # Convert borders to PDF points
+            left_border_pts = (avg_left / page_width_px) * page_width
+            right_border_pts = (avg_right / page_width_px) * page_width
+            
+            # Calculate content center and manual offset
+            content_center = page_width / 2 + (left_border_pts - right_border_pts) / 2
+            manual_offset = (ratio - 50) / 100 * page_width
+            split_x = content_center + manual_offset
+            print(f"📊 Split point: {split_x:.1f} (content center: {content_center:.1f}, manual offset: {manual_offset:.1f})")
+        else:
+            # Fallback to simple calculation
+            split_x = page_width * (ratio / 100)
+            print(f"📊 Split point: {split_x:.1f} (page width: {page_width:.1f}, ratio: {ratio}%)")
+    else:
+        # No borders detected, use simple calculation
+        split_x = page_width * (ratio / 100)
+        print(f"📊 Split point: {split_x:.1f} (page width: {page_width:.1f}, ratio: {ratio}%)")
+    
+    # Perform split
+    print("\n🔄 Performing manual split...")
+    split_path = daemon._split_with_custom_gutter(original_pdf, split_x)
+    
+    if split_path:
+        # Update preprocessing state
+        preprocessing_state['split_method'] = 'manual'
+        preprocessing_state['split_attempted'] = True
+        preprocessing_state['manual_split_ratio'] = ratio
+        preprocessing_state['border_detection_stats'] = border_detection_stats  # Preserve border stats
+        
+        ctx['processed_pdf'] = split_path
+        ctx['preprocessing_state'] = preprocessing_state
+        ctx['original_pdf'] = original_pdf
+        
+        print(f"✅ Manual split completed: {ratio:.0f}/{100-ratio:.0f}")
+        return NavigationResult.show_page('pdf_preview')
+    else:
+        print("❌ Manual split failed")
+        return NavigationResult.show_page('pdf_preview')
+
+
 def create_note_input_page(daemon) -> Page:
     """Create NOTE INPUT page.
     
@@ -979,6 +1313,7 @@ def create_all_pages(daemon) -> Dict[str, Page]:
         'review_and_proceed': create_review_and_proceed_page(daemon),
         'edit_tags': create_edit_tags_page(daemon),
         'proceed_after_edit': create_proceed_after_edit_page(daemon),
+        'filename_title_override': create_filename_title_override_page(daemon),
         'proposed_actions': create_proposed_actions_page(daemon),
         'pdf_preview': create_pdf_preview_page(daemon),
         'note_prompt': create_note_prompt_page(daemon),
