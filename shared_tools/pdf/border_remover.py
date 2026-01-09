@@ -1273,6 +1273,182 @@ class BorderRemover:
         
         return result
     
+    def detect_borders_optimized(
+        self, 
+        pdf_path: Path, 
+        sample_pages: int = 3,
+        use_content_detector: bool = True
+    ) -> Dict[str, Any]:
+        """Detect borders with optimization: calculate first 3 pages, check variation.
+        
+        If variation > 15%: calculate borders for all pages
+        If variation ≤ 15%: use consistent borders for all pages
+        Selection: Use value that gives maximum text content area + 10% buffer (not average)
+        
+        Args:
+            pdf_path: Path to PDF file
+            sample_pages: Number of pages to check initially (default: 3)
+            use_content_detector: If True, use ContentDetector for content-aware detection
+            
+        Returns:
+            Dict with:
+                - 'borders': Dict with 'top', 'bottom', 'left', 'right' (consistent or per-page)
+                - 'method': 'consistent' or 'per_page'
+                - 'variation': Coefficient of variation for each side
+                - 'pages_checked': Number of pages actually checked
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            self.logger.error("PyMuPDF not available for optimized border detection")
+            return {'borders': {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}, 'method': 'consistent', 'variation': {}, 'pages_checked': 0}
+        
+        try:
+            doc = fitz.open(str(pdf_path))
+            total_pages = len(doc)
+            if total_pages == 0:
+                doc.close()
+                return {'borders': {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}, 'method': 'consistent', 'variation': {}, 'pages_checked': 0}
+            
+            # Calculate borders for first 3 pages (or all if < 3 pages)
+            pages_to_check = min(sample_pages, total_pages)
+            border_values = {'top': [], 'bottom': [], 'left': [], 'right': []}
+            
+            for page_num in range(pages_to_check):
+                try:
+                    page = doc[page_num]
+                    zoom = 2.0
+                    mat = fitz.Matrix(zoom, zoom)
+                    pix = page.get_pixmap(matrix=mat, alpha=False)
+                    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
+                    
+                    # Convert to grayscale
+                    if len(img.shape) == 3:
+                        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                    else:
+                        gray = img
+                    
+                    # Detect borders
+                    borders = self.detect_borders(gray)
+                    border_values['top'].append(borders.get('top', 0))
+                    border_values['bottom'].append(borders.get('bottom', 0))
+                    border_values['left'].append(borders.get('left', 0))
+                    border_values['right'].append(borders.get('right', 0))
+                except Exception as e:
+                    self.logger.debug(f"Error detecting borders on page {page_num + 1}: {e}")
+                    continue
+            
+            doc.close()
+            
+            if not any(border_values.values()):
+                # No borders detected on any page
+                return {'borders': {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}, 'method': 'consistent', 'variation': {}, 'pages_checked': pages_to_check}
+            
+            # Calculate variation for each border side
+            variation = {}
+            for side in ['top', 'bottom', 'left', 'right']:
+                values = border_values[side]
+                if not values or all(v == 0 for v in values):
+                    variation[side] = 0.0
+                else:
+                    # Filter out zeros for variation calculation
+                    non_zero_values = [v for v in values if v > 0]
+                    if len(non_zero_values) > 1:
+                        mean_val = np.mean(non_zero_values)
+                        std_val = np.std(non_zero_values)
+                        cv = std_val / (mean_val + 1e-6)  # Coefficient of variation
+                        variation[side] = cv
+                    else:
+                        variation[side] = 0.0
+            
+            # Check if any side has variation > 15%
+            max_variation = max(variation.values()) if variation else 0.0
+            needs_per_page = max_variation > 0.15
+            
+            if needs_per_page:
+                # Large variation: calculate borders for all pages
+                self.logger.info(f"Border variation detected (max CV: {max_variation:.1%}) - calculating borders for all {total_pages} pages")
+                doc = fitz.open(str(pdf_path))
+                all_border_values = {'top': [], 'bottom': [], 'left': [], 'right': []}
+                
+                for page_num in range(total_pages):
+                    try:
+                        page = doc[page_num]
+                        zoom = 2.0
+                        mat = fitz.Matrix(zoom, zoom)
+                        pix = page.get_pixmap(matrix=mat, alpha=False)
+                        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
+                        
+                        if len(img.shape) == 3:
+                            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                        else:
+                            gray = img
+                        
+                        borders = self.detect_borders(gray)
+                        all_border_values['top'].append(borders.get('top', 0))
+                        all_border_values['bottom'].append(borders.get('bottom', 0))
+                        all_border_values['left'].append(borders.get('left', 0))
+                        all_border_values['right'].append(borders.get('right', 0))
+                    except Exception as e:
+                        self.logger.debug(f"Error detecting borders on page {page_num + 1}: {e}")
+                        # Use zeros if detection fails
+                        all_border_values['top'].append(0)
+                        all_border_values['bottom'].append(0)
+                        all_border_values['left'].append(0)
+                        all_border_values['right'].append(0)
+                
+                doc.close()
+                
+                # Select values that maximize content area + 10% buffer
+                # For each side, choose minimum value (removes most border, maximizes content)
+                # Then apply 10% buffer: final_value = min_value * 0.9 (move edge further out, more conservative)
+                final_borders = {}
+                for side in ['top', 'bottom', 'left', 'right']:
+                    values = all_border_values[side]
+                    non_zero_values = [v for v in values if v > 0]
+                    if non_zero_values:
+                        min_value = min(non_zero_values)
+                        # Apply 10% buffer: move edge further out (more conservative)
+                        final_borders[side] = int(min_value * 0.9)
+                    else:
+                        final_borders[side] = 0
+                
+                return {
+                    'borders': final_borders,
+                    'method': 'per_page_max_content',
+                    'variation': variation,
+                    'pages_checked': total_pages,
+                    'per_page_borders': all_border_values  # Store per-page for reference
+                }
+            else:
+                # Small variation: use consistent borders for all pages
+                self.logger.info(f"Border variation is low (max CV: {max_variation:.1%}) - using consistent borders for all pages")
+                
+                # Select values that maximize content area + 10% buffer
+                # For each side, choose minimum value (removes most border, maximizes content)
+                # Then apply 10% buffer: final_value = min_value * 0.9
+                final_borders = {}
+                for side in ['top', 'bottom', 'left', 'right']:
+                    values = border_values[side]
+                    non_zero_values = [v for v in values if v > 0]
+                    if non_zero_values:
+                        min_value = min(non_zero_values)
+                        # Apply 10% buffer: move edge further out (more conservative)
+                        final_borders[side] = int(min_value * 0.9)
+                    else:
+                        final_borders[side] = 0
+                
+                return {
+                    'borders': final_borders,
+                    'method': 'consistent_max_content',
+                    'variation': variation,
+                    'pages_checked': pages_to_check
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Error in optimized border detection: {e}")
+            return {'borders': {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}, 'method': 'consistent', 'variation': {}, 'pages_checked': 0}
+    
     def process_pdf_page(self, pdf_path: Path, page_num: int, 
                         zoom: float = 2.0, debug: bool = False) -> Tuple[np.ndarray, Dict[str, int]]:
         """Process a single PDF page.

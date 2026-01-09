@@ -98,6 +98,10 @@ class PaperProcessorDaemon:
         # Note: border_max_width is set in load_config() which is called before this
         self.border_remover = BorderRemover({'max_border_width': self.border_max_width})
         
+        # Initialize content detector (for content-aware border removal and gutter detection)
+        from shared_tools.pdf.content_detector import ContentDetector
+        self.content_detector = ContentDetector()
+        
         # Initialize service manager (replaces direct service management)
         print("🚀 Initializing services...")
         self.service_manager = ServiceManager(self.config, logger=self.logger)
@@ -5464,557 +5468,191 @@ class PaperProcessorDaemon:
             return (False, 0.0, 'none')
     
     def _find_gutter_position(self, pdf_path: Path, sample_pages: int = 3) -> Optional[Dict]:
-        """Find the actual gutter position between two pages using image analysis.
+        """Find the actual gutter position between two pages using content-aware detection.
         
-        Uses vertical projection profile to find the column with minimum content density.
-        Accounts for dark borders by detecting them first.
+        Uses binary search edge detection to find gap between text columns.
+        Returns per-page gutter positions to handle variation.
         
         Args:
             pdf_path: Path to PDF file (should already have borders removed)
             sample_pages: Number of pages to analyze for consistency
             
         Returns:
-            X coordinate of gutter in PDF points, or None if detection fails
+            Dict with per-page gutter positions, or None if detection fails
         """
-        # #region agent log
-        try:
-            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-            with open(log_path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps({
-                    'sessionId': 'debug-session',
-                    'runId': 'run1',
-                    'hypothesisId': 'G',
-                    'location': 'paper_processor_daemon.py:_find_gutter_position',
-                    'message': 'Function entry',
-                    'data': {
-                        'pdf_path': str(pdf_path),
-                        'sample_pages': sample_pages,
-                        'pdf_exists': pdf_path.exists() if pdf_path else False
-                    },
-                    'timestamp': int(time.time() * 1000)
-                }) + '\n')
-        except Exception as e:
-            pass  # Don't fail on logging errors
-        # #endregion
         try:
             import fitz  # PyMuPDF
             import numpy as np
-            import cv2
         except ImportError:
-            self.logger.debug("PyMuPDF/numpy/cv2 not available for gutter detection")
+            self.logger.debug("PyMuPDF/numpy not available for gutter detection")
             return None
         
         try:
+            # Use ContentDetector to find per-page gutter positions
+            results = self.content_detector.detect_two_column_regions_binary_search(
+                pdf_path, 
+                density_threshold=None,  # Will auto-detect
+                pages=None  # Process all pages
+            )
+            
+            if not results:
+                self.logger.debug("ContentDetector found no two-column regions")
+                return None
+            
+            # Get page width from first page
             doc = fitz.open(str(pdf_path))
             if len(doc) == 0:
                 doc.close()
                 return None
+            page_width = doc[0].rect.width
             
-            # Analyze multiple pages for consistency
-            gutter_positions = []
-            pages_to_check = min(sample_pages, len(doc))
-            page_width = None
-            all_borders_per_page = []  # Track borders for each page
-            printout_pages_count = 0  # Track how many pages were detected as printouts
-            total_pages_analyzed = 0  # Track total pages analyzed (excluding failures)
+            # Extract per-page gutter positions and handle edge case: last page with only left column
+            gutter_x_per_page = []
+            left_column_boxes = []
+            right_column_boxes = []
             
-            for page_num in range(pages_to_check):
-                page = doc[page_num]
-                page_rect = page.rect
-                if page_width is None:
-                    page_width = page_rect.width
-                page_height = page_rect.height
+            for page_num, (left_box, right_box, gutter_x_pts) in enumerate(results):
+                # Check if this page has only a left column (no right column detected)
+                # This can happen on the last page of a document
+                # right_box is (left, top, right, bottom)
+                if page_num < len(doc):
+                    page = doc[page_num]
+                    page_width_pts = page.rect.width
+                    
+                    # Render page to get pixel dimensions for comparison
+                    zoom = 2.0
+                    mat = fitz.Matrix(zoom, zoom)
+                    pix = page.get_pixmap(matrix=mat, alpha=False)
+                    img_width_px = pix.width
+                    
+                    # Check if right column is missing by checking:
+                    # 1. Right column's left edge is near page edge (>= 95% of width)
+                    # 2. OR gap between columns is too small (< 5% of page width)
+                    # Normal two-column pages have right column starting around 50-60% of page width
+                    right_col_left_px = right_box[0] if len(right_box) > 0 else img_width_px
+                    left_col_right_px = left_box[2] if len(left_box) > 2 else 0
+                    gap_px = right_col_left_px - left_col_right_px
+                    gap_pct = (gap_px / img_width_px * 100) if img_width_px > 0 else 0
+                    right_col_left_pct = (right_col_left_px / img_width_px * 100) if img_width_px > 0 else 100
+                    
+                    # If right column starts at >= 95% of page width OR gap is < 5%, assume no right column
+                    if img_width_px > 0 and (right_col_left_pct >= 95.0 or gap_pct < 5.0):
+                            # Use previous page's gutter, or median, or 50% split
+                            if gutter_x_per_page:
+                                # Use previous page's gutter position
+                                fallback_gutter = gutter_x_per_page[-1]
+                                self.logger.info(
+                                    f"Page {page_num + 1} has only left column - using previous page's gutter: {fallback_gutter:.1f}pts"
+                                )
+                                gutter_x_pts = fallback_gutter
+                            elif len(results) > 1:
+                                # Use median from other pages
+                                other_gutters = [g for i, (_, _, g) in enumerate(results) if i != page_num]
+                                if other_gutters:
+                                    fallback_gutter = float(np.median(other_gutters))
+                                    self.logger.info(
+                                        f"Page {page_num + 1} has only left column - using median gutter: {fallback_gutter:.1f}pts"
+                                    )
+                                    gutter_x_pts = fallback_gutter
+                            else:
+                                # Fall back to 50% split
+                                fallback_gutter = page_width_pts / 2
+                                self.logger.info(
+                                    f"Page {page_num + 1} has only left column - using 50% split: {fallback_gutter:.1f}pts"
+                                )
+                                gutter_x_pts = fallback_gutter
                 
-                # Render page as image (use reasonable resolution)
+                gutter_x_per_page.append(gutter_x_pts)
+                left_column_boxes.append(left_box)
+                right_column_boxes.append(right_box)
+            
+            doc.close()
+            
+            if not gutter_x_per_page:
+                return None
+            
+            # Calculate variation across pages
+            if len(gutter_x_per_page) > 1:
+                std_dev = np.std(gutter_x_per_page)
+                mean_gutter = np.mean(gutter_x_per_page)
+                cv = std_dev / (mean_gutter + 1e-6)  # Coefficient of variation
+            else:
+                cv = 0.0
+            
+            # If variation > 10%, warn but still use per-page values
+            if cv > 0.10:
+                self.logger.warning(f"Gutter position varies significantly across pages (CV: {cv:.1%}) - using per-page values")
+            
+            # Verify safety for each page, but always include all pages (even if safety check fails)
+            # This ensures per-page gutters are available for all pages, preventing misalignment
+            doc = fitz.open(str(pdf_path))
+            safe_gutters = []
+            safe_left_boxes = []
+            safe_right_boxes = []
+            
+            for page_num, (left_box, right_box, gutter_x_pts) in enumerate(results):
+                if page_num >= len(doc):
+                    continue
+                
+                page = doc[page_num]
                 zoom = 2.0
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
-                
-                # Convert to numpy array
                 img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
                 
                 # Convert to grayscale
                 if len(img.shape) == 3:
+                    import cv2
                     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
                 else:
                     gray = img
                 
-                img_height, img_width = gray.shape
+                # Convert gutter from PDF points to pixels
+                gutter_x_px = int((gutter_x_pts / page_width) * gray.shape[1])
                 
-                # Detect borders to exclude them from gutter detection
-                borders = {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}
-                try:
-                    borders = self.border_remover.detect_borders(img)
-                    all_borders_per_page.append(borders.copy())  # Track for variation analysis
-                except Exception as e:
-                    all_borders_per_page.append(borders.copy())  # Track even if detection failed
-                    pass  # Continue without border detection if it fails
+                # Verify safety (but don't exclude pages that fail - just warn)
+                density_threshold = self.content_detector.detect_text_density_threshold(pdf_path, is_two_up=True)
+                is_safe, warning = self.content_detector.verify_gutter_position_safety(
+                    gray, gutter_x_px, density_threshold, page_width
+                )
                 
-                # Calculate content area (excluding detected borders)
-                border_left_px = borders.get('left', 0)
-                border_right_px = borders.get('right', 0)
-                content_left_px = border_left_px
-                content_right_px = img_width - border_right_px
-                content_width_px = content_right_px - content_left_px
+                # Always include the gutter, even if safety check fails
+                # The threshold is conservative - 16-19% might still be valid
+                # Better to include it than exclude it and cause misalignment
+                safe_gutters.append(gutter_x_pts)
+                safe_left_boxes.append(left_box)
+                safe_right_boxes.append(right_box)
                 
-                if content_width_px < img_width * 0.3:
-                    # Content area too small, skip this page
-                    continue
-                
-                # Extract content region (middle 80% vertically to avoid headers/footers)
-                vertical_margin = int(img_height * 0.1)
-                content_region = gray[vertical_margin:img_height-vertical_margin, 
-                                     content_left_px:content_right_px]
-                
-                if content_region.size == 0:
-                    continue
-                
-                # Calculate vertical projection profile
-                # For physical book scans: look for darker spine area (gray/dark pixels)
-                # For printed articles: look for minimum content (white space)
-                # We'll check both and use whichever is more prominent
-                
-                # Method 1: Look for darker spine area (physical books)
-                # Average pixel intensity per column (lower = darker)
-                spine_projection = np.mean(content_region, axis=0)
-                
-                # Method 2: Look for minimum content density (printed articles)
-                # Invert so dark pixels (text) have higher values
-                inverted = 255 - content_region
-                content_projection = np.sum(inverted, axis=0)
-                
-                # Smooth both projections to reduce noise
-                kernel_size = max(5, int(content_width_px * 0.02))
-                if kernel_size % 2 == 0:
-                    kernel_size += 1
-                if kernel_size > 1:
-                    spine_projection = cv2.GaussianBlur(spine_projection.reshape(1, -1), (1, kernel_size), 0).flatten()
-                    content_projection = cv2.GaussianBlur(content_projection.reshape(1, -1), (1, kernel_size), 0).flatten()
-                
-                # Search in the middle 60% of content area (avoid edges)
-                search_start = int(len(spine_projection) * 0.2)
-                search_end = int(len(spine_projection) * 0.8)
-                search_region_spine = spine_projection[search_start:search_end]
-                search_region_content = content_projection[search_start:search_end]
-                
-                if len(search_region_spine) == 0:
-                    continue
-                
-                # Find gutter using both methods
-                window_size = max(5, int(len(search_region_spine) * 0.05))
-                
-                # Method 1: Find darkest area (spine marker for physical books)
-                # Lower values = darker pixels
-                min_spine_val = float('inf')
-                min_spine_idx = search_start
-                for i in range(len(search_region_spine) - window_size):
-                    window = search_region_spine[i:i+window_size]
-                    window_avg = np.mean(window)
-                    if window_avg < min_spine_val:
-                        min_spine_val = window_avg
-                        min_spine_idx = i + search_start
-                
-                # Method 2: Find minimum content (white space for printed articles)
-                # Lower values = less content
-                min_content_val = float('inf')
-                min_content_idx = search_start
-                for i in range(len(search_region_content) - window_size):
-                    window = search_region_content[i:i+window_size]
-                    window_avg = np.mean(window)
-                    if window_avg < min_content_val:
-                        min_content_val = window_avg
-                        min_content_idx = i + search_start
-                
-                # Choose method based on which shows a stronger signal
-                # Check if spine method found a significantly darker area (spine marker)
-                # Compare to average brightness in search region
-                avg_brightness = np.mean(search_region_spine)
-                spine_darkness = avg_brightness - min_spine_val
-                
-                # Check if content method found significantly less content
-                avg_content = np.mean(search_region_content)
-                content_reduction = avg_content - min_content_val
-                
-                # Normalize by average to compare relative strength
-                spine_signal = spine_darkness / (avg_brightness + 1e-6)  # Avoid division by zero
-                content_signal = content_reduction / (avg_content + 1e-6)
-                
-                # Use spine method if it shows a strong dark signal (physical book)
-                # Otherwise use content method (printed article)
-                if spine_signal > 0.15:  # At least 15% darker than average (spine marker)
-                    min_idx = min_spine_idx
-                    method_used = 'spine'
-                    projection_to_analyze = spine_projection
-                else:
-                    min_idx = min_content_idx
-                    method_used = 'content'
-                    projection_to_analyze = content_projection
-                
-                # Analyze shape of projection around detected position (for distinguishing gutters from edges)
-                # Real gutters: gradual valley (low content across wider region)
-                # Column edges: sharp drop (sudden transition)
-                window_size_for_shape = max(10, int(len(projection_to_analyze) * 0.1))  # 10% of content width
-                analysis_start = max(0, min_idx - window_size_for_shape)
-                analysis_end = min(len(projection_to_analyze), min_idx + window_size_for_shape)
-                region_around_min = projection_to_analyze[analysis_start:analysis_end]
-                
-                # Calculate gradient (rate of change) around the minimum
-                # High gradient = sharp drop (edge), low gradient = gradual valley (gutter)
-                if len(region_around_min) > 2:
-                    # Calculate first derivative (gradient) around the minimum
-                    gradient_values = []
-                    for i in range(1, len(region_around_min)):
-                        gradient = abs(region_around_min[i] - region_around_min[i-1])
-                        gradient_values.append(gradient)
-                    
-                    avg_gradient = np.mean(gradient_values) if gradient_values else 0
-                    max_gradient = np.max(gradient_values) if gradient_values else 0
-                    
-                    # Calculate second derivative (curvature) - how sharp the transition is
-                    second_derivative_values = []
-                    for i in range(1, len(gradient_values)):
-                        second_deriv = abs(gradient_values[i] - gradient_values[i-1])
-                        second_derivative_values.append(second_deriv)
-                    
-                    avg_second_deriv = np.mean(second_derivative_values) if second_derivative_values else 0
-                    max_second_deriv = np.max(second_derivative_values) if second_derivative_values else 0
-                    
-                    # Calculate valley width (how wide the low-content region is)
-                    # Find where values rise above 50% of the minimum value
-                    min_val_in_region = np.min(region_around_min)
-                    threshold = min_val_in_region + 0.5 * (np.max(region_around_min) - min_val_in_region)
-                    below_threshold = region_around_min < threshold
-                    if np.any(below_threshold):
-                        valley_width = np.sum(below_threshold)
-                    else:
-                        valley_width = 0
-                    
-                    # Normalize by region size
-                    valley_width_ratio = valley_width / len(region_around_min) if len(region_around_min) > 0 else 0
-                else:
-                    avg_gradient = 0
-                    max_gradient = 0
-                    avg_second_deriv = 0
-                    max_second_deriv = 0
-                    valley_width_ratio = 0
-                
-                # #region agent log
-                try:
-                    # Calculate position as ratio of content width
-                    min_idx_ratio = min_idx / content_width_px if content_width_px > 0 else 0
-                    # Check if position is in middle region (40-60%)
-                    in_middle_region = (0.4 <= min_idx_ratio <= 0.6)
-                    # Check if position is near edges (< 30% or > 70%)
-                    near_edge = (min_idx_ratio < 0.3 or min_idx_ratio > 0.7)
-                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                    with open(log_path, 'a', encoding='utf-8') as f:
-                        f.write(json.dumps({
-                            'sessionId': 'debug-session',
-                            'runId': 'run1',
-                            'hypothesisId': 'G',
-                            'location': 'paper_processor_daemon.py:_find_gutter_position',
-                            'message': 'Gutter detection result with shape analysis',
-                            'data': {
-                                'page_num': page_num,
-                                'method_used': method_used,
-                                'min_idx': int(min_idx),
-                                'min_idx_ratio': min_idx_ratio,
-                                'in_middle_region': in_middle_region,
-                                'near_edge': near_edge,
-                                'spine_signal': float(spine_signal),
-                                'content_signal': float(content_signal),
-                                'min_spine_idx': int(min_spine_idx),
-                                'min_content_idx': int(min_content_idx),
-                                'content_width_px': int(content_width_px),
-                                'shape_analysis': {
-                                    'avg_gradient': float(avg_gradient),
-                                    'max_gradient': float(max_gradient),
-                                    'avg_second_deriv': float(avg_second_deriv),
-                                    'max_second_deriv': float(max_second_deriv),
-                                    'valley_width_ratio': float(valley_width_ratio),
-                                    'region_size': len(region_around_min),
-                                    'min_val_in_region': float(np.min(region_around_min)) if len(region_around_min) > 0 else 0,
-                                    'max_val_in_region': float(np.max(region_around_min)) if len(region_around_min) > 0 else 0
-                                }
-                            },
-                            'timestamp': int(time.time() * 1000)
-                        }) + '\n')
-                except: pass
-                # #endregion
-                
-                # Check if middle region (40-60% of content width) has very low content density
-                # This indicates a printout with no real gutter - just white space between pages
-                middle_start_px = int(content_width_px * 0.4)
-                middle_end_px = int(content_width_px * 0.6)
-                middle_region = gray[:, content_left_px + middle_start_px:content_left_px + middle_end_px]
-                
-                # Calculate content density in middle region (non-white pixels)
-                # White pixels are typically > 240 in grayscale
-                non_white_pixels = np.sum(middle_region < 240)
-                total_middle_pixels = middle_region.size
-                middle_content_ratio = non_white_pixels / total_middle_pixels if total_middle_pixels > 0 else 0
-                
-                # If middle region is > 90% white, it's likely a printout with no gutter
-                # Skip this page regardless of where gutter was detected - printouts should use 50/50 split
-                total_pages_analyzed += 1
-                if middle_content_ratio < 0.1:  # Less than 10% content in middle
-                    printout_pages_count += 1
-                    gutter_in_middle = (middle_start_px <= min_idx <= middle_end_px)
-                    # #region agent log
-                    try:
-                        with open(r'f:\prog\research-tools\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                            f.write(json.dumps({
-                                'sessionId': 'debug-session',
-                                'runId': 'run1',
-                                'hypothesisId': 'G',
-                                'location': 'paper_processor_daemon.py:_find_gutter_position',
-                                'message': 'Printout detected - skipping page',
-                                'data': {
-                                    'page_num': page_num,
-                                    'middle_content_ratio': middle_content_ratio,
-                                    'min_idx': int(min_idx),
-                                    'min_idx_ratio': min_idx / content_width_px if content_width_px > 0 else 0,
-                                    'gutter_in_middle': gutter_in_middle,
-                                    'printout_pages_count': printout_pages_count,
-                                    'total_pages_analyzed': total_pages_analyzed
-                                },
-                                'timestamp': int(time.time() * 1000)
-                            }) + '\n')
-                    except: pass
-                    # #endregion
-                    # Big white space in middle = printout, use 50/50 split for all pages
-                    self.logger.info(f"Detected printout with no gutter (middle region {middle_content_ratio:.1%} content) - skipping gutter detection for this page, will use 50/50 split")
-                    # Skip this page for gutter detection, will fall through to geometric split
-                    continue  # Skip this page, don't add to gutter_positions
-                
-                # Calculate position ratio to check if it's near edge (likely column edge, not gutter)
-                min_idx_ratio = min_idx / content_width_px if content_width_px > 0 else 0
-                # #region agent log
-                try:
-                    with open(r'f:\prog\research-tools\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                        f.write(json.dumps({
-                            'sessionId': 'debug-session',
-                            'runId': 'run1',
-                            'hypothesisId': 'G',
-                            'location': 'paper_processor_daemon.py:_find_gutter_position',
-                            'message': 'Gutter position candidate (passed printout check)',
-                            'data': {
-                                'page_num': page_num,
-                                'min_idx': int(min_idx),
-                                'min_idx_ratio': min_idx_ratio,
-                                'is_near_edge': (min_idx_ratio < 0.3 or min_idx_ratio > 0.7),
-                                'is_in_middle': (0.3 <= min_idx_ratio <= 0.7),
-                                'content_width_px': int(content_width_px)
-                            },
-                            'timestamp': int(time.time() * 1000)
-                        }) + '\n')
-                except: pass
-                # #endregion
-                
-                # Validate using shape analysis: reject column edges, accept real gutters
-                # Shape analysis metrics help distinguish:
-                # - Real gutters: gradual valley (low gradient, wide valley, smooth transition)
-                # - Column edges: sharp drop (high gradient, narrow valley, sudden transition)
-                is_column_edge = False
-                is_real_gutter = False
-                has_sufficient_data = len(region_around_min) > 2
-                
-                if has_sufficient_data:  # Only validate if we have sufficient shape analysis data
-                    # Reject as column edge if:
-                    # 1. Sharp, narrow transition (high gradient AND narrow valley)
-                    # 2. Very sharp corner (very high gradient AND high curvature)
-                    # BUT: For physical book scans, gutters can have high gradients too
-                    # So we need to be more lenient - only reject if BOTH conditions are extreme
-                    # AND the position is near the edge (likely a column edge, not a gutter)
-                    # min_idx_ratio is already calculated above (line 5785)
-                    near_edge = min_idx_ratio < 0.2 or min_idx_ratio > 0.8
-                    
-                    # More lenient: Only reject if it's a sharp corner AND near edge (likely column edge)
-                    # OR if it's both sharp AND narrow AND near edge
-                    # For positions in the middle (20-80%), be more lenient - these are likely real gutters
-                    if near_edge and ((avg_gradient > 1000 and valley_width_ratio < 0.4) or \
-                       (max_gradient > 10000 and avg_second_deriv > 2000)):
-                        is_column_edge = True
-                    # Also reject if it's extremely sharp even in middle (likely column edge in two-column layout)
-                    elif not near_edge and max_gradient > 20000 and avg_second_deriv > 3000 and valley_width_ratio < 0.3:
-                        is_column_edge = True
-                    
-                    # Accept as real gutter if:
-                    # Gradual, wide valley with smooth transition
-                    if avg_gradient < 500 and valley_width_ratio > 0.6 and avg_second_deriv < 500:
-                        is_real_gutter = True
-                else:
-                    # Insufficient data for validation - default to accepting (conservative approach)
-                    # Log this case for debugging
-                    # #region agent log
-                    try:
-                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                        with open(log_path, 'a', encoding='utf-8') as f:
-                            f.write(json.dumps({
-                                'sessionId': 'debug-session',
-                                'runId': 'run1',
-                                'hypothesisId': 'G',
-                                'location': 'paper_processor_daemon.py:_find_gutter_position',
-                                'message': 'Shape validation skipped - insufficient data',
-                                'data': {
-                                    'page_num': page_num,
-                                    'region_size': len(region_around_min),
-                                    'reason': 'Region around minimum too small for shape analysis',
-                                    'default_action': 'accept_position'
-                                },
-                                'timestamp': int(time.time() * 1000)
-                            }) + '\n')
-                    except: pass
-                    # #endregion
-                
-                # #region agent log
-                try:
-                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                    with open(log_path, 'a', encoding='utf-8') as f:
-                        f.write(json.dumps({
-                            'sessionId': 'debug-session',
-                            'runId': 'run1',
-                            'hypothesisId': 'G',
-                            'location': 'paper_processor_daemon.py:_find_gutter_position',
-                            'message': 'Shape validation result',
-                            'data': {
-                                'page_num': page_num,
-                                'has_sufficient_data': has_sufficient_data,
-                                'is_column_edge': is_column_edge,
-                                'is_real_gutter': is_real_gutter,
-                                'will_accept_position': not is_column_edge,
-                                'validation_status': 'validated_real_gutter' if is_real_gutter else ('insufficient_data' if not has_sufficient_data else 'default_accept'),
-                                'shape_analysis': {
-                                    'avg_gradient': float(avg_gradient),
-                                    'max_gradient': float(max_gradient),
-                                    'avg_second_deriv': float(avg_second_deriv),
-                                    'valley_width_ratio': float(valley_width_ratio),
-                                    'region_size': len(region_around_min)
-                                }
-                            },
-                            'timestamp': int(time.time() * 1000)
-                        }) + '\n')
-                except: pass
-                # #endregion
-                
-                # Skip column edges - they're not real gutters
-                if is_column_edge:
-                    self.logger.info(f"Rejected detected position on page {page_num} as column edge (not a gutter) - avg_gradient={avg_gradient:.1f}, valley_width_ratio={valley_width_ratio:.3f}, max_gradient={max_gradient:.1f}, avg_second_deriv={avg_second_deriv:.1f}")
-                    continue  # Skip this page, don't add to gutter_positions
-                
-                # Convert pixel position back to PDF coordinates
-                # Use page-relative coordinates: min_idx is within content area,
-                # content_left_px is where content starts on the page
-                gutter_px_page_relative = content_left_px + min_idx
-                gutter_pdf_points = (gutter_px_page_relative / img_width) * page_width
-                
-                # Log final acceptance status
-                if is_real_gutter:
-                    validation_status_msg = "validated as real gutter"
-                elif not has_sufficient_data:
-                    validation_status_msg = "accepted (insufficient shape data for validation)"
-                else:
-                    validation_status_msg = "accepted (default - not identified as column edge)"
-                
-                self.logger.debug(f"Gutter position on page {page_num} accepted - {validation_status_msg} at {gutter_pdf_points:.1f} points")
-                
-                # #region agent log
-                try:
-                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                    with open(log_path, 'a', encoding='utf-8') as f:
-                        f.write(json.dumps({
-                            'sessionId': 'debug-session',
-                            'runId': 'run1',
-                            'hypothesisId': 'G',
-                            'location': 'paper_processor_daemon.py:_find_gutter_position',
-                            'message': 'Gutter position accepted',
-                            'data': {
-                                'page_num': page_num,
-                                'gutter_pdf_points': float(gutter_pdf_points),
-                                'validation_status': validation_status_msg,
-                                'is_real_gutter': is_real_gutter,
-                                'has_sufficient_data': has_sufficient_data
-                            },
-                            'timestamp': int(time.time() * 1000)
-                        }) + '\n')
-                except: pass
-                # #endregion
-                
-                gutter_positions.append(gutter_pdf_points)
+                if not is_safe:
+                    self.logger.warning(f"Gutter position on page {page_num + 1} failed safety check: {warning}")
+                    self.logger.warning(f"  Using detected gutter anyway ({gutter_x_pts:.1f} pts) - threshold may be too strict")
+                elif warning:  # Warning but still safe (borderline case)
+                    self.logger.debug(f"Gutter position on page {page_num + 1}: {warning}")
             
             doc.close()
             
-            # #region agent log
-            try:
-                with open(r'f:\prog\research-tools\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({
-                        'sessionId': 'debug-session',
-                        'runId': 'run1',
-                        'hypothesisId': 'G',
-                        'location': 'paper_processor_daemon.py:_find_gutter_position',
-                        'message': 'Gutter detection summary before validation',
-                        'data': {
-                            'total_pages_analyzed': total_pages_analyzed,
-                            'printout_pages_count': printout_pages_count,
-                            'printout_ratio': printout_pages_count / total_pages_analyzed if total_pages_analyzed > 0 else 0,
-                            'gutter_positions_count': len(gutter_positions),
-                            'gutter_positions': [float(x) for x in gutter_positions] if gutter_positions else [],
-                            'page_width': float(page_width) if page_width else None
-                        },
-                        'timestamp': int(time.time() * 1000)
-                    }) + '\n')
-            except: pass
-            # #endregion
-            
-            if not gutter_positions:
+            if not safe_gutters:
+                self.logger.warning("No gutter positions found")
                 return None
             
-            # If most pages are printouts, use 50/50 split instead of using outlier positions
-            printout_ratio = printout_pages_count / total_pages_analyzed if total_pages_analyzed > 0 else 0
-            if printout_ratio >= 0.5:
-                self.logger.info(f"Most pages are printouts ({printout_ratio:.1%}) - using 50/50 split instead of detected gutter")
-                return None
-            
-            # Need at least 2 pages to agree on gutter position (single page is likely an outlier)
-            if len(gutter_positions) < 2:
-                self.logger.info(f"Only {len(gutter_positions)} page(s) contributed gutter position - need at least 2 for reliability, using 50/50 split")
-                return None
-            
-            # Use median for robustness against outliers
-            median_gutter = np.median(gutter_positions)
-            
-            if page_width is None:
-                return None
-            
-            # Validate: gutter should be roughly in the middle (30-70% of page width)
-            gutter_ratio = median_gutter / page_width if page_width > 0 else 0
-            if median_gutter < page_width * 0.3 or median_gutter > page_width * 0.7:
-                self.logger.debug(f"Gutter position {median_gutter:.1f} seems invalid (page width: {page_width:.1f})")
-                return None
-            
-            # Check consistency across pages (std dev should be small)
-            if len(gutter_positions) > 1:
-                std_dev = np.std(gutter_positions)
-                std_dev_ratio = std_dev / page_width if page_width > 0 else 0
-                if std_dev > page_width * 0.1:  # More than 10% variation
-                    self.logger.debug(f"Gutter positions inconsistent (std dev: {std_dev:.1f})")
-                    return None
-            
-            self.logger.info(f"Detected gutter at {median_gutter:.1f} points (from {len(gutter_positions)} pages)")
-            # Return dict with gutter_x and validation metadata
-            # Ensure page_width is always set and is a float
+            # Return per-page results - ensure all pages have a gutter value
             return {
-                'gutter_x': float(median_gutter),
-                'gutter_positions': [float(x) for x in gutter_positions],
-                'borders_per_page': all_borders_per_page,
-                'page_width': float(page_width) if page_width is not None else 0.0
+                'gutter_x_per_page': [float(x) for x in safe_gutters],
+                'left_column_boxes': safe_left_boxes,
+                'right_column_boxes': safe_right_boxes,
+                'method': 'binary_search_columns_per_page',
+                'variation': float(cv),
+                'confidence': [1.0] * len(safe_gutters),  # TODO: Calculate actual confidence
+                'gutter_x': float(np.median(safe_gutters)),  # Backward compatibility: median
+                'gutter_positions': [float(x) for x in safe_gutters],  # Backward compatibility
+                'page_width': float(page_width)
             }
             
         except Exception as e:
             self.logger.debug(f"Gutter detection failed: {e}")
             return None
     
-    def _validate_gutter_detection(self, gutter_x: float, page_width: float, 
+    def _validate_gutter_detection(self, gutter_x: float, page_width: float,
                                     gutter_positions: List[float] = None,
                                     borders_per_page: List[dict] = None) -> Tuple[bool, List[str]]:
         """Validate gutter detection results and return (is_valid, warnings).
@@ -6074,12 +5712,13 @@ class PaperProcessorDaemon:
         
         return is_valid, warnings
     
-    def _split_with_custom_gutter(self, pdf_path: Path, gutter_x: float) -> Tuple[Optional[Path], Optional[str]]:
+    def _split_with_custom_gutter(self, pdf_path: Path, gutter_x: float, gutter_x_per_page: Optional[List[float]] = None) -> Tuple[Optional[Path], Optional[str]]:
         """Split a two-up PDF at a custom X coordinate using PyMuPDF.
         
         Args:
             pdf_path: Path to input PDF
-            gutter_x: X coordinate in PDF points where to split
+            gutter_x: X coordinate in PDF points where to split (used if gutter_x_per_page is None)
+            gutter_x_per_page: Optional list of per-page gutter positions (one per page)
             
         Returns:
             Tuple of (Path to split PDF or None if failed, error message or None)
@@ -6122,13 +5761,34 @@ class PaperProcessorDaemon:
             
             pages_created = 0
             for page_num in range(len(doc)):
-                page = doc[page_num]
+                try:
+                    page = doc[page_num]
+                except (IndexError, AttributeError) as e:
+                    error_msg = f"Failed to access page {page_num}: {e}"
+                    self.logger.error(error_msg)
+                    doc.close()
+                    new_doc.close()
+                    return None, error_msg
+                
+                if page is None:
+                    error_msg = f"Page {page_num} is None"
+                    self.logger.error(error_msg)
+                    doc.close()
+                    new_doc.close()
+                    return None, error_msg
+                
                 page_rect = page.rect
                 page_width = page_rect.width
                 page_height = page_rect.height
                 
+                # Use per-page gutter if available, otherwise use single gutter_x
+                if gutter_x_per_page and page_num < len(gutter_x_per_page):
+                    page_gutter_x = gutter_x_per_page[page_num]
+                else:
+                    page_gutter_x = gutter_x
+                
                 # Validate gutter position is reasonable (30-70% of page width)
-                gutter_ratio = gutter_x / page_width
+                gutter_ratio = page_gutter_x / page_width
                 
                 # #region agent log
                 try:
@@ -6142,7 +5802,7 @@ class PaperProcessorDaemon:
                             'message': 'Validating gutter position',
                             'data': {
                                 'page_num': page_num,
-                                'gutter_x': float(gutter_x),
+                                'gutter_x': float(page_gutter_x),
                                 'page_width': float(page_width),
                                 'gutter_ratio': float(gutter_ratio),
                                 'ratio_valid': (0.3 <= gutter_ratio <= 0.7),
@@ -6155,7 +5815,7 @@ class PaperProcessorDaemon:
                 # #endregion
                 
                 if gutter_ratio < 0.3 or gutter_ratio > 0.7:
-                    error_msg = f"Gutter position {gutter_ratio:.1%} outside reasonable range (30-70%). Calculated split at {gutter_x:.1f} points on page {page_num + 1} (page width: {page_width:.1f} points)."
+                    error_msg = f"Gutter position {gutter_ratio:.1%} outside reasonable range (30-70%). Calculated split at {page_gutter_x:.1f} points on page {page_num + 1} (page width: {page_width:.1f} points)."
                     self.logger.warning(error_msg)
                     # #region agent log
                     try:
@@ -6170,7 +5830,7 @@ class PaperProcessorDaemon:
                                 'data': {
                                     'page_num': page_num,
                                     'gutter_ratio': float(gutter_ratio),
-                                    'gutter_x': float(gutter_x),
+                                    'gutter_x': float(page_gutter_x),
                                     'page_width': float(page_width),
                                     'reason': 'gutter_ratio_outside_30_70_percent'
                                 },
@@ -6182,9 +5842,9 @@ class PaperProcessorDaemon:
                     new_doc.close()
                     return None, error_msg
                 
-                min_page_width = min(gutter_x, page_width - gutter_x)
+                min_page_width = min(page_gutter_x, page_width - page_gutter_x)
                 if min_page_width < 0.3 * page_width:
-                    error_msg = f"Split would create a page < 30% width on page {page_num + 1}. Left page: {gutter_x:.1f} points ({gutter_x/page_width:.1%}), right page: {page_width - gutter_x:.1f} points ({(page_width - gutter_x)/page_width:.1%})."
+                    error_msg = f"Split would create a page < 30% width on page {page_num + 1}. Left page: {page_gutter_x:.1f} points ({page_gutter_x/page_width:.1%}), right page: {page_width - page_gutter_x:.1f} points ({(page_width - page_gutter_x)/page_width:.1%})."
                     self.logger.warning(error_msg)
                     # #region agent log
                     try:
@@ -6200,7 +5860,7 @@ class PaperProcessorDaemon:
                                     'page_num': page_num,
                                     'min_page_width': float(min_page_width),
                                     'required_min': float(0.3 * page_width),
-                                    'gutter_x': float(gutter_x),
+                                    'gutter_x': float(page_gutter_x),
                                     'page_width': float(page_width),
                                     'reason': 'min_page_width_less_than_30_percent'
                                 },
@@ -6226,7 +5886,7 @@ class PaperProcessorDaemon:
                                 'page_num': page_num,
                                 'page_width': float(page_width),
                                 'page_height': float(page_height),
-                                'gutter_x': float(gutter_x),
+                                'gutter_x': float(page_gutter_x),
                                 'gutter_ratio': float(gutter_ratio),
                                 'left_page_width': float(gutter_x),
                                 'right_page_width': float(page_width - gutter_x),
@@ -6238,23 +5898,71 @@ class PaperProcessorDaemon:
                 except: pass
                 # #endregion
                 
-                # Create left page (from 0 to gutter_x)
-                left_rect = fitz.Rect(0, 0, gutter_x, page_height)
-                left_page = new_doc.new_page(width=gutter_x, height=page_height)
+                # Log before split
+                gutter_ratio_pct = (page_gutter_x / page_width) * 100 if page_width > 0 else 0
+                self.logger.debug(
+                    f"Page {page_num + 1} split: gutter={page_gutter_x:.1f}pts ({gutter_ratio_pct:.1f}%), "
+                    f"page_width={page_width:.1f}pts, left_width={page_gutter_x:.1f}pts, right_width={page_width - page_gutter_x:.1f}pts"
+                )
+                
+                # Create left page (from 0 to page_gutter_x)
+                left_rect = fitz.Rect(0, 0, page_gutter_x, page_height)
+                left_page = new_doc.new_page(width=page_gutter_x, height=page_height)
                 left_page.show_pdf_page(left_rect, doc, page_num, clip=left_rect)
                 
-                # Create right page (from gutter_x to page_width)
-                right_rect = fitz.Rect(gutter_x, 0, page_width, page_height)
-                right_page = new_doc.new_page(width=page_width - gutter_x, height=page_height)
+                # Create right page (from page_gutter_x to page_width)
+                right_rect = fitz.Rect(page_gutter_x, 0, page_width, page_height)
+                right_page = new_doc.new_page(width=page_width - page_gutter_x, height=page_height)
                 right_page.show_pdf_page(right_rect, doc, page_num, clip=right_rect)
                 pages_created += 2
+                
+                # Diagnostic logging: Check content immediately after creation
+                left_text = left_page.get_text()
+                right_text = right_page.get_text()
+                left_text_length = len(left_text.strip()) if left_text else 0
+                right_text_length = len(right_text.strip()) if right_text else 0
+                
+                # Check image content density for left page
+                try:
+                    import numpy as np
+                    import cv2
+                    zoom = 1.0
+                    mat = fitz.Matrix(zoom, zoom)
+                    left_pix = left_page.get_pixmap(matrix=mat, alpha=False)
+                    left_img = np.frombuffer(left_pix.samples, dtype=np.uint8).reshape(left_pix.h, left_pix.w, 3)
+                    if len(left_img.shape) == 3:
+                        left_gray = cv2.cvtColor(left_img, cv2.COLOR_RGB2GRAY)
+                    else:
+                        left_gray = left_img
+                    left_content_pixels = np.sum(left_gray < 240)
+                    left_total_pixels = left_gray.size
+                    left_content_ratio = (left_content_pixels / left_total_pixels) if left_total_pixels > 0 else 0.0
+                except Exception:
+                    left_content_ratio = None
+                
+                # Check image content density for right page
+                try:
+                    right_pix = right_page.get_pixmap(matrix=mat, alpha=False)
+                    right_img = np.frombuffer(right_pix.samples, dtype=np.uint8).reshape(right_pix.h, right_pix.w, 3)
+                    if len(right_img.shape) == 3:
+                        right_gray = cv2.cvtColor(right_img, cv2.COLOR_RGB2GRAY)
+                    else:
+                        right_gray = right_img
+                    right_content_pixels = np.sum(right_gray < 240)
+                    right_total_pixels = right_gray.size
+                    right_content_ratio = (right_content_pixels / right_total_pixels) if right_total_pixels > 0 else 0.0
+                except Exception:
+                    right_content_ratio = None
+                
+                self.logger.debug(
+                    f"Page {page_num + 1} after split: "
+                    f"left=[text={left_text_length}chars, content={left_content_ratio:.1%}], "
+                    f"right=[text={right_text_length}chars, content={right_content_ratio:.1%}]"
+                )
                 
                 # #region agent log
                 try:
                     log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                    # Check content of both pages immediately after creation
-                    left_text = left_page.get_text()
-                    right_text = right_page.get_text()
                     with open(log_path, 'a', encoding='utf-8') as f:
                         f.write(json.dumps({
                             'sessionId': 'debug-session',
@@ -6266,12 +5974,14 @@ class PaperProcessorDaemon:
                                 'page_num': page_num,
                                 'left_page_idx': len(new_doc) - 2,
                                 'right_page_idx': len(new_doc) - 1,
-                                'left_text_length': len(left_text.strip()) if left_text else 0,
-                                'right_text_length': len(right_text.strip()) if right_text else 0,
-                                'gutter_x': float(gutter_x),
+                                'left_text_length': left_text_length,
+                                'right_text_length': right_text_length,
+                                'left_content_ratio': float(left_content_ratio) if left_content_ratio is not None else None,
+                                'right_content_ratio': float(right_content_ratio) if right_content_ratio is not None else None,
+                                'gutter_x': float(page_gutter_x),
                                 'page_width': float(page_width),
-                                'left_page_width': float(gutter_x),
-                                'right_page_width': float(page_width - gutter_x)
+                                'left_page_width': float(page_gutter_x),
+                                'right_page_width': float(page_width - page_gutter_x)
                             },
                             'timestamp': int(time.time() * 1000)
                         }) + '\n')
@@ -6304,96 +6014,12 @@ class PaperProcessorDaemon:
             except: pass
             # #endregion
             
-            # Detect and remove empty/white pages or pages with very little content
-            # All pages are A4 size, so we check content density, not width
-            pages_to_remove = []
-            
-            try:
-                import numpy as np
-                import cv2
-            except ImportError:
-                # Can't check content without numpy/cv2 - skip content-based detection
-                self.logger.debug("numpy/cv2 not available for content-based page detection")
-            else:
-                for page_idx in range(len(new_doc)):
-                    page = new_doc[page_idx]
-                    
-                    # Check 1: Text content (fast check)
-                    text = page.get_text()
-                    text_length = len(text.strip()) if text else 0
-                    
-                    # Check 2: Image content density (for scanned pages)
-                    # Render page as image and check if it's mostly white
-                    try:
-                        zoom = 1.0  # Lower resolution for speed
-                        mat = fitz.Matrix(zoom, zoom)
-                        pix = page.get_pixmap(matrix=mat, alpha=False)
-                        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
-                        
-                        # Convert to grayscale
-                        if len(img.shape) == 3:
-                            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-                        else:
-                            gray = img
-                        
-                        # Count white pixels (brightness > 240)
-                        white_pixels = np.sum(gray > 240)
-                        total_pixels = gray.size
-                        white_ratio = white_pixels / total_pixels if total_pixels > 0 else 1.0
-                        
-                        # Count non-white pixels (content)
-                        content_pixels = total_pixels - white_pixels
-                        content_ratio = content_pixels / total_pixels if total_pixels > 0 else 0.0
-                        
-                    except Exception as e:
-                        # If image analysis fails, fall back to text-only check
-                        white_ratio = 1.0
-                        content_ratio = 0.0
-                        self.logger.debug(f"Image analysis failed for page {page_idx}: {e}")
-                    
-                    # Remove page if:
-                    # 1. Very little text (< 50 characters) AND
-                    # 2. Very little image content (< 10% non-white pixels)
-                    # CRITICAL: All pages are same size as original (not thin slices) - must check content density
-                    is_empty = text_length < 50 and content_ratio < 0.1
-                    
-                    # #region agent log
-                    try:
-                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                        with open(log_path, 'a', encoding='utf-8') as f:
-                            f.write(json.dumps({
-                                'sessionId': 'debug-session',
-                                'runId': 'run1',
-                                'hypothesisId': 'L',
-                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
-                                'message': 'Empty page detection check',
-                                'data': {
-                                    'page_idx': page_idx,
-                                    'text_length': text_length,
-                                    'content_ratio': float(content_ratio),
-                                    'white_ratio': float(white_ratio),
-                                    'is_empty': is_empty,
-                                    'will_remove': is_empty,
-                                    'page_is_left': (page_idx % 2 == 0),  # Even indices are left pages
-                                    'page_is_right': (page_idx % 2 == 1)  # Odd indices are right pages
-                                },
-                                'timestamp': int(time.time() * 1000)
-                            }) + '\n')
-                    except: pass
-                    # #endregion
-                    
-                    if is_empty:
-                        pages_to_remove.append(page_idx)
-                        self.logger.info(f"Detected empty/white page {page_idx} (text: {text_length} chars, white: {white_ratio:.1%}, content: {content_ratio:.1%})")
-            
-            # Remove thin pages in reverse order (to maintain correct indices)
-            if pages_to_remove:
-                for page_idx in reversed(pages_to_remove):
-                    new_doc.delete_page(page_idx)
-                self.logger.info(f"Removed {len(pages_to_remove)} thin page(s)")
+            # Empty page detection removed: A clean split should produce exactly 2 pages per original page.
+            # If a page is empty, that indicates a bug in gutter detection or split logic, not a valid edge case.
+            # We'll rely on diagnostic logging to identify and fix root causes instead of masking the problem.
             
             # Legacy cleanup for 3-page pattern (if somehow we have extra pages)
-            if actual_pages > expected_pages and not pages_to_remove:
+            if actual_pages > expected_pages:
                 # We have extra pages - remove every 3rd page starting from index 1
                 # (assuming pattern: left, gutter, right, left, gutter, right, ...)
                 extra_pages = actual_pages - expected_pages
@@ -6431,7 +6057,7 @@ class PaperProcessorDaemon:
                             'out_path': str(out_path),
                             'file_existed_before': file_existed_before,
                             'file_size_before': file_size_before,
-                            'gutter_x': float(gutter_x),
+                            'gutter_x': float(page_gutter_x),
                             'source_pdf': str(pdf_path)
                         },
                         'timestamp': int(time.time() * 1000)
@@ -6570,17 +6196,20 @@ class PaperProcessorDaemon:
             if gutter_result is None:
                 # 50-50 split requested or detection skipped
                 gutter_x = None
+                gutter_x_per_page = None
                 gutter_positions = None
                 borders_per_page = None
                 page_width = None
             elif isinstance(gutter_result, dict):
-                gutter_x = gutter_result.get('gutter_x')
+                gutter_x = gutter_result.get('gutter_x')  # Backward compatibility: median
+                gutter_x_per_page = gutter_result.get('gutter_x_per_page')  # Per-page gutters
                 gutter_positions = gutter_result.get('gutter_positions', [])
                 borders_per_page = gutter_result.get('borders_per_page', [])
                 page_width = gutter_result.get('page_width')
             else:
                 # Legacy format (float or None)
                 gutter_x = gutter_result
+                gutter_x_per_page = None
                 gutter_positions = None
                 borders_per_page = None
                 page_width = None
@@ -6630,8 +6259,8 @@ class PaperProcessorDaemon:
                             print("\n❌ Cancelled", flush=True)
                             return None
                 
-                # Use custom split at detected gutter
-                result, error_msg = self._split_with_custom_gutter(pdf_path, gutter_x)
+                # Use custom split at detected gutter (with per-page gutters if available)
+                result, error_msg = self._split_with_custom_gutter(pdf_path, gutter_x, gutter_x_per_page)
                 if result:
                     return result
                 if error_msg:
@@ -7300,99 +6929,87 @@ class PaperProcessorDaemon:
             self.logger.error("PyMuPDF (fitz) not available - cannot check borders")
             return None, None
         
-        print("\n🔍 Checking for dark borders (pages 1-4)...")
+        print("\n🔍 Checking for dark borders (optimized detection)...")
         
-        # Check first 4 pages for borders
-        borders_detected = False
-        pages_with_borders = []
-        all_borders_info = []
+        # Use optimized border detection (checks first 3 pages, calculates variation)
+        optimized_result = self.border_remover.detect_borders_optimized(pdf_path, sample_pages=3)
+        borders = optimized_result.get('borders', {'top': 0, 'bottom': 0, 'left': 0, 'right': 0})
+        method = optimized_result.get('method', 'consistent')
+        variation = optimized_result.get('variation', {})
+        pages_checked = optimized_result.get('pages_checked', 0)
+        
+        # Check if any borders were detected
+        borders_detected = any(borders.values())
+        
+        # Get page width for stats
         page_width_px = None
-        
         try:
             doc = fitz.open(str(pdf_path))
-            pages_to_check = min(4, len(doc))
-            
-            for page_num in range(pages_to_check):
-                try:
-                    processed_image, borders = self.border_remover.process_pdf_page(
-                        pdf_path, page_num, zoom=2.0
-                    )
-                    
-                    # Get page width in pixels from processed image (first page only)
-                    if page_num == 0 and processed_image is not None:
-                        page_width_px = processed_image.shape[1]  # width is second dimension
-                    
-                    # Check if any borders were detected
-                    if any(borders.values()):
-                        borders_detected = True
-                        pages_with_borders.append(page_num + 1)
-                        all_borders_info.append((page_num + 1, borders))
-                        
-                        # Format border description
-                        border_desc = []
-                        if borders['top'] > 0:
-                            border_desc.append(f"top: {borders['top']}px")
-                        if borders['bottom'] > 0:
-                            border_desc.append(f"bottom: {borders['bottom']}px")
-                        if borders['left'] > 0:
-                            border_desc.append(f"left: {borders['left']}px")
-                        if borders['right'] > 0:
-                            border_desc.append(f"right: {borders['right']}px")
-                        
-                        desc = ", ".join(border_desc) if border_desc else "detected"
-                        print(f"  ✓ Page {page_num + 1}: borders detected ({desc})")
-                        self.logger.debug(f"Page {page_num + 1}: borders detected {borders}")
-                    else:
-                        print(f"  ✓ Page {page_num + 1}: no borders")
-                except Exception as e:
-                    self.logger.debug(f"Error checking page {page_num + 1}: {e}")
-                    print(f"  ⚠️  Page {page_num + 1}: error checking borders")
-                    continue
-            
+            if len(doc) > 0:
+                page = doc[0]
+                zoom = 2.0
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                page_width_px = pix.width
             doc.close()
+        except Exception as e:
+            self.logger.debug(f"Error getting page width: {e}")
+        
+        # Calculate border detection stats
+        border_detection_stats = None
+        if borders_detected and page_width_px:
+            border_detection_stats = {
+                'avg_left_border_px': borders.get('left', 0),
+                'avg_right_border_px': borders.get('right', 0),
+                'page_width_px': page_width_px
+            }
+            self.logger.debug(f"Border detection stats: {border_detection_stats}")
+        
+        # Report detection results
+        if borders_detected:
+            border_desc = []
+            if borders['top'] > 0:
+                border_desc.append(f"top: {borders['top']}px")
+            if borders['bottom'] > 0:
+                border_desc.append(f"bottom: {borders['bottom']}px")
+            if borders['left'] > 0:
+                border_desc.append(f"left: {borders['left']}px")
+            if borders['right'] > 0:
+                border_desc.append(f"right: {borders['right']}px")
             
-            # Calculate border detection stats from detected borders
-            border_detection_stats = None
-            if all_borders_info and page_width_px:
-                # Calculate average left and right border widths
-                left_borders = [borders['left'] for _, borders in all_borders_info if borders['left'] > 0]
-                right_borders = [borders['right'] for _, borders in all_borders_info if borders['right'] > 0]
-                
-                avg_left_border_px = sum(left_borders) / len(left_borders) if left_borders else 0.0
-                avg_right_border_px = sum(right_borders) / len(right_borders) if right_borders else 0.0
-                
-                border_detection_stats = {
-                    'avg_left_border_px': avg_left_border_px,
-                    'avg_right_border_px': avg_right_border_px,
-                    'page_width_px': page_width_px
-                }
-                self.logger.debug(f"Border detection stats: {border_detection_stats}")
-            
-            if not borders_detected:
-                print("\nℹ️  No dark borders detected - skipping removal")
-                return None, border_detection_stats
-            
-            # Report to user
-            pages_str = ", ".join(str(p) for p in pages_with_borders)
-            print(f"\n📊 Summary: Dark borders found on {len(pages_with_borders)} of {pages_to_check} pages checked")
-            
-            choice = input("Remove dark borders from the whole PDF? [Y/n]: ").strip().lower()
-            if choice == 'n':
-                print("Skipping border removal")
-                return None, border_detection_stats
-            
-            # Process entire PDF with border removal
-            print("\n🔄 Processing all pages...")
-            
-            # Create output path
-            import tempfile
-            temp_dir = Path(tempfile.gettempdir()) / 'pdf_borders_removed'
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            out_path = temp_dir / f"{pdf_path.stem}_no_borders.pdf"
-            
+            desc = ", ".join(border_desc) if border_desc else "detected"
+            print(f"  ✓ Borders detected ({desc})")
+            print(f"  ✓ Method: {method} (checked {pages_checked} pages)")
+            if variation:
+                max_cv = max(variation.values()) if variation else 0.0
+                if max_cv > 0:
+                    print(f"  ✓ Variation: {max_cv:.1%} (max across all sides)")
+            self.logger.debug(f"Borders detected: {borders}, method: {method}")
+        else:
+            print("\nℹ️  No dark borders detected - skipping removal")
+            return None, border_detection_stats
+        
+        # Report to user
+        print(f"\n📊 Summary: Dark borders detected (method: {method}, checked {pages_checked} pages)")
+        
+        choice = input("Remove dark borders from the whole PDF? [Y/n]: ").strip().lower()
+        if choice == 'n':
+            print("Skipping border removal")
+            return None, border_detection_stats
+        
+        # Process entire PDF with border removal
+        print("\n🔄 Processing all pages...")
+        
+        # Create output path
+        import tempfile
+        temp_dir = Path(tempfile.gettempdir()) / 'pdf_borders_removed'
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        out_path = temp_dir / f"{pdf_path.stem}_no_borders.pdf"
+        
+        try:
             stats = self.border_remover.process_entire_pdf(pdf_path, out_path, zoom=2.0)
             
-            if stats['pages_processed'] > 0:
+            if stats and stats.get('pages_processed', 0) > 0:
                 pixel_count = stats.get('total_border_pixels', 0)
                 if pixel_count > 0:
                     # Format pixel count nicely
