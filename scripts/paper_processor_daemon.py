@@ -4397,6 +4397,101 @@ class PaperProcessorDaemon:
         from scripts.process_scanned_papers import ScannedPaperProcessor
         processor = ScannedPaperProcessor(self.watch_dir)
         return processor._generate_filename(metadata, original_filename)
+    
+    def _prompt_filename_edit(self, target_filename: str, zotero_metadata: dict, extracted_metadata: dict = None) -> str:
+        """Prompt user to edit filename with options for Zotero-based or OCR-based title.
+        
+        Args:
+            target_filename: Current filename (Zotero-based)
+            zotero_metadata: Dict with Zotero title, authors, year
+            extracted_metadata: Dict with OCR/extracted title (optional)
+            
+        Returns:
+            Final filename (edited or approved)
+        """
+        print("\n" + "="*70)
+        print("📄 FILENAME")
+        print("="*70)
+        print(f"Generated filename: {target_filename}")
+        print()
+        print("  [Enter] = Use this filename")
+        print("  [e] = Edit filename")
+        print()
+        
+        choice = input("Your choice: ").strip().lower()
+        
+        if choice == '' or choice == 'y':
+            # User approved, return as-is
+            return target_filename
+        
+        if choice != 'e':
+            # Invalid choice, default to approve
+            return target_filename
+        
+        # User wants to edit - show options
+        print()
+        print("Choose filename source:")
+        print("  [a] Default: Zotero-based filename (current)")
+        print("  [b] OCR-based: Use extracted title from PDF")
+        print()
+        
+        source_choice = input("Your choice [a/b]: ").strip().lower()
+        
+        if source_choice == 'b' and extracted_metadata:
+            # Generate OCR-based filename
+            ocr_title = extracted_metadata.get('title', '').strip()
+            if ocr_title:
+                # Build metadata with OCR title but Zotero authors/year
+                ocr_metadata = {
+                    'title': ocr_title,
+                    'authors': zotero_metadata.get('authors', []),
+                    'year': zotero_metadata.get('year', 'Unknown'),
+                    'document_type': zotero_metadata.get('document_type', 'journalArticle')
+                }
+                filename_gen = FilenameGenerator()
+                proposed_filename = filename_gen.generate(ocr_metadata, is_scan=True) + '.pdf'
+                print()
+                print(f"OCR-based filename: {proposed_filename}")
+            else:
+                print("⚠️  No extracted title available, using Zotero-based filename")
+                proposed_filename = target_filename
+        else:
+            # Use Zotero-based (option a or fallback)
+            proposed_filename = target_filename
+            print()
+            print(f"Zotero-based filename: {proposed_filename}")
+        
+        # Allow terminal editing
+        print()
+        print("Edit filename (or press Enter to use as-is):")
+        edited = input(f"{proposed_filename} -> ").strip()
+        
+        if edited:
+            # Validate and clean edited filename
+            # Ensure .pdf extension
+            if not edited.endswith('.pdf'):
+                edited = edited + '.pdf'
+            
+            # Basic validation - remove invalid characters
+            from pathvalidate import sanitize_filename
+            # Remove extension for sanitization
+            if edited.endswith('.pdf'):
+                base = edited[:-4]
+                ext = '.pdf'
+            else:
+                base = edited
+                ext = ''
+            
+            # Sanitize base name
+            sanitized_base = sanitize_filename(base, replacement_text='_', platform='universal')
+            final_filename = sanitized_base + ext
+            
+            if final_filename != edited:
+                print(f"⚠️  Filename sanitized: {final_filename}")
+            
+            return final_filename
+        else:
+            return proposed_filename
 
     def _to_windows_path(self, path: Path) -> str:
         """Convert WSL path to Windows path for linked files.
@@ -10547,7 +10642,14 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             target_exists = False
         
         if target_exists:
-            # File exists - show comparison and get user choice
+            # File exists - show that Zotero item already has PDF and prompt for filename edit
+            print("\n" + "="*70)
+            print("⚠️  FILE CONFLICT")
+            print("="*70)
+            print("⚠️  This Zotero item already has a PDF attached")
+            print()
+            
+            # Show PDF comparison
             try:
                 existing_info = self._summarize_pdf_for_compare(target_path_full)
                 scan_info = self._summarize_pdf_for_compare(pdf_to_copy)
@@ -10558,38 +10660,83 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 existing_info = {'filename': target_filename, 'path': target_path_full}
                 scan_info = {'filename': pdf_to_copy.name}
             
-            print("What would you like to do?")
-            print("[1] Keep both (add scanned version with _scan suffix)")
-            print("[2] Replace existing PDF with scan")
-            print("[3] Skip attaching and finish")
-            print("  (z) Cancel (keep original)")
-            print()
+            # Prepare metadata for filename editing
+            zotero_authors = zotero_item.get('authors', [])
+            zotero_title = zotero_item.get('title', '')
+            zotero_year = zotero_item.get('year', zotero_item.get('date', ''))
+            zotero_item_type = zotero_item.get('itemType', 'journalArticle')
             
-            pdf_choice = input("Enter your choice: ").strip().lower()
+            zotero_metadata = {
+                'title': zotero_title,
+                'authors': zotero_authors,
+                'year': zotero_year if zotero_year else 'Unknown',
+                'document_type': zotero_item_type
+            }
             
-            if pdf_choice == 'z':
-                self.move_to_done(pdf_path)
-                print("✅ Cancelled - kept original PDF")
-                return
-            if pdf_choice == '3':
-                self.move_to_done(pdf_path)
-                print("✅ Skipped attachment and finished")
-                return
+            # Extract metadata from context if available
+            extracted_metadata = metadata if metadata else {}
             
-            if pdf_choice == '2':
-                replace_existing = True
-            elif pdf_choice == '1':
-                # Rename with _scan suffix
-                stem = target_path_full.stem
-                suffix = target_path_full.suffix
-                target_filename = f"{stem}_scan{suffix}"
-                target_path_full = self.publications_dir / target_filename
-            else:
-                # Default to keep both if invalid choice
-                stem = target_path_full.stem
-                suffix = target_path_full.suffix
-                target_filename = f"{stem}_scan{suffix}"
-                target_path_full = self.publications_dir / target_filename
+            # Loop until unique filename is found
+            while True:
+                # Prompt for filename editing
+                new_filename = self._prompt_filename_edit(
+                    target_filename=target_filename,
+                    zotero_metadata=zotero_metadata,
+                    extracted_metadata=extracted_metadata
+                )
+                
+                # Check if new filename exists
+                new_path = self.publications_dir / new_filename
+                try:
+                    if not new_path.exists():
+                        # Unique filename found
+                        target_filename = new_filename
+                        target_path_full = new_path
+                        break
+                    else:
+                        # Still exists, ask user what to do
+                        print()
+                        print(f"⚠️  File '{new_filename}' already exists")
+                        print("What would you like to do?")
+                        print("[1] Replace existing PDF with scan")
+                        print("[2] Edit filename again")
+                        print("[3] Skip attaching and finish")
+                        print("  (z) Cancel (keep original)")
+                        print()
+                        
+                        conflict_choice = input("Enter your choice: ").strip().lower()
+                        
+                        if conflict_choice == 'z':
+                            self.move_to_done(pdf_path)
+                            print("✅ Cancelled - kept original PDF")
+                            return
+                        elif conflict_choice == '3':
+                            self.move_to_done(pdf_path)
+                            print("✅ Skipped attachment and finished")
+                            return
+                        elif conflict_choice == '1':
+                            # Replace existing
+                            target_filename = new_filename
+                            target_path_full = new_path
+                            replace_existing = True
+                            break
+                        elif conflict_choice == '2':
+                            # Edit again - continue loop
+                            target_filename = new_filename
+                            continue
+                        else:
+                            # Invalid choice, default to replace
+                            target_filename = new_filename
+                            target_path_full = new_path
+                            replace_existing = True
+                            break
+                except OSError as e:
+                    # Cloud drive may not be accessible from WSL
+                    self.logger.debug(f"Could not check if new filename exists (cloud drive?): {e}")
+                    # Assume it's unique and proceed
+                    target_filename = new_filename
+                    target_path_full = new_path
+                    break
         
         # Step 2: Verify and log target filename before copy
         # Defensive check: ensure target_filename doesn't contain temp file patterns

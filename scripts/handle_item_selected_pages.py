@@ -174,16 +174,24 @@ def create_review_and_proceed_page(daemon) -> Page:
             # Titles differ - navigate to filename override page
             return NavigationResult.show_page('filename_title_override')
         
-        # Titles are the same - proceed directly to proposed actions
-        # Show what authors will be used in filename
-        if zotero_authors:
-            author_display = '_'.join([a.split()[-1] if ' ' in a else a for a in zotero_authors[:2]])
-            print(f"📝 Filename will use authors: {author_display}")
-            print()
+        # Titles are the same - prompt for filename editing
+        # Prepare metadata for filename editing
+        zotero_metadata = {
+            'title': zotero_title,
+            'authors': zotero_authors,
+            'year': zotero_year if zotero_year else 'Unknown',
+            'document_type': zotero_item_type
+        }
         
-        # Show filename preview before confirmation
-        print(f"📄 Generated filename: {target_filename}")
-        print()
+        # Prompt for filename editing
+        final_filename = daemon._prompt_filename_edit(
+            target_filename=target_filename,
+            zotero_metadata=zotero_metadata,
+            extracted_metadata=metadata
+        )
+        
+        # Update context with final filename
+        ctx['target_filename'] = final_filename
         
         # Show PDF comparison if item already has PDF
         has_pdf = ctx.get('has_pdf', False)
@@ -488,15 +496,24 @@ def create_proceed_after_edit_page(daemon) -> Page:
             # Only set if not already present (should already be set from ItemSelectedContext)
             ctx['metadata'] = original_extracted_metadata
         
-        # Show what authors will be used in filename
-        if zotero_authors:
-            author_display = '_'.join([a.split()[-1] if ' ' in a else a for a in zotero_authors[:2]])
-            print(f"📝 Filename will use authors: {author_display}")
-            print()
+        # Prompt for filename editing
+        # Prepare metadata for filename editing
+        zotero_metadata = {
+            'title': zotero_title,
+            'authors': zotero_authors,
+            'year': zotero_year if zotero_year else 'Unknown',
+            'document_type': zotero_item_type
+        }
         
-        # Show filename preview before confirmation
-        print(f"📄 Generated filename: {target_filename}")
-        print()
+        # Prompt for filename editing
+        final_filename = daemon._prompt_filename_edit(
+            target_filename=target_filename,
+            zotero_metadata=zotero_metadata,
+            extracted_metadata=original_extracted_metadata
+        )
+        
+        # Update context with final filename
+        ctx['target_filename'] = final_filename
         
         # Show PDF comparison if item already has PDF
         has_pdf = ctx.get('has_pdf', False)
