@@ -100,7 +100,11 @@ class PaperProcessorDaemon:
         
         # Initialize content detector (for content-aware border removal and gutter detection)
         from shared_tools.pdf.content_detector import ContentDetector
-        self.content_detector = ContentDetector()
+        content_detector_config = {
+            'gutter_min_percent': self.gutter_min_percent,
+            'gutter_max_percent': self.gutter_max_percent
+        }
+        self.content_detector = ContentDetector(config=content_detector_config)
         
         # Initialize service manager (replaces direct service management)
         print("🚀 Initializing services...")
@@ -197,6 +201,10 @@ class PaperProcessorDaemon:
         
         # Get border detection configuration
         self.border_max_width = self.config.getint('BORDER', 'max_border_width', fallback=600)
+        
+        # Get gutter detection configuration
+        self.gutter_min_percent = self.config.getint('GUTTER', 'gutter_min_percent', fallback=40)
+        self.gutter_max_percent = self.config.getint('GUTTER', 'gutter_max_percent', fallback=60)
         
         # Get UX configuration
         self.page_offset_timeout = self.config.getint('UX', 'page_offset_timeout', fallback=10)
@@ -4941,14 +4949,56 @@ class PaperProcessorDaemon:
                     split_method=split_method,
                     border_detection_stats=border_detection_stats
                 )
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'C',
+                            'location': 'paper_processor_daemon.py:_preprocess_pdf_with_options',
+                            'message': 'Split result',
+                            'data': {
+                                'split_path': str(split_path) if split_path else None,
+                                'current_pdf_before': str(current_pdf),
+                                'split_method': split_method,
+                                'split_attempted': preprocessing_state.get('split_attempted', False)
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except: pass
+                # #endregion
                 if split_path:
                     current_pdf = split_path
                     # split_method already set above, just log success
                     self.logger.info(f"Split completed: {split_path.name}")
+                    preprocessing_state['split_succeeded'] = True
                 else:
                     # Split was attempted but failed or was cancelled
                     # Keep split_method in state to show what was attempted
                     self.logger.info(f"Split attempted with method '{split_method}' but did not complete (user cancelled or failed)")
+                    preprocessing_state['split_succeeded'] = False
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'C',
+                                'location': 'paper_processor_daemon.py:_preprocess_pdf_with_options',
+                                'message': 'Split failed - current_pdf not updated',
+                                'data': {
+                                    'current_pdf': str(current_pdf),
+                                    'split_method': split_method,
+                                    'split_attempted': preprocessing_state.get('split_attempted', False),
+                                    'split_succeeded': False
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
         
         # Step 3: Trim leading pages if requested
         if trim_leading:
@@ -4958,6 +5008,24 @@ class PaperProcessorDaemon:
                 preprocessing_state['trim_leading'] = True
                 self.logger.debug(f"Leading pages trimmed: {trimmed_pdf.name}")
         
+        # #region agent log
+        try:
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'C',
+                    'location': 'paper_processor_daemon.py:_preprocess_pdf_with_options',
+                    'message': 'Returning processed PDF',
+                    'data': {
+                        'processed_pdf': str(current_pdf) if current_pdf else None,
+                        'preprocessing_state': preprocessing_state
+                    },
+                    'timestamp': int(time.time() * 1000)
+                }) + '\n')
+        except: pass
+        # #endregion
         return current_pdf, preprocessing_state
     
     def _preview_and_modify_preprocessing(
@@ -5000,19 +5068,21 @@ class PaperProcessorDaemon:
             split_attempted = preprocessing_state.get('split_attempted', False)
             
             # Determine split status based on method and whether it was attempted/succeeded
+            # Check if split actually succeeded by comparing processed_pdf with original
+            split_succeeded = preprocessing_state.get('split_succeeded', False)
             # If split_method is 'none' but split_attempted is True, user cancelled
-            if split_method == 'manual' and split_attempted:
+            if split_method == 'manual' and split_attempted and split_succeeded:
                 manual_ratio = preprocessing_state.get('manual_split_ratio')
                 if manual_ratio:
                     split_status = f"✓ Applied (manual {manual_ratio:.0f}/{100-manual_ratio:.0f})"
                 else:
                     split_status = "✓ Applied (manual)"
-            elif split_method == 'auto' and split_attempted:
+            elif split_method == 'auto' and split_attempted and split_succeeded:
                 split_status = "✓ Applied (gutter detection)"
-            elif split_method == '50-50' and split_attempted:
+            elif split_method == '50-50' and split_attempted and split_succeeded:
                 split_status = "✓ Applied (50/50 geometric)"
             elif split_method != 'none' and split_attempted:
-                # Split was attempted with a method but may have failed or been cancelled
+                # Split was attempted with a method but failed or was cancelled
                 split_status = f"✗ Attempted ({split_method}) but failed/cancelled"
             elif split_attempted:
                 # Split was attempted but method is 'none' (user cancelled)
@@ -5468,10 +5538,11 @@ class PaperProcessorDaemon:
             return (False, 0.0, 'none')
     
     def _find_gutter_position(self, pdf_path: Path, sample_pages: int = 3) -> Optional[Dict]:
-        """Find the actual gutter position between two pages using content-aware detection.
+        """Find the actual gutter position using dual-method approach.
         
-        Uses binary search edge detection to find gap between text columns.
-        Returns per-page gutter positions to handle variation.
+        Uses both edge detection and density minimum methods in parallel.
+        Both methods must pass validation AND agree (no overlap with detected columns).
+        If any check fails, rejects split entirely for reliability.
         
         Args:
             pdf_path: Path to PDF file (should already have borders removed)
@@ -5488,15 +5559,28 @@ class PaperProcessorDaemon:
             return None
         
         try:
-            # Use ContentDetector to find per-page gutter positions
-            results = self.content_detector.detect_two_column_regions_binary_search(
-                pdf_path, 
+            # Run both methods in parallel
+            edge_results = self.content_detector.detect_two_column_regions_binary_search(
+                pdf_path,
                 density_threshold=None,  # Will auto-detect
                 pages=None  # Process all pages
             )
             
-            if not results:
-                self.logger.debug("ContentDetector found no two-column regions")
+            density_results = self.content_detector.detect_gutter_by_density_minimum(
+                pdf_path,
+                pages=None,  # Process all pages
+                density_threshold=None  # Will auto-detect
+            )
+            
+            if not edge_results or not density_results:
+                self.logger.debug("One or both methods found no results")
+                return None
+            
+            if len(edge_results) != len(density_results):
+                self.logger.warning(
+                    f"Mismatch in page counts: edge method found {len(edge_results)} pages, "
+                    f"density method found {len(density_results)} pages"
+                )
                 return None
             
             # Get page width from first page
@@ -5506,150 +5590,172 @@ class PaperProcessorDaemon:
                 return None
             page_width = doc[0].rect.width
             
-            # Extract per-page gutter positions and handle edge case: last page with only left column
-            gutter_x_per_page = []
-            left_column_boxes = []
-            right_column_boxes = []
+            # Process each page: check individual validations, check agreement, final safety check
+            valid_gutter_positions = []
+            valid_left_boxes = []
+            valid_right_boxes = []
             
-            for page_num, (left_box, right_box, gutter_x_pts) in enumerate(results):
-                # Check if this page has only a left column (no right column detected)
-                # This can happen on the last page of a document
-                # right_box is (left, top, right, bottom)
-                if page_num < len(doc):
-                    page = doc[page_num]
-                    page_width_pts = page.rect.width
-                    
-                    # Render page to get pixel dimensions for comparison
-                    zoom = 2.0
-                    mat = fitz.Matrix(zoom, zoom)
-                    pix = page.get_pixmap(matrix=mat, alpha=False)
-                    img_width_px = pix.width
-                    
-                    # Check if right column is missing by checking:
-                    # 1. Right column's left edge is near page edge (>= 95% of width)
-                    # 2. OR gap between columns is too small (< 5% of page width)
-                    # Normal two-column pages have right column starting around 50-60% of page width
-                    right_col_left_px = right_box[0] if len(right_box) > 0 else img_width_px
-                    left_col_right_px = left_box[2] if len(left_box) > 2 else 0
-                    gap_px = right_col_left_px - left_col_right_px
-                    gap_pct = (gap_px / img_width_px * 100) if img_width_px > 0 else 0
-                    right_col_left_pct = (right_col_left_px / img_width_px * 100) if img_width_px > 0 else 100
-                    
-                    # If right column starts at >= 95% of page width OR gap is < 5%, assume no right column
-                    if img_width_px > 0 and (right_col_left_pct >= 95.0 or gap_pct < 5.0):
-                            # Use previous page's gutter, or median, or 50% split
-                            if gutter_x_per_page:
-                                # Use previous page's gutter position
-                                fallback_gutter = gutter_x_per_page[-1]
-                                self.logger.info(
-                                    f"Page {page_num + 1} has only left column - using previous page's gutter: {fallback_gutter:.1f}pts"
-                                )
-                                gutter_x_pts = fallback_gutter
-                            elif len(results) > 1:
-                                # Use median from other pages
-                                other_gutters = [g for i, (_, _, g) in enumerate(results) if i != page_num]
-                                if other_gutters:
-                                    fallback_gutter = float(np.median(other_gutters))
-                                    self.logger.info(
-                                        f"Page {page_num + 1} has only left column - using median gutter: {fallback_gutter:.1f}pts"
-                                    )
-                                    gutter_x_pts = fallback_gutter
-                            else:
-                                # Fall back to 50% split
-                                fallback_gutter = page_width_pts / 2
-                                self.logger.info(
-                                    f"Page {page_num + 1} has only left column - using 50% split: {fallback_gutter:.1f}pts"
-                                )
-                                gutter_x_pts = fallback_gutter
+            for page_num in range(len(edge_results)):
+                if page_num >= len(doc):
+                    continue
                 
-                gutter_x_per_page.append(gutter_x_pts)
-                left_column_boxes.append(left_box)
-                right_column_boxes.append(right_box)
+                # Unpack edge detection results: (left_box, right_box, gutter_x_pts, is_valid, validation_errors, left_col_right_px, right_col_left_px)
+                edge_left_box, edge_right_box, edge_gutter_x_pts, edge_is_valid, edge_errors, left_col_right_px, right_col_left_px = edge_results[page_num]
+                
+                # Unpack density method results: (gutter_x_pts, shape_metrics, is_valid)
+                density_gutter_x_pts, density_shape_metrics, density_is_valid = density_results[page_num]
+                
+                # Check individual validations
+                if not edge_is_valid:
+                    self.logger.warning(
+                        f"Page {page_num + 1} edge detection validation failed: {'; '.join(edge_errors)}"
+                    )
+                    continue
+                
+                if not density_is_valid:
+                    validation_errors_str = '; '.join(density_shape_metrics.get('validation_errors', ['Unknown error']))
+                    self.logger.warning(
+                        f"Page {page_num + 1} density method validation failed: {validation_errors_str}"
+                    )
+                    continue
+                
+                # Both methods passed validation - check agreement (no overlap)
+                # Edge method provides: left_col_right_px and right_col_left_px (column boundaries in pixels)
+                # Density method provides: gutter_position (in PDF points) - need to convert to pixels
+                page = doc[page_num]
+                page_width_pts = page.rect.width
+                
+                # Render page to get pixel dimensions
+                zoom = 2.0
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                img_width_px = pix.width
+                
+                # Convert density method gutter position from PDF points to pixels
+                density_gutter_px = int((density_gutter_x_pts / page_width_pts) * img_width_px) if page_width_pts > 0 else 0
+                
+                # Overlap check: density method's gutter position must be in the gap between columns
+                # Condition: left_col_right <= density_gutter_px <= right_col_left
+                if density_gutter_px < left_col_right_px or density_gutter_px > right_col_left_px:
+                    # Overlap detected - reject this page
+                    density_gutter_pct = (density_gutter_px / img_width_px) * 100 if img_width_px > 0 else 0
+                    left_col_right_pct = (left_col_right_px / img_width_px) * 100 if img_width_px > 0 else 0
+                    right_col_left_pct = (right_col_left_px / img_width_px) * 100 if img_width_px > 0 else 0
+                    self.logger.warning(
+                        f"Page {page_num + 1} methods disagree: "
+                        f"Density method gutter at {density_gutter_pct:.1f}% overlaps with edge-detected columns "
+                        f"(left ends at {left_col_right_pct:.1f}%, right starts at {right_col_left_pct:.1f}%)"
+                    )
+                    continue
+                
+                # Both methods agree - perform final safety check
+                # Use density method's gutter position (since it passed overlap check)
+                import cv2
+                if len(pix.samples) > 0:
+                    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
+                    if len(img.shape) == 3:
+                        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                    else:
+                        gray = img
+                    
+                    # Sample 20px wide strip at gutter position (from middle 35-65% of height)
+                    h, w = gray.shape
+                    middle_top = int(h * 0.35)
+                    middle_bottom = int(h * 0.65)
+                    strip_width_px = 20
+                    x1 = max(0, density_gutter_px - strip_width_px // 2)
+                    x2 = min(w, density_gutter_px + strip_width_px // 2)
+                    
+                    strip = gray[middle_top:middle_bottom, x1:x2]
+                    if strip.size > 0:
+                        # Calculate content density (non-white pixels < 240)
+                        non_white = np.sum(strip < 240)
+                        total = strip.size
+                        content_density = float(non_white / total) if total > 0 else 0.0
+                        
+                        if content_density > 0.20:  # 20% threshold
+                            self.logger.warning(
+                                f"Page {page_num + 1} final safety check failed: "
+                                f"Gutter position has {content_density:.1%} content density (would cut through text)"
+                            )
+                            continue
+                
+                # All checks passed - add to valid results
+                valid_gutter_positions.append(density_gutter_x_pts)
+                valid_left_boxes.append(edge_left_box)
+                valid_right_boxes.append(edge_right_box)
+                
+                self.logger.info(
+                    f"Page {page_num + 1} dual-method detection succeeded: "
+                    f"gutter={density_gutter_x_pts:.1f}pts ({density_gutter_x_pts/page_width_pts*100:.1f}%)"
+                )
             
             doc.close()
             
-            if not gutter_x_per_page:
+            # Per-page consistency check: require at least 2 pages
+            if len(valid_gutter_positions) < 2:
+                self.logger.warning(
+                    f"Not enough valid pages: {len(valid_gutter_positions)} pages passed all checks "
+                    f"(require at least 2 for consistency)"
+                )
                 return None
             
-            # Calculate variation across pages
-            if len(gutter_x_per_page) > 1:
-                std_dev = np.std(gutter_x_per_page)
-                mean_gutter = np.mean(gutter_x_per_page)
+            # Use median across pages for final gutter position
+            median_gutter = float(np.median(valid_gutter_positions))
+            
+            # Reject pages where position differs > 5% from median (outlier detection)
+            consistent_gutters = []
+            consistent_left_boxes = []
+            consistent_right_boxes = []
+            
+            for i, gutter_pos in enumerate(valid_gutter_positions):
+                diff_pct = abs(gutter_pos - median_gutter) / page_width * 100 if page_width > 0 else 0
+                if diff_pct <= 5.0:
+                    consistent_gutters.append(gutter_pos)
+                    consistent_left_boxes.append(valid_left_boxes[i])
+                    consistent_right_boxes.append(valid_right_boxes[i])
+                else:
+                    self.logger.warning(
+                        f"Page {i+1} gutter position ({gutter_pos:.1f}pts, {gutter_pos/page_width*100:.1f}%) "
+                        f"differs {diff_pct:.1f}% from median ({median_gutter:.1f}pts) - rejected as outlier"
+                    )
+            
+            if len(consistent_gutters) < 2:
+                self.logger.warning(
+                    f"Not enough consistent pages after outlier removal: {len(consistent_gutters)} pages "
+                    f"(require at least 2)"
+                )
+                return None
+            
+            # Calculate final median from consistent pages
+            final_median_gutter = float(np.median(consistent_gutters))
+            
+            # Calculate variation across consistent pages
+            if len(consistent_gutters) > 1:
+                std_dev = np.std(consistent_gutters)
+                mean_gutter = np.mean(consistent_gutters)
                 cv = std_dev / (mean_gutter + 1e-6)  # Coefficient of variation
             else:
                 cv = 0.0
             
-            # If variation > 10%, warn but still use per-page values
             if cv > 0.10:
-                self.logger.warning(f"Gutter position varies significantly across pages (CV: {cv:.1%}) - using per-page values")
+                self.logger.warning(f"Gutter position varies significantly across pages (CV: {cv:.1%})")
             
-            # Verify safety for each page, but always include all pages (even if safety check fails)
-            # This ensures per-page gutters are available for all pages, preventing misalignment
-            doc = fitz.open(str(pdf_path))
-            safe_gutters = []
-            safe_left_boxes = []
-            safe_right_boxes = []
-            
-            for page_num, (left_box, right_box, gutter_x_pts) in enumerate(results):
-                if page_num >= len(doc):
-                    continue
-                
-                page = doc[page_num]
-                zoom = 2.0
-                mat = fitz.Matrix(zoom, zoom)
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
-                
-                # Convert to grayscale
-                if len(img.shape) == 3:
-                    import cv2
-                    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-                else:
-                    gray = img
-                
-                # Convert gutter from PDF points to pixels
-                gutter_x_px = int((gutter_x_pts / page_width) * gray.shape[1])
-                
-                # Verify safety (but don't exclude pages that fail - just warn)
-                density_threshold = self.content_detector.detect_text_density_threshold(pdf_path, is_two_up=True)
-                is_safe, warning = self.content_detector.verify_gutter_position_safety(
-                    gray, gutter_x_px, density_threshold, page_width
-                )
-                
-                # Always include the gutter, even if safety check fails
-                # The threshold is conservative - 16-19% might still be valid
-                # Better to include it than exclude it and cause misalignment
-                safe_gutters.append(gutter_x_pts)
-                safe_left_boxes.append(left_box)
-                safe_right_boxes.append(right_box)
-                
-                if not is_safe:
-                    self.logger.warning(f"Gutter position on page {page_num + 1} failed safety check: {warning}")
-                    self.logger.warning(f"  Using detected gutter anyway ({gutter_x_pts:.1f} pts) - threshold may be too strict")
-                elif warning:  # Warning but still safe (borderline case)
-                    self.logger.debug(f"Gutter position on page {page_num + 1}: {warning}")
-            
-            doc.close()
-            
-            if not safe_gutters:
-                self.logger.warning("No gutter positions found")
-                return None
-            
-            # Return per-page results - ensure all pages have a gutter value
+            # Return per-page results
             return {
-                'gutter_x_per_page': [float(x) for x in safe_gutters],
-                'left_column_boxes': safe_left_boxes,
-                'right_column_boxes': safe_right_boxes,
-                'method': 'binary_search_columns_per_page',
+                'gutter_x_per_page': [float(x) for x in consistent_gutters],
+                'left_column_boxes': consistent_left_boxes,
+                'right_column_boxes': consistent_right_boxes,
+                'method': 'dual_method_edge_density',
                 'variation': float(cv),
-                'confidence': [1.0] * len(safe_gutters),  # TODO: Calculate actual confidence
-                'gutter_x': float(np.median(safe_gutters)),  # Backward compatibility: median
-                'gutter_positions': [float(x) for x in safe_gutters],  # Backward compatibility
+                'confidence': [1.0] * len(consistent_gutters),  # High confidence when both methods agree
+                'gutter_x': final_median_gutter,  # Backward compatibility: median
+                'gutter_positions': [float(x) for x in consistent_gutters],  # Backward compatibility
                 'page_width': float(page_width)
             }
             
         except Exception as e:
-            self.logger.debug(f"Gutter detection failed: {e}")
+            self.logger.error(f"Dual-method gutter detection failed: {e}", exc_info=True)
             return None
     
     def _validate_gutter_detection(self, gutter_x: float, page_width: float,
@@ -5740,13 +5846,15 @@ class PaperProcessorDaemon:
                     f.write(json.dumps({
                         'sessionId': 'debug-session',
                         'runId': 'run1',
-                        'hypothesisId': 'G',
+                        'hypothesisId': 'A,B,C',
                         'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
-                        'message': 'Starting split - original PDF',
+                        'message': 'Document opened - before page loop',
                         'data': {
                             'pdf_path': str(pdf_path),
                             'original_page_count': original_page_count,
-                            'gutter_x': float(gutter_x)
+                            'gutter_x': float(gutter_x),
+                            'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
+                            'doc_type': type(doc).__name__
                         },
                         'timestamp': int(time.time() * 1000)
                     }) + '\n')
@@ -5760,17 +5868,115 @@ class PaperProcessorDaemon:
             new_doc = fitz.open()
             
             pages_created = 0
-            for page_num in range(len(doc)):
+            doc_len = len(doc)
+            # #region agent log
+            try:
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'A,B',
+                        'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                        'message': 'Before page loop',
+                        'data': {
+                            'doc_len': doc_len,
+                            'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
+                            'range_end': doc_len
+                        },
+                        'timestamp': int(time.time() * 1000)
+                    }) + '\n')
+            except: pass
+            # #endregion
+            for page_num in range(doc_len):
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'A,B',
+                            'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                            'message': 'Before page access',
+                            'data': {
+                                'page_num': page_num,
+                                'doc_len': doc_len,
+                                'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown'
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except: pass
+                # #endregion
                 try:
                     page = doc[page_num]
                 except (IndexError, AttributeError) as e:
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'A',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Page access exception',
+                                'data': {
+                                    'page_num': page_num,
+                                    'exception_type': type(e).__name__,
+                                    'exception_msg': str(e),
+                                    'doc_len': doc_len,
+                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown'
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
                     error_msg = f"Failed to access page {page_num}: {e}"
                     self.logger.error(error_msg)
                     doc.close()
                     new_doc.close()
                     return None, error_msg
                 
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'B',
+                            'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                            'message': 'After page access',
+                            'data': {
+                                'page_num': page_num,
+                                'page_is_none': page is None,
+                                'page_type': type(page).__name__ if page is not None else None
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except: pass
+                # #endregion
                 if page is None:
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'B',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Page is None detected',
+                                'data': {
+                                    'page_num': page_num,
+                                    'doc_len': doc_len,
+                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown'
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
                     error_msg = f"Page {page_num} is None"
                     self.logger.error(error_msg)
                     doc.close()
@@ -5908,12 +6114,90 @@ class PaperProcessorDaemon:
                 # Create left page (from 0 to page_gutter_x)
                 left_rect = fitz.Rect(0, 0, page_gutter_x, page_height)
                 left_page = new_doc.new_page(width=page_gutter_x, height=page_height)
-                left_page.show_pdf_page(left_rect, doc, page_num, clip=left_rect)
+                
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'B',
+                            'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                            'message': 'Before show_pdf_page for left page',
+                            'data': {
+                                'page_num': page_num,
+                                'doc_len': len(doc),
+                                'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
+                                'page_is_none': page is None,
+                                'left_rect': [left_rect.x0, left_rect.y0, left_rect.x1, left_rect.y1]
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except: pass
+                # #endregion
+                
+                try:
+                    left_page.show_pdf_page(left_rect, doc, page_num, clip=left_rect)
+                except Exception as e:
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'B',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Exception in show_pdf_page for left page',
+                                'data': {
+                                    'page_num': page_num,
+                                    'exception_type': type(e).__name__,
+                                    'exception_msg': str(e),
+                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown'
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
+                    error_msg = f"Failed to create left page {page_num + 1}: {e}"
+                    self.logger.error(error_msg)
+                    doc.close()
+                    new_doc.close()
+                    return None, error_msg
                 
                 # Create right page (from page_gutter_x to page_width)
                 right_rect = fitz.Rect(page_gutter_x, 0, page_width, page_height)
                 right_page = new_doc.new_page(width=page_width - page_gutter_x, height=page_height)
-                right_page.show_pdf_page(right_rect, doc, page_num, clip=right_rect)
+                
+                try:
+                    right_page.show_pdf_page(right_rect, doc, page_num, clip=right_rect)
+                except Exception as e:
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'B',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Exception in show_pdf_page for right page',
+                                'data': {
+                                    'page_num': page_num,
+                                    'exception_type': type(e).__name__,
+                                    'exception_msg': str(e),
+                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown'
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
+                    error_msg = f"Failed to create right page {page_num + 1}: {e}"
+                    self.logger.error(error_msg)
+                    doc.close()
+                    new_doc.close()
+                    return None, error_msg
                 pages_created += 2
                 
                 # Diagnostic logging: Check content immediately after creation

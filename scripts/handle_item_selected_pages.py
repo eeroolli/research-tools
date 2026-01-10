@@ -1206,7 +1206,7 @@ def _handle_manual_split(ctx, daemon):
     try:
         import fitz  # PyMuPDF
         doc = fitz.open(str(original_pdf))
-        if len(doc.pages) == 0:
+        if len(doc) == 0:
             print("❌ Error: PDF has no pages")
             doc.close()
             return NavigationResult.show_page('pdf_preview')

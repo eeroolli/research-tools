@@ -25,6 +25,8 @@ class ContentDetector:
                 - default_density_threshold: Default text density threshold (default: 0.15)
                 - safety_margin_pct: Safety margin percentage (default: 0.10 = 10%)
                 - middle_region_pct: Middle region percentage for sampling (default: 0.3 = 35-65%)
+                - gutter_min_percent: Minimum gutter position as % of page width (default: 40)
+                - gutter_max_percent: Maximum gutter position as % of page width (default: 60)
         """
         self.config = config or {}
         self.logger = logging.getLogger(__name__)
@@ -33,6 +35,8 @@ class ContentDetector:
         self.default_density_threshold = self.config.get('default_density_threshold', 0.15)
         self.safety_margin_pct = self.config.get('safety_margin_pct', 0.10)  # 10% buffer
         self.middle_region_pct = self.config.get('middle_region_pct', 0.3)  # 35-65% region
+        self.gutter_min_percent = self.config.get('gutter_min_percent', 40)  # Minimum gutter position %
+        self.gutter_max_percent = self.config.get('gutter_max_percent', 60)  # Maximum gutter position %
         
     def detect_text_density_threshold(
         self, 
@@ -415,10 +419,10 @@ class ContentDetector:
         pdf_path: Path,
         density_threshold: Optional[float] = None,
         pages: Optional[List[int]] = None
-    ) -> List[Tuple[Tuple[int, int, int, int], Tuple[int, int, int, int], float]]:
+    ) -> List[Tuple[Tuple[int, int, int, int], Tuple[int, int, int, int], float, bool, List[str], int, int]]:
         """Detect two text columns using binary search edge detection.
         
-        Returns per-page results: list of (left_box, right_box, gutter_x) for each page.
+        Returns per-page results with validation status.
         
         Args:
             pdf_path: Path to PDF file
@@ -426,9 +430,12 @@ class ContentDetector:
             pages: List of page numbers to process (None = all pages)
             
         Returns:
-            List of tuples: [(left_box, right_box, gutter_x), ...] per page
-            where boxes are (left, top, right, bottom) in pixels
-            and gutter_x is in PDF points
+            List of tuples: [(left_box, right_box, gutter_x_pts, is_valid, validation_errors, left_col_right_px, right_col_left_px), ...] per page
+            where boxes are (left, top, right, bottom) in pixels,
+            gutter_x_pts is in PDF points,
+            is_valid indicates if validation passed,
+            validation_errors is list of error messages if validation failed,
+            left_col_right_px and right_col_left_px are pixel positions for overlap checking
         """
         if density_threshold is None:
             # Detect threshold (assumes two-up pages)
@@ -506,10 +513,51 @@ class ContentDetector:
                 left_box = (left_col_left, top, left_col_right, bottom)
                 right_box = (right_col_left, top, right_col_right, bottom)
                 
+                # Validate edge detection results using configured gutter range
+                validation_errors = []
+                is_valid = True
+                
+                # Convert gutter range from percentage to pixels
+                gutter_min_px = (self.gutter_min_percent / 100.0) * img_width
+                gutter_max_px = (self.gutter_max_percent / 100.0) * img_width
+                min_gap_px = 0.05 * img_width  # Minimum 5% gap
+                
+                # Validation check 1: left_col_right < right_col_left (must have positive gap)
+                if left_col_right >= right_col_left:
+                    is_valid = False
+                    validation_errors.append(
+                        f"Invalid gap: left_col_right ({left_col_right}px) >= right_col_left ({right_col_left}px)"
+                    )
+                
+                # Validation check 2: left_col_right <= gutter_max_percent%
+                if left_col_right > gutter_max_px:
+                    is_valid = False
+                    left_col_right_pct = (left_col_right / img_width) * 100 if img_width > 0 else 0
+                    validation_errors.append(
+                        f"left_col_right ({left_col_right_pct:.1f}%) exceeds max gutter position ({self.gutter_max_percent}%)"
+                    )
+                
+                # Validation check 3: right_col_left >= gutter_min_percent%
+                if right_col_left < gutter_min_px:
+                    is_valid = False
+                    right_col_left_pct = (right_col_left / img_width) * 100 if img_width > 0 else 0
+                    validation_errors.append(
+                        f"right_col_left ({right_col_left_pct:.1f}%) is below min gutter position ({self.gutter_min_percent}%)"
+                    )
+                
+                # Validation check 4: Gap >= 5% of page width (minimum gap size)
+                gap_px = right_col_left - left_col_right
+                if is_valid and gap_px < min_gap_px:
+                    is_valid = False
+                    gap_pct = (gap_px / img_width) * 100 if img_width > 0 else 0
+                    validation_errors.append(
+                        f"Gap ({gap_pct:.1f}%) is too small (minimum 5% required)"
+                    )
+                
                 # Calculate gutter position (gap between columns) in PDF points
                 # Gutter is between left_col_right and right_col_left
                 gutter_px = (left_col_right + right_col_left) // 2
-                gutter_x_pts = (gutter_px / img_width) * page_width_pts
+                gutter_x_pts = (gutter_px / img_width) * page_width_pts if img_width > 0 else page_width_pts / 2
                 
                 # Diagnostic logging: Log detected column edges and calculated gutter
                 left_col_left_pct = (left_col_left / img_width) * 100 if img_width > 0 else 0
@@ -518,14 +566,21 @@ class ContentDetector:
                 right_col_right_pct = (right_col_right / img_width) * 100 if img_width > 0 else 0
                 gutter_pct = (gutter_px / img_width) * 100 if img_width > 0 else 0
                 
-                self.logger.debug(
-                    f"Page {page_num + 1} column detection: "
-                    f"left_col=[{left_col_left}px ({left_col_left_pct:.1f}%), {left_col_right}px ({left_col_right_pct:.1f}%)], "
-                    f"right_col=[{right_col_left}px ({right_col_left_pct:.1f}%), {right_col_right}px ({right_col_right_pct:.1f}%)], "
-                    f"gutter={gutter_px}px ({gutter_pct:.1f}%) = {gutter_x_pts:.1f}pts"
-                )
+                if is_valid:
+                    self.logger.debug(
+                        f"Page {page_num + 1} column detection: "
+                        f"left_col=[{left_col_left}px ({left_col_left_pct:.1f}%), {left_col_right}px ({left_col_right_pct:.1f}%)], "
+                        f"right_col=[{right_col_left}px ({right_col_left_pct:.1f}%), {right_col_right}px ({right_col_right_pct:.1f}%)], "
+                        f"gutter={gutter_px}px ({gutter_pct:.1f}%) = {gutter_x_pts:.1f}pts"
+                    )
+                else:
+                    self.logger.warning(
+                        f"Page {page_num + 1} edge detection validation failed: {'; '.join(validation_errors)}"
+                    )
                 
-                results.append((left_box, right_box, gutter_x_pts))
+                # Return tuple with validation status: (left_box, right_box, gutter_x_pts, is_valid, validation_errors, left_col_right_px, right_col_left_px)
+                # Include pixel positions for overlap checking in dual-method coordinator
+                results.append((left_box, right_box, gutter_x_pts, is_valid, validation_errors, left_col_right, right_col_left))
             
             doc.close()
             return results
@@ -533,6 +588,279 @@ class ContentDetector:
         except Exception as e:
             self.logger.error(f"Error detecting two-column regions: {e}")
             return []
+    
+    def detect_gutter_by_density_minimum(
+        self,
+        pdf_path: Path,
+        pages: Optional[List[int]] = None,
+        density_threshold: Optional[float] = None
+    ) -> List[Tuple[float, Dict[str, Any], bool]]:
+        """Detect gutter position using density minimum method with shape analysis.
+        
+        Calculates horizontal projection profile and finds minimum density position,
+        then validates using shape analysis to distinguish real gutters from column edges.
+        
+        Args:
+            pdf_path: Path to PDF file
+            pages: List of page numbers to process (None = all pages)
+            density_threshold: Text density threshold (if None, will detect)
+            
+        Returns:
+            List of tuples per page: [(gutter_x_pts, shape_metrics, is_valid), ...]
+            where gutter_x_pts is in PDF points,
+            shape_metrics is dict with gradient, valley_width, curvature, etc.,
+            is_valid indicates if shape analysis passed
+        """
+        if density_threshold is None:
+            density_threshold = self.detect_text_density_threshold(pdf_path, is_two_up=True)
+        
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(str(pdf_path))
+            page_nums = pages if pages is not None else list(range(len(doc)))
+            
+            results = []
+            
+            for page_num in page_nums:
+                if page_num >= len(doc):
+                    continue
+                
+                page = doc[page_num]
+                page_rect = page.rect
+                page_width_pts = page_rect.width
+                page_height_pts = page_rect.height
+                
+                # Render page as image (2x zoom)
+                zoom = 2.0
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                
+                # Convert to numpy array
+                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
+                
+                # Convert to grayscale
+                if len(img.shape) == 3:
+                    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                else:
+                    gray = img
+                
+                img_height, img_width = gray.shape
+                
+                # Extract middle 35-65% region vertically (avoid edge artifacts)
+                middle_top = int(img_height * 0.35)
+                middle_bottom = int(img_height * 0.65)
+                content_region = gray[middle_top:middle_bottom, :]
+                
+                # Calculate horizontal projection: sum of inverted pixels (non-white pixels)
+                inverted = 255 - content_region
+                content_projection = np.sum(inverted, axis=0).astype(np.float32)
+                
+                # Apply Gaussian smoothing to reduce noise
+                kernel_size = max(5, int(img_width * 0.02))
+                if kernel_size % 2 == 0:
+                    kernel_size += 1
+                if kernel_size > 1:
+                    content_projection = cv2.GaussianBlur(
+                        content_projection.reshape(1, -1), (1, kernel_size), 0
+                    ).flatten()
+                
+                # Find minimum in configured gutter range (gutter_min_percent% to gutter_max_percent%)
+                gutter_min_px = int((self.gutter_min_percent / 100.0) * img_width)
+                gutter_max_px = int((self.gutter_max_percent / 100.0) * img_width)
+                
+                search_region = content_projection[gutter_min_px:gutter_max_px]
+                if len(search_region) == 0:
+                    results.append((page_width_pts / 2, {}, False))
+                    continue
+                
+                # Find minimum using windowed averaging (more robust than single pixel)
+                window_size = max(5, int(len(search_region) * 0.05))
+                min_window_avg = float('inf')
+                min_window_idx = 0
+                
+                for i in range(len(search_region) - window_size + 1):
+                    window = search_region[i:i+window_size]
+                    window_avg = np.mean(window)
+                    if window_avg < min_window_avg:
+                        min_window_avg = window_avg
+                        min_window_idx = i + window_size // 2  # Center of window
+                
+                # Convert back to full image coordinates
+                min_idx_px = gutter_min_px + min_window_idx
+                min_density = float(min_window_avg)
+                
+                # Shape analysis: Calculate gradient, curvature, valley width
+                shape_metrics = self._analyze_gutter_shape(
+                    content_projection, min_idx_px, img_width, min_density
+                )
+                
+                # Validate using shape analysis
+                is_valid, validation_errors = self._validate_gutter_shape(
+                    shape_metrics, min_idx_px, img_width
+                )
+                
+                # Store validation errors in shape_metrics for access by caller
+                shape_metrics['validation_errors'] = validation_errors
+                
+                # Convert to PDF points
+                gutter_x_pts = (min_idx_px / img_width) * page_width_pts if img_width > 0 else page_width_pts / 2
+                gutter_pct = (min_idx_px / img_width) * 100 if img_width > 0 else 50
+                
+                if is_valid:
+                    self.logger.debug(
+                        f"Page {page_num + 1} density minimum: gutter={min_idx_px}px ({gutter_pct:.1f}%) = {gutter_x_pts:.1f}pts, "
+                        f"gradient={shape_metrics.get('avg_gradient', 0):.1f}, valley_width={shape_metrics.get('valley_width_ratio', 0):.2f}"
+                    )
+                else:
+                    self.logger.warning(
+                        f"Page {page_num + 1} density minimum validation failed: {'; '.join(validation_errors)}"
+                    )
+                
+                results.append((gutter_x_pts, shape_metrics, is_valid))
+            
+            doc.close()
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Error detecting gutter by density minimum: {e}")
+            return []
+    
+    def _analyze_gutter_shape(
+        self,
+        projection: np.ndarray,
+        min_idx: int,
+        img_width: int,
+        min_value: float
+    ) -> Dict[str, Any]:
+        """Analyze shape around minimum position to distinguish gutters from column edges.
+        
+        Args:
+            projection: Horizontal projection profile
+            min_idx: Index of minimum position
+            img_width: Image width in pixels
+            min_value: Minimum density value
+            
+        Returns:
+            Dict with shape metrics: gradient, valley_width, curvature, etc.
+        """
+        # Analyze region around minimum (±10% of width)
+        analysis_radius = int(img_width * 0.10)
+        start_idx = max(0, min_idx - analysis_radius)
+        end_idx = min(len(projection), min_idx + analysis_radius)
+        
+        region = projection[start_idx:end_idx]
+        if len(region) < 10:
+            return {'avg_gradient': float('inf'), 'valley_width_ratio': 0, 'avg_second_deriv': float('inf')}
+        
+        # Calculate first derivative (gradient)
+        gradient = np.diff(region)
+        avg_gradient = float(np.mean(np.abs(gradient)))
+        max_gradient = float(np.max(np.abs(gradient)))
+        
+        # Calculate second derivative (curvature)
+        second_deriv = np.diff(gradient)
+        avg_second_deriv = float(np.mean(np.abs(second_deriv)))
+        max_second_deriv = float(np.max(np.abs(second_deriv)))
+        
+        # Measure valley width: distance between points where density rises 30% from minimum
+        threshold = min_value + 0.3 * (np.max(region) - min_value)
+        valley_indices = np.where(region <= threshold)[0]
+        
+        if len(valley_indices) > 0:
+            valley_width = int(valley_indices[-1] - valley_indices[0])
+            valley_width_ratio = valley_width / len(region) if len(region) > 0 else 0
+        else:
+            valley_width_ratio = 0
+        
+        # Calculate signal strength: content reduction at minimum
+        avg_density = float(np.mean(region))
+        content_reduction = (avg_density - min_value) / (avg_density + 1e-6) if avg_density > 0 else 0
+        content_reduction_pct = content_reduction * 100
+        
+        return {
+            'avg_gradient': avg_gradient,
+            'max_gradient': max_gradient,
+            'avg_second_deriv': avg_second_deriv,
+            'max_second_deriv': max_second_deriv,
+            'valley_width_ratio': valley_width_ratio,
+            'content_reduction_pct': content_reduction_pct,
+            'min_value': float(min_value),
+            'avg_value': avg_density
+        }
+    
+    def _validate_gutter_shape(
+        self,
+        shape_metrics: Dict[str, Any],
+        min_idx: int,
+        img_width: int
+    ) -> Tuple[bool, List[str]]:
+        """Validate that minimum position represents a real gutter, not a column edge.
+        
+        Args:
+            shape_metrics: Shape analysis metrics from _analyze_gutter_shape
+            min_idx: Index of minimum position
+            img_width: Image width in pixels
+            
+        Returns:
+            Tuple of (is_valid, validation_errors)
+        """
+        validation_errors = []
+        is_valid = True
+        
+        avg_gradient = shape_metrics.get('avg_gradient', float('inf'))
+        max_gradient = shape_metrics.get('max_gradient', float('inf'))
+        avg_second_deriv = shape_metrics.get('avg_second_deriv', float('inf'))
+        max_second_deriv = shape_metrics.get('max_second_deriv', float('inf'))
+        valley_width_ratio = shape_metrics.get('valley_width_ratio', 0)
+        content_reduction_pct = shape_metrics.get('content_reduction_pct', 0)
+        min_idx_pct = (min_idx / img_width) * 100 if img_width > 0 else 0
+        
+        # Validation 1: Average gradient < 500 (gradual valley, not sharp drop)
+        if avg_gradient > 500:
+            is_valid = False
+            validation_errors.append(f"Average gradient ({avg_gradient:.1f}) too high (sharp transition, not gradual gutter)")
+        
+        # Validation 2: Valley width ratio > 0.5 (wide valley, not narrow edge)
+        if valley_width_ratio < 0.4:
+            is_valid = False
+            validation_errors.append(f"Valley width ratio ({valley_width_ratio:.2f}) too narrow (column edge, not gutter)")
+        
+        # Validation 3: Average second derivative < 400 (smooth transition)
+        if avg_second_deriv > 400:
+            is_valid = False
+            validation_errors.append(f"Average curvature ({avg_second_deriv:.1f}) too high (sharp corner, not smooth gutter)")
+        
+        # Validation 4: Position within configured gutter range (gutter_min_percent% to gutter_max_percent%)
+        if min_idx_pct < self.gutter_min_percent or min_idx_pct > self.gutter_max_percent:
+            # If outside range, reject if gradient is also high (off-center sharp drop)
+            if avg_gradient > 600:
+                is_valid = False
+                validation_errors.append(
+                    f"Position ({min_idx_pct:.1f}%) outside range ({self.gutter_min_percent}-{self.gutter_max_percent}%) "
+                    f"with high gradient ({avg_gradient:.1f}) - likely column edge"
+                )
+        
+        # Validation 5: Signal strength - content reduction > 15%
+        if content_reduction_pct < 15:
+            is_valid = False
+            validation_errors.append(f"Signal strength ({content_reduction_pct:.1f}%) too low (no significant gutter detected)")
+        
+        # Additional reject conditions for column edges
+        # Reject if max gradient > 15000 AND second derivative > 1000 (very sharp corner)
+        if max_gradient > 15000 and avg_second_deriv > 1000:
+            is_valid = False
+            validation_errors.append(
+                f"Very sharp corner detected (max_gradient={max_gradient:.1f}, curvature={avg_second_deriv:.1f}) - column edge"
+            )
+        
+        # Reject if position outside range AND gradient > 800 (off-center sharp drop)
+        if (min_idx_pct < self.gutter_min_percent or min_idx_pct > self.gutter_max_percent) and avg_gradient > 800:
+            is_valid = False
+            validation_errors.append(
+                f"Off-center sharp drop (position={min_idx_pct:.1f}%, gradient={avg_gradient:.1f}) - column edge"
+            )
+        
+        return is_valid, validation_errors
     
     def verify_gutter_position_safety(
         self,
