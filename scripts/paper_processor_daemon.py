@@ -778,18 +778,66 @@ class PaperProcessorDaemon:
                 authors_not_in_text = []
                 for author in original_authors:
                     author_lower = author.lower()
-                    name_parts = author_lower.split(',')
-                    last_name = name_parts[0].strip() if name_parts else ""
+                    
+                    # Extract first and last names, handling both "Last, First" and "First Last" formats
+                    if ',' in author_lower:
+                        # "Last, First" format (GROBID standard)
+                        name_parts = author_lower.split(',')
+                        last_name = name_parts[0].strip() if name_parts else ""
+                        first_name = name_parts[1].strip() if len(name_parts) > 1 else ""
+                    else:
+                        # "First Last" format (fallback)
+                        name_parts = author_lower.split()
+                        if len(name_parts) >= 2:
+                            first_name = name_parts[0].strip()
+                            last_name = name_parts[-1].strip()  # Last part is surname
+                        elif len(name_parts) == 1:
+                            first_name = ""
+                            last_name = name_parts[0].strip()
+                        else:
+                            first_name = ""
+                            last_name = ""
                     
                     found_in_text = False
-                    # Try last name with word boundaries (prevents false positives)
+                    
+                    # Primary check: Last name with word boundaries (prevents false positives)
+                    last_name_found = False
                     if last_name and len(last_name) > 2:
                         last_name_escaped = re.escape(last_name)
                         pattern = r'\b' + last_name_escaped + r'\b'
                         if re.search(pattern, doc_text):
-                            found_in_text = True
+                            last_name_found = True
+                            found_in_text = True  # Last name alone is sufficient
                     
-                    # Try full name if last name not found
+                    # Relaxed check: First and last name proximity (allows middle initials)
+                    if last_name_found and first_name and len(first_name) > 1:
+                        # Find positions of first and last names in text
+                        first_name_escaped = re.escape(first_name)
+                        first_pattern = r'\b' + first_name_escaped + r'\b'
+                        last_pattern = r'\b' + last_name_escaped + r'\b'
+                        
+                        # Find all occurrences
+                        first_matches = list(re.finditer(first_pattern, doc_text))
+                        last_matches = list(re.finditer(last_pattern, doc_text))
+                        
+                        # Check if first and last names appear within ~30-40 characters of each other
+                        # This allows middle initials/names between them
+                        proximity_threshold = 40  # characters
+                        for first_match in first_matches:
+                            for last_match in last_matches:
+                                # Calculate distance between matches
+                                first_pos = first_match.start()
+                                last_pos = last_match.start()
+                                distance = abs(first_pos - last_pos)
+                                
+                                # Check if they're close enough (within threshold)
+                                if distance <= proximity_threshold:
+                                    found_in_text = True
+                                    break
+                            if found_in_text:
+                                break
+                    
+                    # Fallback: Try exact full name match if proximity check didn't work
                     if not found_in_text and author_lower:
                         author_escaped = re.escape(author_lower)
                         pattern = r'\b' + author_escaped + r'\b'
@@ -1307,7 +1355,7 @@ class PaperProcessorDaemon:
             else:
                 print("⚠️  Invalid choice. Please enter 1-5 or 'q' to quit.")
     
-    def search_and_display_local_zotero(self, metadata: dict) -> tuple:
+    def search_and_display_local_zotero(self, metadata: dict, force_prompt_year: bool = False) -> tuple:
         """Interactive Zotero search with author selection and item selection.
         
         SAFETY: This method only performs READ operations on the database.
@@ -1322,6 +1370,7 @@ class PaperProcessorDaemon:
         
         Args:
             metadata: Metadata to search with
+            force_prompt_year: If True, prompts for year even if one exists (allows changing)
             
         Returns:
             Tuple of (action, selected_item, updated_metadata):
@@ -1335,7 +1384,7 @@ class PaperProcessorDaemon:
         
         try:
             # Step 1: Ensure we have a year (prompt if missing, only once per session)
-            year_result = self.prompt_for_year(metadata)
+            year_result = self.prompt_for_year(metadata, force_prompt=force_prompt_year)
             # Handle special return values
             if year_result == 'BACK':
                 return ('back', None, metadata)
@@ -1345,220 +1394,276 @@ class PaperProcessorDaemon:
                 metadata = year_result  # Year was added/updated in metadata
             year = metadata.get('year', None)
             
-            # Step 2: Try quick title/DOI search first (but don't return early - show after author selection)
-            quick_matches = []
-            if metadata.get('title') or metadata.get('doi'):
-                print("\n🔍 Quick Zotero search using found info...")
-                quick_matches = self.local_zotero.search_by_metadata(metadata, max_matches=10)
-                if quick_matches:
-                    print(f"   Found {len(quick_matches)} potential match(es) - will show after author selection")
+            # Step 2: Determine available components for component-based search strategy
+            has_author = bool(metadata.get('authors'))
+            has_year = bool(year)
+            has_title = bool(metadata.get('title'))
+            has_doi = bool(metadata.get('doi'))
             
             # Preserve full author list for future re-search cycles
             if metadata.get('authors') and not metadata.get('_all_authors'):
                 metadata['_all_authors'] = metadata['authors'].copy()
-
-            # Step 3: Author-based search (always required)
-            if not metadata.get('authors'):
-                # If we have year/document_type but no authors, prompt for author input
-                # This happens when GROBID filtered out all authors (hallucinations)
-                if metadata.get('year') or metadata.get('document_type'):
-                    print("\n📝 No authors found from extraction - please provide author name")
-                    print("   (GROBID may have filtered out hallucinated authors)")
-                    author_input = input("First author's last name (or 'z' to skip, 'r' to restart): ").strip()
+            
+            # Step 3: Apply component-based search strategy
+            search_matches = []
+            search_info = ""
+            used_components = []
+            
+            # Priority 1: Author + Year (highest priority - most reliable)
+            if has_author and has_year:
+                # Use current author-based search flow (most reliable)
+                used_components = ["author", "year"]
+                # Will continue to author selection and search below
+                pass
+            
+            # Priority 2: Any two of three components
+            elif has_author and has_title:
+                # Author + Title
+                print("\n🔍 Searching Zotero by author and title...")
+                search_matches = self.local_zotero.search_by_metadata(metadata, max_matches=10)
+                used_components = ["author", "title"]
+                search_info = "by author and title"
+                if year:
+                    search_info += f" in {year}"
+            
+            elif has_title and has_year:
+                # Title + Year
+                print("\n🔍 Searching Zotero by title and year...")
+                search_matches = self.local_zotero.search_by_metadata(metadata, max_matches=10)
+                used_components = ["title", "year"]
+                search_info = f"by title and year ({year})"
+            
+            # Priority 3: Title only
+            elif has_title and not has_author and not has_year:
+                # Title only
+                print("\n🔍 Searching Zotero by title...")
+                search_matches = self.local_zotero.search_by_metadata(metadata, max_matches=10)
+                used_components = ["title"]
+                search_info = "by title only"
+            
+            # Priority 4: Year only - cannot search effectively, prompt for author
+            elif has_year and not has_author and not has_title:
+                # Year only - prompt for author
+                print("\n📝 No authors or title found - please provide author name")
+                print("   (Cannot search effectively with year alone)")
+                author_input = input("First author's last name (or 'z' to skip, 'r' to restart): ").strip()
+                
+                if author_input.lower() == 'r':
+                    return ('restart', None, metadata)
+                elif author_input.lower() == 'z':
+                    print("❌ No authors provided - cannot search")
+                    return ('none', None, metadata)
+                elif author_input:
+                    # Add author to metadata and continue with author+year search
+                    metadata['authors'] = [author_input]
+                    self.logger.info(f"User provided author: {author_input}")
+                    has_author = True
+                    used_components = ["author", "year"]
+                    # Will continue to author selection and search below
+                else:
+                    print("❌ No authors provided - cannot search")
+                    return ('none', None, metadata)
+            
+            # Priority 5: Author only
+            elif has_author and not has_year and not has_title:
+                # Author only - use current author-based search flow
+                used_components = ["author"]
+                # Will continue to author selection and search below
+                pass
+            
+            # No usable components
+            else:
+                print("❌ No usable search components found (need at least title, or author+year)")
+                return ('none', None, metadata)
+            
+            # Step 4: Display search results if we have matches from title-based searches
+            if search_matches:
+                if search_info:
+                    print(f"   Found {len(search_matches)} potential match(es) {search_info}")
+                
+                action, item = self.display_and_select_zotero_matches(search_matches, search_info)
+                if action == 'select':
+                    return (action, item, metadata)
+                # If user doesn't select from matches, allow them to provide author for more refined search
+                if not has_author:
+                    print("\n💡 No match selected. You can provide author name for more refined search.")
+                    author_input = input("First author's last name (or Enter to skip, 'r' to restart): ").strip()
                     
                     if author_input.lower() == 'r':
                         return ('restart', None, metadata)
-                    elif author_input.lower() == 'z':
-                        # Skip - will move to manual review
-                        print("❌ No authors provided - cannot search")
-                        return ('none', None, metadata)
                     elif author_input:
-                        # Add author to metadata and continue
                         metadata['authors'] = [author_input]
-                        self.logger.info(f"User provided author: {author_input}")
+                        self.logger.info(f"User provided author for refined search: {author_input}")
+                        has_author = True
+                        # Continue to author-based search below
                     else:
-                        # Empty input - move to manual review
-                        print("❌ No authors provided - cannot search")
+                        # User skipped - return with no selection
                         return ('none', None, metadata)
+            
+            # Step 5: Author-based search (for Priority 1, Priority 4 with author provided, or Priority 5)
+            if has_author:
+                # If we already have authors from metadata, let user select which to use
+                if metadata.get('authors'):
+                    selected_authors = self.select_authors_for_search(metadata['authors'].copy())
                 else:
-                    # No year/document_type either - move to manual review
-                    print("❌ No authors found - cannot search")
-                    return ('none', None, metadata)
-            
-            # Let user select which authors to search by
-            # Note: This may edit author names
-            selected_authors = self.select_authors_for_search(metadata['authors'].copy())
-            
-            # Check for back/restart commands
-            if selected_authors == 'BACK':
-                # Restore full filtered author list if available
-                if metadata.get('_all_authors'):
-                    metadata['authors'] = metadata['_all_authors'].copy()
-                return ('back', None, metadata)
-            elif selected_authors == 'RESTART':
-                return ('restart', None, metadata)  # Will cause restart from outer loop
-            
-            if not selected_authors:
-                print("❌ No authors selected")
-                return ('none', None, metadata)
-            
-            # Update metadata with edited/selected authors
-            # This preserves any author edits made in select_authors_for_search()
-            metadata['authors'] = selected_authors
-            
-            # Update _all_authors to include manually added authors so they're preserved for option 'a'
-            if metadata.get('_all_authors'):
-                # Merge current authors with _all_authors, preserving manually added ones
-                all_authors_set = set(metadata['_all_authors'])
-                selected_authors_set = set(selected_authors)
-                # Add any new authors that were manually added
-                new_authors = selected_authors_set - all_authors_set
-                if new_authors:
-                    metadata['_all_authors'].extend(list(new_authors))
-            else:
-                # First time - save the selected authors (including manually added ones)
-                metadata['_all_authors'] = selected_authors.copy()
-            
-            # Step 4: Show quick search results first (if any), then fall back to author-based search
-            if quick_matches:
-                search_info = "by title/DOI"
-                if year:
-                    search_info += f" in {year}"
+                    # Authors were just provided above, use them directly
+                    selected_authors = metadata.get('authors', [])
                 
-                action, item = self.display_and_select_zotero_matches(quick_matches, search_info)
-                if action == 'select':
-                    return (action, item, metadata)
-                # If user doesn't select from quick matches, continue to author-based search below
-            
-            # Step 5: Search by selected authors with year filter
-            # Extract last names for search
-            author_lastnames = []
-            for author in selected_authors:
-                # Handle "Lastname, FirstName" or "FirstName Lastname" format
-                if ',' in author:
-                    # "Schultz, P" -> "Schultz"
-                    lastname = author.split(',')[0].strip()
-                elif ' ' in author:
-                    # "P. Wesley Schultz" -> "Schultz"
-                    lastname = author.split()[-1]
-                else:
-                    # "Schultz" -> "Schultz"
-                    lastname = author
-                
-                # Normalize lastname: remove OCR error characters (bullets, unusual punctuation)
-                # Keep alphanumeric, spaces, hyphens, apostrophes, and periods
-                lastname = re.sub(r'[^\w\s\-\'\.]', '', lastname).strip()
-                
-                author_lastnames.append(lastname)
-            
-            # Show search query before executing
-            # Arrow indicates author order: first → second → third, etc.
-            author_display = ' & '.join(author_lastnames)
-            year_str = f" (year: {year})" if year else " (any year)"
-            doc_type = metadata.get('document_type')
-            doc_type_str = f" [type: {doc_type}]" if doc_type else ""
-            print(f"\n🔍 Searching Zotero database for authors (in order): {author_display}{year_str}{doc_type_str}")
-            
-            attempt_specs = [
-                {'year': year, 'document_type': doc_type, 'notice': None}
-            ]
-            if doc_type:
-                attempt_specs.append({
-                    'year': year,
-                    'document_type': None,
-                    'notice': "ℹ️  No matches with document type filter; including all Zotero item types."
-                })
-            if year:
-                attempt_specs.append({
-                    'year': None,
-                    'document_type': doc_type,
-                    'notice': "ℹ️  No matches with year filter; showing any publication year."
-                })
-            if doc_type and year:
-                attempt_specs.append({
-                    'year': None,
-                    'document_type': None,
-                    'notice': "ℹ️  No matches with year/type filters; showing any publication year and item type."
-                })
-            
-            # Remove duplicate attempts while preserving order
-            seen_attempts = set()
-            attempts: List[Dict] = []
-            for spec in attempt_specs:
-                key = (spec['year'], spec['document_type'])
-                if key in seen_attempts:
-                    continue
-                seen_attempts.add(key)
-                attempts.append(spec)
-            
-            author_arrow_str = ' → '.join([a.split()[-1] for a in selected_authors])
-            
-            for spec in attempts:
-                target_year = spec['year']
-                target_type = spec['document_type']
-                if spec['notice']:
-                    print(f"\n{spec['notice']}")
-                
-                matches = self.local_zotero.search_by_authors_ordered(
-                    author_lastnames,
-                    year=target_year,
-                    limit=10,
-                    document_type=target_type
-                )
-                normalized_matches = [self._normalize_search_result(item) for item in matches]
-                
-                if normalized_matches:
-                    search_info = f"by {author_arrow_str}"
-                    if target_year:
-                        search_info += f" in {target_year}"
-                    elif year:
-                        search_info += " (any year)"
-                    if target_type and target_type != doc_type:
-                        search_info += f" [{target_type}]"
-                    elif target_type is None and doc_type:
-                        search_info += " [all types]"
-                    
-                    action, item = self.display_and_select_zotero_matches(normalized_matches, search_info)
-                    return (action, item, metadata)
-            
-            # Fallback: search broadly by first author's last name
-            if author_lastnames:
-                broad_name = author_lastnames[0]
-                print(f"\nℹ️  No ordered matches; searching broadly for last name '{broad_name}'...")
-                broad_matches = self.local_zotero.search_by_author(broad_name, limit=10)
-                normalized_broad = [self._normalize_search_result(item) for item in broad_matches]
-                if normalized_broad:
-                    search_info = f"by last name {broad_name}"
-                    action, item = self.display_and_select_zotero_matches(normalized_broad, search_info)
-                    return (action, item, metadata)
-            
-            # No matches after all fallbacks
-            print(f"\n❌ No matches found in Zotero after trying relaxed filters for: {author_display}")
-            print()
-            print(Colors.colorize("Options:", ColorScheme.ACTION))
-            print(Colors.colorize("[1] Enter a different year and search again", ColorScheme.LIST))
-            print(Colors.colorize("[2] Proceed to create new Zotero item", ColorScheme.LIST))
-            print(Colors.colorize("[3] Move to manual review", ColorScheme.LIST))
-            print(Colors.colorize("  (z) Back to previous step", ColorScheme.LIST))
-            print()
-            
-            while True:
-                final_choice = input("Enter your choice: ").strip().lower()
-                if final_choice == '1':
-                    new_year = input("Enter different year (blank to clear): ").strip()
-                    if new_year:
-                        metadata['year'] = new_year
-                    else:
-                        metadata.pop('year', None)
-                    return ('search', None, metadata)
-                elif final_choice == '2':
-                    return ('create', None, metadata)
-                elif final_choice == '3':
-                    return ('none', None, metadata)
-                elif final_choice == 'z':
+                # Check for back/restart commands
+                if selected_authors == 'BACK':
+                    # Restore full filtered author list if available
+                    if metadata.get('_all_authors'):
+                        metadata['authors'] = metadata['_all_authors'].copy()
                     return ('back', None, metadata)
+                elif selected_authors == 'RESTART':
+                    return ('restart', None, metadata)
+                
+                if not selected_authors:
+                    print("❌ No authors selected")
+                    return ('none', None, metadata)
+                
+                # Update metadata with edited/selected authors
+                metadata['authors'] = selected_authors
+                
+                # Update _all_authors to include manually added authors
+                if metadata.get('_all_authors'):
+                    all_authors_set = set(metadata['_all_authors'])
+                    selected_authors_set = set(selected_authors)
+                    new_authors = selected_authors_set - all_authors_set
+                    if new_authors:
+                        metadata['_all_authors'].extend(list(new_authors))
                 else:
-                    print("⚠️  Invalid choice. Please enter 1-3 or 'z' to go back.")
+                    metadata['_all_authors'] = selected_authors.copy()
+                
+                # Search by selected authors with year filter
+                # Extract last names for search
+                author_lastnames = []
+                for author in selected_authors:
+                    # Handle "Lastname, FirstName" or "FirstName Lastname" format
+                    if ',' in author:
+                        # "Schultz, P" -> "Schultz"
+                        lastname = author.split(',')[0].strip()
+                    elif ' ' in author:
+                        # "P. Wesley Schultz" -> "Schultz"
+                        lastname = author.split()[-1]
+                    else:
+                        # "Schultz" -> "Schultz"
+                        lastname = author
+                    
+                    # Normalize lastname: remove OCR error characters (bullets, unusual punctuation)
+                    # Keep alphanumeric, spaces, hyphens, apostrophes, and periods
+                    lastname = re.sub(r'[^\w\s\-\'\.]', '', lastname).strip()
+                    
+                    author_lastnames.append(lastname)
+                
+                # Show search query before executing
+                # Arrow indicates author order: first → second → third, etc.
+                author_display = ' & '.join(author_lastnames)
+                year_str = f" (year: {year})" if year else " (any year)"
+                doc_type = metadata.get('document_type')
+                doc_type_str = f" [type: {doc_type}]" if doc_type else ""
+                print(f"\n🔍 Searching Zotero database for authors (in order): {author_display}{year_str}{doc_type_str}")
+                
+                attempt_specs = [
+                    {'year': year, 'document_type': doc_type, 'notice': None}
+                ]
+                if doc_type:
+                    attempt_specs.append({
+                        'year': year,
+                        'document_type': None,
+                        'notice': "ℹ️  No matches with document type filter; including all Zotero item types."
+                    })
+                if year:
+                    attempt_specs.append({
+                        'year': None,
+                        'document_type': doc_type,
+                        'notice': "ℹ️  No matches with year filter; showing any publication year."
+                    })
+                if doc_type and year:
+                    attempt_specs.append({
+                        'year': None,
+                        'document_type': None,
+                        'notice': "ℹ️  No matches with year/type filters; showing any publication year and item type."
+                    })
+                
+                # Remove duplicate attempts while preserving order
+                seen_attempts = set()
+                attempts: List[Dict] = []
+                for spec in attempt_specs:
+                    key = (spec['year'], spec['document_type'])
+                    if key in seen_attempts:
+                        continue
+                    seen_attempts.add(key)
+                    attempts.append(spec)
+                
+                author_arrow_str = ' → '.join([a.split()[-1] for a in selected_authors])
+                
+                for spec in attempts:
+                    target_year = spec['year']
+                    target_type = spec['document_type']
+                    if spec['notice']:
+                        print(f"\n{spec['notice']}")
+                    
+                    matches = self.local_zotero.search_by_authors_ordered(
+                        author_lastnames,
+                        year=target_year,
+                        limit=10,
+                        document_type=target_type
+                    )
+                    normalized_matches = [self._normalize_search_result(item) for item in matches]
+                    
+                    if normalized_matches:
+                        search_info = f"by {author_arrow_str}"
+                        if target_year:
+                            search_info += f" in {target_year}"
+                        elif year:
+                            search_info += " (any year)"
+                        if target_type and target_type != doc_type:
+                            search_info += f" [{target_type}]"
+                        elif target_type is None and doc_type:
+                            search_info += " [all types]"
+                        
+                        action, item = self.display_and_select_zotero_matches(normalized_matches, search_info)
+                        return (action, item, metadata)
+                
+                # Fallback: search broadly by first author's last name
+                if author_lastnames:
+                    broad_name = author_lastnames[0]
+                    print(f"\nℹ️  No ordered matches; searching broadly for last name '{broad_name}'...")
+                    broad_matches = self.local_zotero.search_by_author(broad_name, limit=10)
+                    normalized_broad = [self._normalize_search_result(item) for item in broad_matches]
+                    if normalized_broad:
+                        search_info = f"by last name {broad_name}"
+                        action, item = self.display_and_select_zotero_matches(normalized_broad, search_info)
+                        return (action, item, metadata)
+                
+                # No matches after all fallbacks
+                print(f"\n❌ No matches found in Zotero after trying relaxed filters for: {author_display}")
+                print()
+                print(Colors.colorize("Options:", ColorScheme.ACTION))
+                print(Colors.colorize("[1] Enter a different year and search again", ColorScheme.LIST))
+                print(Colors.colorize("[2] Proceed to create new Zotero item", ColorScheme.LIST))
+                print(Colors.colorize("[3] Move to manual review", ColorScheme.LIST))
+                print(Colors.colorize("  (z) Back to previous step", ColorScheme.LIST))
+                print()
+                
+                while True:
+                    final_choice = input("Enter your choice: ").strip().lower()
+                    if final_choice == '1':
+                        new_year = input("Enter different year (blank to clear): ").strip()
+                        if new_year:
+                            metadata['year'] = new_year
+                        else:
+                            metadata.pop('year', None)
+                        return ('search', None, metadata)
+                    elif final_choice == '2':
+                        return ('create', None, metadata)
+                    elif final_choice == '3':
+                        return ('none', None, metadata)
+                    elif final_choice == 'z':
+                        return ('back', None, metadata)
+                    else:
+                        print("⚠️  Invalid choice. Please enter 1-3 or 'z' to go back.")
             
         except Exception as e:
             self.logger.error(f"Error searching Zotero database: {e}")
@@ -4158,7 +4263,7 @@ class PaperProcessorDaemon:
                 # Reset authors to full set if available, then recursive call
                 if updated_metadata.get('_all_authors'):
                     updated_metadata['authors'] = updated_metadata['_all_authors'].copy()
-                action2, selected_item2, updated_metadata = self.search_and_display_local_zotero(updated_metadata)
+                action2, selected_item2, updated_metadata = self.search_and_display_local_zotero(updated_metadata, force_prompt_year=True)
                 if action2 == 'select' and selected_item2:
                     result = self.handle_item_selected(pdf_path, updated_metadata, selected_item2)
                     # Note: if user wants to go back, handle_item_selected already moved the file appropriately
@@ -5908,8 +6013,68 @@ class PaperProcessorDaemon:
                         }) + '\n')
                 except: pass
                 # #endregion
+                # #region agent log
                 try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'E1',
+                            'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                            'message': 'Before page access',
+                            'data': {
+                                'page_num': page_num,
+                                'doc_len': doc_len,
+                                'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
+                                'doc_type': type(doc).__name__
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except: pass
+                # #endregion
+                try:
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'H1,H2,H3',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Before doc[page_num] access',
+                                'data': {
+                                    'page_num': page_num,
+                                    'doc_len': len(doc),
+                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
+                                    'page_num_in_range': (0 <= page_num < len(doc))
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
                     page = doc[page_num]
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'H1,H2,H3',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'After doc[page_num] access - result',
+                                'data': {
+                                    'page_num': page_num,
+                                    'page_is_none': page is None,
+                                    'page_type': type(page).__name__ if page is not None else None,
+                                    'page_has_rect': hasattr(page, 'rect') if page is not None else False
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
                 except (IndexError, AttributeError) as e:
                     # #region agent log
                     try:
@@ -5918,7 +6083,7 @@ class PaperProcessorDaemon:
                             f.write(json.dumps({
                                 'sessionId': 'debug-session',
                                 'runId': 'run1',
-                                'hypothesisId': 'A',
+                                'hypothesisId': 'E3',
                                 'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
                                 'message': 'Page access exception',
                                 'data': {
@@ -5927,6 +6092,32 @@ class PaperProcessorDaemon:
                                     'exception_msg': str(e),
                                     'doc_len': doc_len,
                                     'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown'
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
+                    error_msg = f"Failed to access page {page_num}: {e}"
+                    self.logger.error(error_msg)
+                    doc.close()
+                    new_doc.close()
+                    return None, error_msg
+                except Exception as e:
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'E4',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Page access - unexpected exception',
+                                'data': {
+                                    'page_num': page_num,
+                                    'exception_type': type(e).__name__,
+                                    'exception_msg': str(e),
+                                    'doc_len': doc_len
                                 },
                                 'timestamp': int(time.time() * 1000)
                             }) + '\n')
@@ -6112,8 +6303,15 @@ class PaperProcessorDaemon:
                 )
                 
                 # Create left page (from 0 to page_gutter_x)
-                left_rect = fitz.Rect(0, 0, page_gutter_x, page_height)
                 left_page = new_doc.new_page(width=page_gutter_x, height=page_height)
+                # Clip region on source page - ensure it's within source page bounds
+                source_page_rect = page.rect
+                left_clip_rect = fitz.Rect(
+                    max(0, 0),
+                    max(0, 0),
+                    min(page_gutter_x, source_page_rect.width),
+                    min(page_height, source_page_rect.height)
+                )
                 
                 # #region agent log
                 try:
@@ -6130,7 +6328,9 @@ class PaperProcessorDaemon:
                                 'doc_len': len(doc),
                                 'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
                                 'page_is_none': page is None,
-                                'left_rect': [left_rect.x0, left_rect.y0, left_rect.x1, left_rect.y1]
+                                'source_page_rect': [source_page_rect.x0, source_page_rect.y0, source_page_rect.x1, source_page_rect.y1],
+                                'left_page_rect': [left_page.rect.x0, left_page.rect.y0, left_page.rect.x1, left_page.rect.y1],
+                                'left_clip_rect': [left_clip_rect.x0, left_clip_rect.y0, left_clip_rect.x1, left_clip_rect.y1]
                             },
                             'timestamp': int(time.time() * 1000)
                         }) + '\n')
@@ -6138,12 +6338,173 @@ class PaperProcessorDaemon:
                 # #endregion
                 
                 try:
-                    left_page.show_pdf_page(left_rect, doc, page_num, clip=left_rect)
-                except Exception as e:
+                    # Ensure source page is still valid before calling show_pdf_page
+                    if page is None:
+                        raise ValueError(f"Source page {page_num} is None")
+                    # Validate page_num is within document bounds
+                    if page_num < 0 or page_num >= len(doc):
+                        raise ValueError(f"Page number {page_num} is out of bounds (document has {len(doc)} pages)")
+                    # Re-access page from doc to ensure it's valid (PyMuPDF requires doc + page_num, not page object when using clip)
+                    source_page = doc[page_num]
+                    if source_page is None:
+                        raise ValueError(f"Source page {page_num} is None")
+                    # Validate clip rectangle is within source page bounds
+                    source_rect = source_page.rect
+                    if (left_clip_rect.x0 < 0 or left_clip_rect.y0 < 0 or 
+                        left_clip_rect.x1 > source_rect.width or left_clip_rect.y1 > source_rect.height):
+                        raise ValueError(f"Clip rectangle {left_clip_rect} is outside source page bounds {source_rect}")
+                    # Ensure document is not closed
+                    if hasattr(doc, 'is_closed') and doc.is_closed:
+                        raise ValueError(f"Source document is closed")
                     # #region agent log
                     try:
                         log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
                         with open(log_path, 'a', encoding='utf-8') as f:
+                            # Test page access one more time just before calling show_pdf_page
+                            test_page = doc[page_num]
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'B',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Immediately before show_pdf_page call for left page',
+                                'data': {
+                                    'page_num': page_num,
+                                    'doc_len': len(doc),
+                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
+                                    'test_page_is_none': test_page is None,
+                                    'test_page_type': type(test_page).__name__ if test_page is not None else None,
+                                    'left_clip_rect': [left_clip_rect.x0, left_clip_rect.y0, left_clip_rect.x1, left_clip_rect.y1],
+                                    'source_rect': [source_rect.x0, source_rect.y0, source_rect.x1, source_rect.y1]
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except Exception as log_e:
+                        pass
+                    # #endregion
+                    # Use get_pixmap + insert_image as workaround for show_pdf_page clip parameter issues
+                    # This avoids PyMuPDF's internal page access that might fail with clip parameter
+                    # For scanned documents (raster images), this doesn't lose quality
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            # Re-validate source_page right before get_pixmap
+                            test_source = doc[page_num] if page_num >= 0 and page_num < len(doc) else None
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'H1,H2,H3',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Before get_pixmap for left page',
+                                'data': {
+                                    'page_num': page_num,
+                                    'source_page_is_none': source_page is None,
+                                    'test_source_is_none': test_source is None,
+                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
+                                    'left_clip_rect': [left_clip_rect.x0, left_clip_rect.y0, left_clip_rect.x1, left_clip_rect.y1],
+                                    'source_rect': [source_rect.x0, source_rect.y0, source_rect.x1, source_rect.y1],
+                                    'clip_within_bounds': (left_clip_rect.x0 >= 0 and left_clip_rect.y0 >= 0 and 
+                                                          left_clip_rect.x1 <= source_rect.width and 
+                                                          left_clip_rect.y1 <= source_rect.height)
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
+                    # Re-access page immediately before get_pixmap to ensure it's still valid
+                    source_page = doc[page_num]
+                    if source_page is None:
+                        raise ValueError(f"Source page {page_num} became None before get_pixmap")
+                    # Get full pixmap and crop manually to avoid PyMuPDF's clip parameter issues
+                    # The clip parameter can cause AssertionError "page is None" in PyMuPDF's C code
+                    # Get pixmap at native PDF resolution (may be 300 DPI or higher for scanned PDFs)
+                    full_pixmap = source_page.get_pixmap()
+                    # Calculate scale factors from actual pixmap dimensions vs PDF point dimensions
+                    # This handles PDFs scanned at any resolution (e.g., 300 DPI, 600 DPI, etc.)
+                    source_rect = source_page.rect
+                    scale_x = full_pixmap.width / source_rect.width if source_rect.width > 0 else 1.0
+                    scale_y = full_pixmap.height / source_rect.height if source_rect.height > 0 else 1.0
+                    # Convert clip rectangle from PDF points to pixmap pixels using calculated scale
+                    clip_x0 = int(left_clip_rect.x0 * scale_x)
+                    clip_y0 = int(left_clip_rect.y0 * scale_y)
+                    clip_x1 = int(left_clip_rect.x1 * scale_x)
+                    clip_y1 = int(left_clip_rect.y1 * scale_y)
+                    # Ensure coordinates are within pixmap bounds
+                    clip_x0 = max(0, min(clip_x0, full_pixmap.width))
+                    clip_y0 = max(0, min(clip_y0, full_pixmap.height))
+                    clip_x1 = max(clip_x0, min(clip_x1, full_pixmap.width))
+                    clip_y1 = max(clip_y0, min(clip_y1, full_pixmap.height))
+                    # Crop using numpy for direct pixel manipulation (more efficient than PIL roundtrip)
+                    import numpy as np
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'H1,H2,H3',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Before numpy crop for left page',
+                                'data': {
+                                    'page_num': page_num,
+                                    'full_pixmap_width': full_pixmap.width,
+                                    'full_pixmap_height': full_pixmap.height,
+                                    'full_pixmap_n': full_pixmap.n,
+                                    'clip_x0': clip_x0,
+                                    'clip_y0': clip_y0,
+                                    'clip_x1': clip_x1,
+                                    'clip_y1': clip_y1,
+                                    'scale_x': scale_x,
+                                    'scale_y': scale_y
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
+                    # Get pixmap samples as numpy array
+                    samples = np.frombuffer(full_pixmap.samples, dtype=np.uint8)
+                    # Reshape to image dimensions (height, width, colors)
+                    if full_pixmap.n == 4:  # RGBA
+                        img_array = samples.reshape(full_pixmap.height, full_pixmap.width, 4)
+                    elif full_pixmap.n == 3:  # RGB
+                        img_array = samples.reshape(full_pixmap.height, full_pixmap.width, 3)
+                    else:  # Grayscale or other
+                        img_array = samples.reshape(full_pixmap.height, full_pixmap.width, full_pixmap.n)
+                    # Crop the numpy array directly
+                    cropped_array = img_array[clip_y0:clip_y1, clip_x0:clip_x1]
+                    # Create new pixmap from cropped array
+                    # Use PIL to convert numpy array to PNG bytes, then create Pixmap from bytes
+                    from PIL import Image
+                    import io
+                    # Convert numpy array to PIL Image
+                    if cropped_array.shape[2] == 4:  # RGBA
+                        pil_img = Image.fromarray(cropped_array, 'RGBA')
+                    elif cropped_array.shape[2] == 3:  # RGB
+                        pil_img = Image.fromarray(cropped_array, 'RGB')
+                    else:
+                        pil_img = Image.fromarray(cropped_array)
+                    # Convert to PNG bytes
+                    img_bytes = io.BytesIO()
+                    pil_img.save(img_bytes, format='PNG')
+                    img_bytes.seek(0)
+                    # Create pixmap from PNG bytes
+                    clip_pixmap = fitz.Pixmap(img_bytes)
+                    left_page.insert_image(left_page.rect, pixmap=clip_pixmap)
+                except Exception as e:
+                    # #region agent log
+                    try:
+                        import traceback
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            # Try to access page one more time to see current state
+                            try:
+                                post_error_page = doc[page_num] if page_num >= 0 and page_num < len(doc) else None
+                                post_error_page_type = type(post_error_page).__name__ if post_error_page is not None else None
+                            except:
+                                post_error_page = None
+                                post_error_page_type = 'error_accessing'
                             f.write(json.dumps({
                                 'sessionId': 'debug-session',
                                 'runId': 'run1',
@@ -6154,7 +6515,11 @@ class PaperProcessorDaemon:
                                     'page_num': page_num,
                                     'exception_type': type(e).__name__,
                                     'exception_msg': str(e),
-                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown'
+                                    'exception_traceback': traceback.format_exc(),
+                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
+                                    'doc_len': len(doc),
+                                    'post_error_page_is_none': post_error_page is None,
+                                    'post_error_page_type': post_error_page_type
                                 },
                                 'timestamp': int(time.time() * 1000)
                             }) + '\n')
@@ -6167,16 +6532,184 @@ class PaperProcessorDaemon:
                     return None, error_msg
                 
                 # Create right page (from page_gutter_x to page_width)
-                right_rect = fitz.Rect(page_gutter_x, 0, page_width, page_height)
                 right_page = new_doc.new_page(width=page_width - page_gutter_x, height=page_height)
+                # Clip region on source page - ensure it's within source page bounds
+                source_page_rect = page.rect
+                right_clip_rect = fitz.Rect(
+                    max(0, page_gutter_x),
+                    max(0, 0),
+                    min(page_width, source_page_rect.width),
+                    min(page_height, source_page_rect.height)
+                )
                 
                 try:
-                    right_page.show_pdf_page(right_rect, doc, page_num, clip=right_rect)
-                except Exception as e:
+                    # Ensure source page is still valid before calling show_pdf_page
+                    if page is None:
+                        raise ValueError(f"Source page {page_num} is None")
+                    # Validate page_num is within document bounds
+                    if page_num < 0 or page_num >= len(doc):
+                        raise ValueError(f"Page number {page_num} is out of bounds (document has {len(doc)} pages)")
+                    # Re-access page from doc to ensure it's valid (PyMuPDF requires doc + page_num, not page object when using clip)
+                    source_page = doc[page_num]
+                    if source_page is None:
+                        raise ValueError(f"Source page {page_num} is None")
+                    # Validate clip rectangle is within source page bounds
+                    source_rect = source_page.rect
+                    if (right_clip_rect.x0 < 0 or right_clip_rect.y0 < 0 or 
+                        right_clip_rect.x1 > source_rect.width or right_clip_rect.y1 > source_rect.height):
+                        raise ValueError(f"Clip rectangle {right_clip_rect} is outside source page bounds {source_rect}")
+                    # Ensure document is not closed
+                    if hasattr(doc, 'is_closed') and doc.is_closed:
+                        raise ValueError(f"Source document is closed")
                     # #region agent log
                     try:
                         log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
                         with open(log_path, 'a', encoding='utf-8') as f:
+                            # Test page access one more time just before calling show_pdf_page
+                            test_page = doc[page_num]
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'B',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Immediately before show_pdf_page call for right page',
+                                'data': {
+                                    'page_num': page_num,
+                                    'doc_len': len(doc),
+                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
+                                    'test_page_is_none': test_page is None,
+                                    'test_page_type': type(test_page).__name__ if test_page is not None else None,
+                                    'right_clip_rect': [right_clip_rect.x0, right_clip_rect.y0, right_clip_rect.x1, right_clip_rect.y1],
+                                    'source_rect': [source_rect.x0, source_rect.y0, source_rect.x1, source_rect.y1]
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except Exception as log_e:
+                        pass
+                    # #endregion
+                    # Use get_pixmap + insert_image as workaround for show_pdf_page clip parameter issues
+                    # This avoids PyMuPDF's internal page access that might fail with clip parameter
+                    # For scanned documents (raster images), this doesn't lose quality
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            # Re-validate source_page right before get_pixmap
+                            test_source = doc[page_num] if page_num >= 0 and page_num < len(doc) else None
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'H1,H2,H3',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Before get_pixmap for right page',
+                                'data': {
+                                    'page_num': page_num,
+                                    'source_page_is_none': source_page is None,
+                                    'test_source_is_none': test_source is None,
+                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
+                                    'right_clip_rect': [right_clip_rect.x0, right_clip_rect.y0, right_clip_rect.x1, right_clip_rect.y1],
+                                    'source_rect': [source_rect.x0, source_rect.y0, source_rect.x1, source_rect.y1],
+                                    'clip_within_bounds': (right_clip_rect.x0 >= 0 and right_clip_rect.y0 >= 0 and 
+                                                          right_clip_rect.x1 <= source_rect.width and 
+                                                          right_clip_rect.y1 <= source_rect.height)
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
+                    # Re-access page immediately before get_pixmap to ensure it's still valid
+                    source_page = doc[page_num]
+                    if source_page is None:
+                        raise ValueError(f"Source page {page_num} became None before get_pixmap")
+                    # Get full pixmap and crop manually to avoid PyMuPDF's clip parameter issues
+                    # The clip parameter can cause AssertionError "page is None" in PyMuPDF's C code
+                    # Get pixmap at native PDF resolution (may be 300 DPI or higher for scanned PDFs)
+                    full_pixmap = source_page.get_pixmap()
+                    # Calculate scale factors from actual pixmap dimensions vs PDF point dimensions
+                    # This handles PDFs scanned at any resolution (e.g., 300 DPI, 600 DPI, etc.)
+                    source_rect = source_page.rect
+                    scale_x = full_pixmap.width / source_rect.width if source_rect.width > 0 else 1.0
+                    scale_y = full_pixmap.height / source_rect.height if source_rect.height > 0 else 1.0
+                    # Convert clip rectangle from PDF points to pixmap pixels using calculated scale
+                    clip_x0 = int(right_clip_rect.x0 * scale_x)
+                    clip_y0 = int(right_clip_rect.y0 * scale_y)
+                    clip_x1 = int(right_clip_rect.x1 * scale_x)
+                    clip_y1 = int(right_clip_rect.y1 * scale_y)
+                    # Ensure coordinates are within pixmap bounds
+                    clip_x0 = max(0, min(clip_x0, full_pixmap.width))
+                    clip_y0 = max(0, min(clip_y0, full_pixmap.height))
+                    clip_x1 = max(clip_x0, min(clip_x1, full_pixmap.width))
+                    clip_y1 = max(clip_y0, min(clip_y1, full_pixmap.height))
+                    # Crop using numpy for direct pixel manipulation (more efficient than PIL roundtrip)
+                    import numpy as np
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'H1,H2,H3',
+                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
+                                'message': 'Before numpy crop for right page',
+                                'data': {
+                                    'page_num': page_num,
+                                    'full_pixmap_width': full_pixmap.width,
+                                    'full_pixmap_height': full_pixmap.height,
+                                    'full_pixmap_n': full_pixmap.n,
+                                    'clip_x0': clip_x0,
+                                    'clip_y0': clip_y0,
+                                    'clip_x1': clip_x1,
+                                    'clip_y1': clip_y1,
+                                    'scale_x': scale_x,
+                                    'scale_y': scale_y
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except: pass
+                    # #endregion
+                    # Get pixmap samples as numpy array
+                    samples = np.frombuffer(full_pixmap.samples, dtype=np.uint8)
+                    # Reshape to image dimensions (height, width, colors)
+                    if full_pixmap.n == 4:  # RGBA
+                        img_array = samples.reshape(full_pixmap.height, full_pixmap.width, 4)
+                    elif full_pixmap.n == 3:  # RGB
+                        img_array = samples.reshape(full_pixmap.height, full_pixmap.width, 3)
+                    else:  # Grayscale or other
+                        img_array = samples.reshape(full_pixmap.height, full_pixmap.width, full_pixmap.n)
+                    # Crop the numpy array directly
+                    cropped_array = img_array[clip_y0:clip_y1, clip_x0:clip_x1]
+                    # Create new pixmap from cropped array
+                    # Use PIL to convert numpy array to PNG bytes, then create Pixmap from bytes
+                    from PIL import Image
+                    import io
+                    # Convert numpy array to PIL Image
+                    if cropped_array.shape[2] == 4:  # RGBA
+                        pil_img = Image.fromarray(cropped_array, 'RGBA')
+                    elif cropped_array.shape[2] == 3:  # RGB
+                        pil_img = Image.fromarray(cropped_array, 'RGB')
+                    else:
+                        pil_img = Image.fromarray(cropped_array)
+                    # Convert to PNG bytes
+                    img_bytes = io.BytesIO()
+                    pil_img.save(img_bytes, format='PNG')
+                    img_bytes.seek(0)
+                    # Create pixmap from PNG bytes
+                    clip_pixmap = fitz.Pixmap(img_bytes)
+                    right_page.insert_image(right_page.rect, pixmap=clip_pixmap)
+                except Exception as e:
+                    # #region agent log
+                    try:
+                        import traceback
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            # Try to access page one more time to see current state
+                            try:
+                                post_error_page = doc[page_num] if page_num >= 0 and page_num < len(doc) else None
+                                post_error_page_type = type(post_error_page).__name__ if post_error_page is not None else None
+                            except:
+                                post_error_page = None
+                                post_error_page_type = 'error_accessing'
                             f.write(json.dumps({
                                 'sessionId': 'debug-session',
                                 'runId': 'run1',
@@ -6187,7 +6720,11 @@ class PaperProcessorDaemon:
                                     'page_num': page_num,
                                     'exception_type': type(e).__name__,
                                     'exception_msg': str(e),
-                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown'
+                                    'exception_traceback': traceback.format_exc(),
+                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
+                                    'doc_len': len(doc),
+                                    'post_error_page_is_none': post_error_page is None,
+                                    'post_error_page_type': post_error_page_type
                                 },
                                 'timestamp': int(time.time() * 1000)
                             }) + '\n')
@@ -6324,7 +6861,7 @@ class PaperProcessorDaemon:
             import tempfile
             temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
             temp_dir.mkdir(parents=True, exist_ok=True)
-            out_path = temp_dir / f"{pdf_path.stem}_split.pdf"
+            out_path = temp_dir / f"PREPROCESSED_{pdf_path.stem}_split.pdf"
             
             # #region agent log
             try:
@@ -6816,7 +7353,7 @@ class PaperProcessorDaemon:
             import tempfile
             temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
             temp_dir.mkdir(parents=True, exist_ok=True)
-            out_path = temp_dir / f"{pdf_path.stem}_from_page{page_offset + 1}.pdf"
+            out_path = temp_dir / f"PREPROCESSED_{pdf_path.stem}_from_page{page_offset + 1}.pdf"
             
             new_doc.save(str(out_path))
             new_doc.close()
@@ -6966,7 +7503,7 @@ class PaperProcessorDaemon:
             import tempfile
             temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
             temp_dir.mkdir(parents=True, exist_ok=True)
-            out_path = temp_dir / f"{pdf_path.stem}_trimmed_end_{pages_to_drop}.pdf"
+            out_path = temp_dir / f"PREPROCESSED_{pdf_path.stem}_trimmed_end_{pages_to_drop}.pdf"
             
             new_doc.save(str(out_path))
             new_doc.close()
@@ -7167,7 +7704,7 @@ class PaperProcessorDaemon:
             import tempfile
             temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
             temp_dir.mkdir(parents=True, exist_ok=True)
-            out_path = temp_dir / f"{pdf_path.stem}_no_page1.pdf"
+            out_path = temp_dir / f"PREPROCESSED_{pdf_path.stem}_no_page1.pdf"
             
             new_doc.save(str(out_path))
             new_doc.close()
@@ -7288,7 +7825,7 @@ class PaperProcessorDaemon:
         import tempfile
         temp_dir = Path(tempfile.gettempdir()) / 'pdf_borders_removed'
         temp_dir.mkdir(parents=True, exist_ok=True)
-        out_path = temp_dir / f"{pdf_path.stem}_no_borders.pdf"
+        out_path = temp_dir / f"PREPROCESSED_{pdf_path.stem}_no_borders.pdf"
         
         try:
             stats = self.border_remover.process_entire_pdf(pdf_path, out_path, zoom=2.0)
@@ -8421,6 +8958,64 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         # Get all unique keys from both sources
         all_keys = set(extracted.keys()) | set(zotero.keys())
         
+        # Special handling for tags: always merge instead of prompting
+        if 'tags' in all_keys:
+            current_tags = zotero.get('tags', [])
+            extracted_tags = extracted.get('tags', [])
+            
+            if current_tags or extracted_tags:
+                merged_tags = self._merge_tags(current_tags, extracted_tags)
+                merged['tags'] = merged_tags
+                added_count = len(merged_tags) - len(current_tags)
+                if added_count > 0:
+                    print(f"  ✅ tags: merged {added_count} new tag(s) from online/extracted")
+                else:
+                    print(f"  ⏭️  tags: no new tags to add")
+            
+            # Remove tags from all_keys so it's not processed again
+            all_keys.discard('tags')
+        
+        # Special handling for abstract: use extracted if Zotero doesn't have one
+        if 'abstract' in all_keys:
+            zotero_abstract = zotero.get('abstract', '')
+            extracted_abstract = extracted.get('abstract', '')
+            
+            if not zotero_abstract or (isinstance(zotero_abstract, str) and not zotero_abstract.strip()):
+                # Zotero doesn't have abstract, use extracted if available
+                if extracted_abstract:
+                    merged['abstract'] = extracted_abstract
+                    print(f"  ✅ abstract: filled from online/extracted source")
+                else:
+                    merged['abstract'] = zotero_abstract  # Keep empty
+                    print(f"  ⏭️  abstract: no abstract available from either source")
+            elif extracted_abstract and extracted_abstract != zotero_abstract:
+                # Both have abstracts but they differ - ask user
+                print(f"\nabstract:")
+                print(f"  Extracted: {extracted_abstract[:200]}{'...' if len(extracted_abstract) > 200 else ''}")
+                print(f"  Zotero:    {zotero_abstract[:200]}{'...' if len(zotero_abstract) > 200 else ''}")
+                
+                while True:
+                    choice = input("Use (e)xtracted, (z)otero, or (c)ustom? ").strip().lower()
+                    if choice == 'e':
+                        merged['abstract'] = extracted_abstract
+                        break
+                    elif choice == 'z':
+                        merged['abstract'] = zotero_abstract
+                        break
+                    elif choice == 'c':
+                        custom = input("Enter custom abstract: ").strip()
+                        merged['abstract'] = custom
+                        break
+                    else:
+                        print("Please enter 'e', 'z', or 'c'")
+            else:
+                # Same abstract or Zotero has one and extracted doesn't - use Zotero
+                merged['abstract'] = zotero_abstract
+            
+            # Remove abstract from all_keys so it's not processed again
+            all_keys.discard('abstract')
+        
+        # Process remaining fields with standard field-by-field logic
         for key in all_keys:
             extracted_val = extracted.get(key, '')
             zotero_val = zotero.get(key, '')
@@ -9376,6 +9971,47 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Cancelled")
                 return None
+            
+            # For journal articles, also ask for issue, volume, and pages
+            if doc_type == 'journal_article':
+                # Volume
+                current_volume = enhanced_metadata.get('volume', '')
+                try:
+                    if current_volume:
+                        volume = input(f"\nVolume [{current_volume}]: ").strip()
+                    else:
+                        volume = input("\nVolume: ").strip()
+                    if volume:
+                        enhanced_metadata['volume'] = volume
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Cancelled")
+                    return None
+                
+                # Issue
+                current_issue = enhanced_metadata.get('issue', '')
+                try:
+                    if current_issue:
+                        issue = input(f"\nIssue [{current_issue}]: ").strip()
+                    else:
+                        issue = input("\nIssue: ").strip()
+                    if issue:
+                        enhanced_metadata['issue'] = issue
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Cancelled")
+                    return None
+                
+                # Pages
+                current_pages = enhanced_metadata.get('pages', '')
+                try:
+                    if current_pages:
+                        pages = input(f"\nPages [{current_pages}]: ").strip()
+                    else:
+                        pages = input("\nPages: ").strip()
+                    if pages:
+                        enhanced_metadata['pages'] = pages
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Cancelled")
+                    return None
         
         print("\n✅ Manual entry complete")
         print()
@@ -10531,10 +11167,39 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             if zotero_result['success']:
                 print(f"✅ Created Zotero item (key: {zotero_result.get('item_key', 'N/A')})")
                 action = zotero_result.get('action', 'unknown')
+                item_key = zotero_result.get('item_key')
+                
                 if action == 'duplicate_skipped':
                     print("⚠️  Item already exists in Zotero - skipped duplicate")
+                    # Still consider this a success - item exists in Zotero
+                    self.move_to_done(pdf_path)
+                    print("✅ Processing complete!")
+                    return True
                 elif action == 'added_with_pdf':
                     print("✅ PDF attached to new Zotero item")
+                    # Offer to add a handwritten note
+                    if item_key:
+                        self._prompt_for_note(item_key)
+                    
+                    # Log to CSV
+                    if hasattr(self, 'scanned_papers_logger'):
+                        original_filename = pdf_path.name
+                        if hasattr(self, '_original_scan_path') and self._original_scan_path:
+                            original_filename = Path(self._original_scan_path).name
+                        self.scanned_papers_logger.log_processing(
+                            original_filename=original_filename,
+                            status='success',
+                            final_filename=final_path.name if 'final_path' in locals() else (reuse_path.name if 'reuse_path' in locals() else pdf_path.name),
+                            split='no',
+                            borders='no',
+                            trim='no',
+                            zotero_item_code=item_key
+                        )
+                    
+                    # Move original to done/
+                    self.move_to_done(pdf_path)
+                    print("✅ Processing complete!")
+                    return True
                 elif action == 'added_without_pdf':
                     if copied_ok:
                         print("⚠️  Item created but PDF attachment failed")
@@ -10542,7 +11207,6 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                         print("⚠️  Item created without attachment (file copy failed)")
                 
                     # Offer to add a handwritten note
-                    item_key = zotero_result.get('item_key')
                     if item_key:
                         self._prompt_for_note(item_key)
                     
@@ -10554,7 +11218,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                         self.scanned_papers_logger.log_processing(
                             original_filename=original_filename,
                             status='success',
-                            final_filename=final_path.name if 'final_path' in locals() else reuse_path.name,
+                            final_filename=final_path.name if 'final_path' in locals() else (reuse_path.name if 'reuse_path' in locals() else pdf_path.name),
                             split='no',
                             borders='no',
                             trim='no',
@@ -10562,6 +11226,14 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                         )
                     
                     # Move original to done/
+                    self.move_to_done(pdf_path)
+                    print("✅ Processing complete!")
+                    return True
+                else:
+                    # Unknown action but success=True - still treat as success
+                    self.logger.warning(f"Unknown action '{action}' but zotero_result['success'] is True")
+                    if item_key:
+                        self._prompt_for_note(item_key)
                     self.move_to_done(pdf_path)
                     print("✅ Processing complete!")
                     return True
@@ -10754,7 +11426,26 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         if preprocessed_pdf and preprocessed_pdf.exists():
             # Use preprocessed PDF from navigation flow (skip preprocessing)
             pdf_to_copy = preprocessed_pdf
-            self.logger.info(f"Using preprocessed PDF from navigation: {pdf_to_copy.name}")
+            
+            # Check if this is actually a preprocessed file or the original
+            # Compare with original path and check preprocessing_state
+            is_original_file = (preprocessed_pdf.resolve() == pdf_path.resolve())
+            
+            if preprocessing_state:
+                # Check if any preprocessing actually succeeded
+                border_removed = preprocessing_state.get('border_removal', False)
+                split_succeeded = preprocessing_state.get('split_succeeded', False)
+                trim_applied = preprocessing_state.get('trim_leading', False)
+                is_actually_preprocessed = border_removed or split_succeeded or trim_applied
+            else:
+                is_actually_preprocessed = False
+            
+            if is_original_file or not is_actually_preprocessed:
+                # This is the original file (no preprocessing was done or preprocessing failed)
+                self.logger.info(f"Using original PDF (no preprocessing was performed): {pdf_to_copy.name}")
+            else:
+                # This is actually a preprocessed file
+                self.logger.info(f"Using preprocessed PDF from navigation: {pdf_to_copy.name}")
             
             # Create final_state from preprocessing_state passed from context
             if preprocessing_state:
@@ -10938,7 +11629,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         # Step 2: Verify and log target filename before copy
         # Defensive check: ensure target_filename doesn't contain temp file patterns
-        temp_file_patterns = ['_no_borders', '_split', '_from_page', '_no_page1']
+        temp_file_patterns = ['PREPROCESSED_', '_no_borders', '_split', '_from_page', '_no_page1']
         if target_filename and any(pattern in target_filename for pattern in temp_file_patterns):
             self.logger.warning(f"Target filename contains temp file pattern: {target_filename}")
             # ALWAYS regenerate filename from Zotero item (not from old metadata)
@@ -11003,6 +11694,17 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     print(f"✅ URL updated: {url}")
                 else:
                     print("ℹ️  URL already exists or update failed")
+            
+            # Update abstract field if metadata has abstract and item doesn't have it yet
+            if metadata and metadata.get('abstract'):
+                abstract = metadata['abstract']
+                print(f"3c/4 Updating abstract field if missing...")
+                abstract_updated = self.zotero_processor.update_item_field_if_missing(item_key, 'abstractNote', abstract)
+                if abstract_updated:
+                    abstract_preview = abstract[:100] + "..." if len(abstract) > 100 else abstract
+                    print(f"✅ Abstract updated: {abstract_preview}")
+                else:
+                    print("ℹ️  Abstract already exists or update failed")
             
             # Update tags/keywords from metadata if available
             if metadata:
