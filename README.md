@@ -169,6 +169,27 @@ Notes:
 - First-page text extraction uses PyPDF2 if installed; otherwise it returns an empty string.
 - Identifier extraction uses a lightweight heuristic today and will be replaced by Ollama-based extraction in Phase 4.
 
+## JSTOR Metadata Extraction (requires session cookies)
+
+JSTOR pages are protected; you must supply your own browser cookies for the JSTOR client to fetch metadata/DOI:
+
+1. In your browser (logged into JSTOR), copy the request as cURL for a JSTOR page (e.g., `stable/353415`).
+2. Grab the entire `Cookie` header string (including HttpOnly entries) from that cURL.
+3. Run the test or any script that uses `JSTORClient` with env vars:
+
+```bash
+export JSTOR_COOKIE_HEADER="name1=value1; name2=value2; ..."
+export JSTOR_REFERER="https://www.jstor.org/stable/353415"   # optional override
+python tests/Test_JSTOR_DOI_Extraction.py
+```
+
+Advanced: to override headers (e.g., sec-ch-ua), provide JSON:
+```bash
+export JSTOR_HEADERS_JSON='{"user-agent": "...", "sec-ch-ua": "..."}'
+```
+
+The test harness mirrors browser headers by default; only cookies are mandatory for access.
+
 ## Configuration
 
 The system uses a two-tier configuration approach:

@@ -25,11 +25,22 @@ from ..utils.identifier_validator import IdentifierValidator
 class JSTORClient:
     """Client for fetching DOIs and metadata from JSTOR URLs."""
     
-    def __init__(self, timeout: int = 10):
+    def __init__(
+        self,
+        timeout: int = 10,
+        referer: Optional[str] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        cookie_header: Optional[str] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ):
         """Initialize JSTOR client.
         
         Args:
             timeout: Request timeout in seconds
+            referer: Optional Referer header to send with requests
+            cookies: Optional dictionary of cookies to attach
+            cookie_header: Optional raw Cookie header string ("k1=v1; k2=v2")
+            extra_headers: Optional additional headers to merge into the session
         """
         self.timeout = timeout
         self.session = requests.Session()
@@ -42,6 +53,16 @@ class JSTORClient:
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1'
         })
+        if referer:
+            self.session.headers['Referer'] = referer
+        if extra_headers:
+            self.session.headers.update(extra_headers)
+        if cookies:
+            self.session.cookies.update(cookies)
+        elif cookie_header:
+            parsed = self._parse_cookie_header(cookie_header)
+            if parsed:
+                self.session.cookies.update(parsed)
         self.logger = logging.getLogger(__name__)
     
     def fetch_metadata_from_url(self, jstor_url: str) -> Optional[Dict[str, Any]]:
@@ -237,6 +258,22 @@ class JSTORClient:
             return None
 
     # --- Internal helpers -------------------------------------------------
+
+    def _parse_cookie_header(self, cookie_header: str) -> Dict[str, str]:
+        """Parse a Cookie header string into a dict."""
+        result: Dict[str, str] = {}
+        if not cookie_header:
+            return result
+        parts = cookie_header.split(';')
+        for part in parts:
+            if '=' not in part:
+                continue
+            name, value = part.split('=', 1)
+            name = name.strip()
+            value = value.strip()
+            if name:
+                result[name] = value
+        return result
 
     def _extract_gadata_content(self, html_text: str) -> Optional[Dict[str, Any]]:
         """Extract gaData.content object from page HTML."""
