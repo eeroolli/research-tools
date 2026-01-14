@@ -140,13 +140,25 @@ class ContentDetector:
                 cv = std_density / (avg_density + 1e-6)  # Coefficient of variation
                 
                 if cv < 0.15:  # Within 15% variation
-                    return float(avg_density)
+                    detected = float(avg_density)
                 else:
                     # Pages differ significantly: use first page density
-                    return float(densities[0])
+                    detected = float(densities[0])
+            else:
+                # Single sample: use it
+                detected = float(densities[0])
             
-            # Single sample: use it
-            return float(densities[0])
+            # Apply minimum threshold floor for scanned documents
+            # When detected density is near 0, the binary search can't find content edges
+            # and just converges to the edge_hint, giving a fixed 50% split
+            min_threshold = 0.05  # 5% minimum
+            if detected < min_threshold:
+                self.logger.debug(
+                    f"Detected density ({detected:.4f}) below minimum ({min_threshold}), using minimum"
+                )
+                return min_threshold
+            
+            return detected
             
         except Exception as e:
             self.logger.error(f"Error detecting text density threshold: {e}")
@@ -204,7 +216,8 @@ class ContentDetector:
         direction: str,
         start_pos: Optional[int] = None,
         edge_hint: Optional[int] = None,
-        middle_region_pct: float = 0.3
+        middle_region_pct: float = 0.3,
+        apply_safety_margin: bool = True
     ) -> int:
         """Detect content edge using binary search.
         
@@ -317,27 +330,70 @@ class ContentDetector:
                 else:
                     best_edge = max(best_edge, test_pos)
             elif density < density_threshold * 0.1:
-                # Hit white border, move back toward center
+                # Hit white space - we've passed the content edge
+                # For column edge detection: we need to find where content transitions to white space
+                # The actual edge is between the last position with content and this position
+                # Continue searching in smaller increments to find the exact boundary
                 if direction in ('left', 'top'):
+                    # Searching left, hit white space - the edge is to the right of this position
+                    # Move right (back toward start) in smaller steps to find transition
                     current_pos = test_pos + jump // 2
+                    # Don't update best_edge - we haven't found the actual edge yet
                 else:
+                    # Searching right, hit white space - the edge is to the left of this position
+                    # Move left (back toward start) in smaller steps to find transition
                     current_pos = test_pos - jump // 2
+                    # Don't update best_edge - we haven't found the actual edge yet
             else:
-                # Mixed region (dark border or transition), refine
+                # Mixed region (transition zone between content and white space)
+                # This is likely near the actual edge - refine to find exact boundary
+                current_pos = test_pos
+                if direction in ('left', 'top'):
+                    best_edge = min(best_edge, test_pos)
+                else:
+                    best_edge = max(best_edge, test_pos)
+                # Move in smaller increments to refine the edge position
                 if direction in ('left', 'top'):
                     current_pos = test_pos + jump // 4
                 else:
                     current_pos = test_pos - jump // 4
             
+            # #region agent log - log convergence for column edge detection
+            if direction in ('left', 'right') and (iteration == 0 or iteration == max_iterations - 1 or jump < min_jump):
+                try:
+                    import time, json, os
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'B1','location':'content_detector.py:detect_content_edge_binary_search','message':'Binary search iteration','data':{'direction':direction,'iteration':iteration,'test_pos':test_pos,'test_pos_pct':(test_pos/w*100) if direction in ('left','right') and w > 0 else 0,'density':float(density),'density_threshold':float(density_threshold),'best_edge':best_edge,'best_edge_pct':(best_edge/w*100) if direction in ('left','right') and w > 0 else 0,'jump':jump,'start_pos':start_pos,'edge_hint':edge_hint,'current_pos':current_pos},'timestamp':int(time.time()*1000)}) + '\n')
+                except: pass
+            # #endregion
+            
             iteration += 1
         
-        # Apply safety margin: move edge further out (toward margin) by 5-10%
-        if direction in ('left', 'top'):
+        # Apply safety margin: move edge inward (toward content) to avoid cutting text
+        # For column edges in two-column layouts, we need to contract toward the gutter (center)
+        # to ensure we don't overlap: left_col_right should move LEFT, right_col_left should move RIGHT
+        # For gutter detection, we skip the safety margin to get the actual edge position
+        if apply_safety_margin:
             safety_offset = int(dim_size * self.safety_margin_pct)
-            final_edge = max(0, best_edge - safety_offset)
+            if direction in ('left', 'top'):
+                # For left/top edges, safety margin moves edge RIGHT/DOWN (toward content)
+                final_edge = min(dim_size, best_edge + safety_offset)
+            else:
+                # For right/bottom edges, safety margin moves edge LEFT/UP (toward content)
+                final_edge = max(0, best_edge - safety_offset)
         else:
-            safety_offset = int(dim_size * self.safety_margin_pct)
-            final_edge = min(dim_size, best_edge + safety_offset)
+            final_edge = best_edge
+            safety_offset = 0
+        
+        # #region agent log
+        try:
+            import time, json, os
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'A3','location':'content_detector.py:detect_content_edge_binary_search','message':'Safety margin applied','data':{'direction':direction,'best_edge':best_edge,'best_edge_pct':(best_edge/dim_size*100) if dim_size > 0 else 0,'final_edge':final_edge,'final_edge_pct':(final_edge/dim_size*100) if dim_size > 0 else 0,'safety_offset':safety_offset,'safety_margin_pct':self.safety_margin_pct if apply_safety_margin else 0,'dim_size':dim_size,'margin_added':(final_edge - best_edge) if direction in ('right','bottom') else (best_edge - final_edge),'apply_safety_margin':apply_safety_margin},'timestamp':int(time.time()*1000)}) + '\n')
+        except: pass
+        # #endregion
         
         return final_edge
     
@@ -478,11 +534,30 @@ class ContentDetector:
                 center_y = img_height // 2
                 
                 # Detect left column: find right edge (toward gutter) and left edge (toward margin)
+                # Start from left column center (25%) - safe starting point in content
+                # Search RIGHTWARD toward gutter - don't restrict with edge_hint to find actual boundaries
+                # Get edges WITHOUT safety margin for accurate gutter calculation
+                left_col_right_no_margin = self.detect_content_edge_binary_search(
+                    gray, density_threshold, 'right', 
+                    start_pos=left_col_center_x,  # Start in left column (25%)
+                    edge_hint=img_width,  # Allow searching all the way to right edge if needed
+                    apply_safety_margin=False
+                )
+                # Get edges WITH safety margin for bounding boxes (to avoid cutting text)
                 left_col_right = self.detect_content_edge_binary_search(
                     gray, density_threshold, 'right', 
                     start_pos=left_col_center_x,
-                    edge_hint=int(img_width * 0.5)
+                    edge_hint=img_width,
+                    apply_safety_margin=True
                 )
+                # #region agent log
+                try:
+                    import time, json, os
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'A1','location':'content_detector.py:detect_two_column_regions','message':'After left_col_right detection','data':{'page_num':page_num,'left_col_right_px':left_col_right,'left_col_right_pct':(left_col_right/img_width*100) if img_width > 0 else 0,'left_col_right_no_margin_px':left_col_right_no_margin,'left_col_right_no_margin_pct':(left_col_right_no_margin/img_width*100) if img_width > 0 else 0,'img_width':img_width,'left_col_center_x':left_col_center_x,'edge_hint_px':img_width,'edge_hint_pct':100},'timestamp':int(time.time()*1000)}) + '\n')
+                except: pass
+                # #endregion
                 left_col_left = self.detect_content_edge_binary_search(
                     gray, density_threshold, 'left',
                     start_pos=left_col_center_x,
@@ -490,11 +565,30 @@ class ContentDetector:
                 )
                 
                 # Detect right column: find left edge (toward gutter) and right edge (toward margin)
+                # Start from right column center (75%) - safe starting point in content
+                # Search LEFTWARD toward gutter - don't restrict with edge_hint to find actual boundaries
+                # Get edges WITHOUT safety margin for accurate gutter calculation
+                right_col_left_no_margin = self.detect_content_edge_binary_search(
+                    gray, density_threshold, 'left',
+                    start_pos=right_col_center_x,  # Start in right column (75%)
+                    edge_hint=0,  # Allow searching all the way to left edge if needed
+                    apply_safety_margin=False
+                )
+                # Get edges WITH safety margin for bounding boxes (to avoid cutting text)
                 right_col_left = self.detect_content_edge_binary_search(
                     gray, density_threshold, 'left',
                     start_pos=right_col_center_x,
-                    edge_hint=int(img_width * 0.5)
+                    edge_hint=0,
+                    apply_safety_margin=True
                 )
+                # #region agent log
+                try:
+                    import time, json, os
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'A2','location':'content_detector.py:detect_two_column_regions','message':'After right_col_left detection','data':{'page_num':page_num,'right_col_left_px':right_col_left,'right_col_left_pct':(right_col_left/img_width*100) if img_width > 0 else 0,'right_col_left_no_margin_px':right_col_left_no_margin,'right_col_left_no_margin_pct':(right_col_left_no_margin/img_width*100) if img_width > 0 else 0,'img_width':img_width,'right_col_center_x':right_col_center_x,'edge_hint_px':0,'edge_hint_pct':0},'timestamp':int(time.time()*1000)}) + '\n')
+                except: pass
+                # #endregion
                 right_col_right = self.detect_content_edge_binary_search(
                     gray, density_threshold, 'right',
                     start_pos=right_col_center_x,
@@ -512,6 +606,15 @@ class ContentDetector:
                 # Create bounding boxes
                 left_box = (left_col_left, top, left_col_right, bottom)
                 right_box = (right_col_left, top, right_col_right, bottom)
+                
+                # #region agent log
+                try:
+                    import time, json, os
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'A4','location':'content_detector.py:detect_two_column_regions','message':'Before validation - all edges detected','data':{'page_num':page_num,'left_col_left_px':left_col_left,'left_col_right_px':left_col_right,'right_col_left_px':right_col_left,'right_col_right_px':right_col_right,'left_col_left_pct':(left_col_left/img_width*100) if img_width > 0 else 0,'left_col_right_pct':(left_col_right/img_width*100) if img_width > 0 else 0,'right_col_left_pct':(right_col_left/img_width*100) if img_width > 0 else 0,'right_col_right_pct':(right_col_right/img_width*100) if img_width > 0 else 0,'gap_px':right_col_left - left_col_right,'gap_pct':((right_col_left - left_col_right)/img_width*100) if img_width > 0 else 0,'gap_is_negative':(right_col_left < left_col_right),'img_width':img_width},'timestamp':int(time.time()*1000)}) + '\n')
+                except: pass
+                # #endregion
                 
                 # Validate edge detection results using configured gutter range
                 validation_errors = []
@@ -556,7 +659,8 @@ class ContentDetector:
                 
                 # Calculate gutter position (gap between columns) in PDF points
                 # Gutter is between left_col_right and right_col_left
-                gutter_px = (left_col_right + right_col_left) // 2
+                # Use edges WITHOUT safety margin for accurate gutter calculation
+                gutter_px = (left_col_right_no_margin + right_col_left_no_margin) // 2
                 gutter_x_pts = (gutter_px / img_width) * page_width_pts if img_width > 0 else page_width_pts / 2
                 
                 # Diagnostic logging: Log detected column edges and calculated gutter
@@ -577,6 +681,39 @@ class ContentDetector:
                     self.logger.warning(
                         f"Page {page_num + 1} edge detection validation failed: {'; '.join(validation_errors)}"
                     )
+                
+                # #region agent log
+                try:
+                    import time, json, os
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "split-detection",
+                            "hypothesisId": "S1",
+                            "location": "content_detector.py:dual_method_result",
+                            "message": "Two-column detection result",
+                            "data": {
+                                "page_num": page_num + 1,
+                                "img_width": img_width,
+                                "left_col_left_px": left_col_left,
+                                "left_col_right_px": left_col_right,
+                                "left_col_right_no_margin_px": left_col_right_no_margin,
+                                "right_col_left_px": right_col_left,
+                                "right_col_left_no_margin_px": right_col_left_no_margin,
+                                "right_col_right_px": right_col_right,
+                                "gutter_px": gutter_px,
+                                "gutter_pct": gutter_pct,
+                                "is_valid": is_valid,
+                                "validation_errors": validation_errors,
+                                "gutter_min_percent": self.gutter_min_percent,
+                                "gutter_max_percent": self.gutter_max_percent
+                            },
+                            "timestamp": int(time.time() * 1000)
+                        }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
                 
                 # Return tuple with validation status: (left_box, right_box, gutter_x_pts, is_valid, validation_errors, left_col_right_px, right_col_left_px)
                 # Include pixel positions for overlap checking in dual-method coordinator
@@ -668,6 +805,15 @@ class ContentDetector:
                 gutter_min_px = int((self.gutter_min_percent / 100.0) * img_width)
                 gutter_max_px = int((self.gutter_max_percent / 100.0) * img_width)
                 
+                # #region agent log
+                try:
+                    import time, json, os
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'C1','location':'content_detector.py:detect_gutter_by_density_minimum','message':'Before minimum search','data':{'page_num':page_num,'img_width':img_width,'gutter_min_percent':self.gutter_min_percent,'gutter_max_percent':self.gutter_max_percent,'gutter_min_px':gutter_min_px,'gutter_max_px':gutter_max_px,'projection_len':len(content_projection),'projection_mean':float(np.mean(content_projection)),'projection_min':float(np.min(content_projection)),'projection_max':float(np.max(content_projection))},'timestamp':int(time.time()*1000)}) + '\n')
+                except: pass
+                # #endregion
+                
                 search_region = content_projection[gutter_min_px:gutter_max_px]
                 if len(search_region) == 0:
                     results.append((page_width_pts / 2, {}, False))
@@ -689,14 +835,23 @@ class ContentDetector:
                 min_idx_px = gutter_min_px + min_window_idx
                 min_density = float(min_window_avg)
                 
+                # #region agent log
+                try:
+                    import time, json, os
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'C2','location':'content_detector.py:detect_gutter_by_density_minimum','message':'After minimum search','data':{'page_num':page_num,'min_idx_px':min_idx_px,'min_idx_pct':(min_idx_px/img_width*100) if img_width > 0 else 0,'min_density':min_density,'search_region_len':len(search_region),'window_size':window_size,'search_region_mean':float(np.mean(search_region)),'search_region_min':float(np.min(search_region))},'timestamp':int(time.time()*1000)}) + '\n')
+                except: pass
+                # #endregion
+                
                 # Shape analysis: Calculate gradient, curvature, valley width
                 shape_metrics = self._analyze_gutter_shape(
                     content_projection, min_idx_px, img_width, min_density
                 )
                 
-                # Validate using shape analysis
+                # Validate using shape analysis (pass min_density to detect pure white gutters)
                 is_valid, validation_errors = self._validate_gutter_shape(
-                    shape_metrics, min_idx_px, img_width
+                    shape_metrics, min_idx_px, img_width, min_density
                 )
                 
                 # Store validation errors in shape_metrics for access by caller
@@ -792,7 +947,8 @@ class ContentDetector:
         self,
         shape_metrics: Dict[str, Any],
         min_idx: int,
-        img_width: int
+        img_width: int,
+        min_density: float = None
     ) -> Tuple[bool, List[str]]:
         """Validate that minimum position represents a real gutter, not a column edge.
         
@@ -800,6 +956,7 @@ class ContentDetector:
             shape_metrics: Shape analysis metrics from _analyze_gutter_shape
             min_idx: Index of minimum position
             img_width: Image width in pixels
+            min_density: Minimum density value (if very low/near 0, indicates pure white gutter)
             
         Returns:
             Tuple of (is_valid, validation_errors)
@@ -815,18 +972,35 @@ class ContentDetector:
         content_reduction_pct = shape_metrics.get('content_reduction_pct', 0)
         min_idx_pct = (min_idx / img_width) * 100 if img_width > 0 else 0
         
-        # Validation 1: Average gradient < 500 (gradual valley, not sharp drop)
-        if avg_gradient > 500:
+        # Check if this is a pure white gutter (min_density near 0)
+        # Pure white gutters from printouts have sharp text-to-white transitions but are valid
+        is_pure_white_gutter = min_density is not None and min_density < 100  # Very low density threshold
+        
+        # Adjust thresholds for pure white gutters (allow higher gradients/curvatures)
+        if is_pure_white_gutter:
+            max_allowed_gradient = 2000  # Much higher for pure white gutters
+            max_allowed_curvature = 2500  # Much higher for pure white gutters
+            max_sharp_corner_gradient = 30000  # Higher threshold for sharp corner detection
+            max_sharp_corner_curvature = 2000  # Higher threshold for sharp corner detection
+        else:
+            max_allowed_gradient = 500  # Original threshold for gradual gutters
+            max_allowed_curvature = 400  # Original threshold for gradual gutters
+            max_sharp_corner_gradient = 15000  # Original threshold
+            max_sharp_corner_curvature = 1000  # Original threshold
+        
+        # Validation 1: Average gradient threshold (adjusted for pure white gutters)
+        if avg_gradient > max_allowed_gradient:
             is_valid = False
             validation_errors.append(f"Average gradient ({avg_gradient:.1f}) too high (sharp transition, not gradual gutter)")
         
-        # Validation 2: Valley width ratio > 0.5 (wide valley, not narrow edge)
-        if valley_width_ratio < 0.4:
+        # Validation 2: Valley width ratio > 0.4 (wide valley, not narrow edge)
+        # For pure white gutters, this is less critical but still check
+        if valley_width_ratio < 0.3:  # Slightly more lenient
             is_valid = False
             validation_errors.append(f"Valley width ratio ({valley_width_ratio:.2f}) too narrow (column edge, not gutter)")
         
-        # Validation 3: Average second derivative < 400 (smooth transition)
-        if avg_second_deriv > 400:
+        # Validation 3: Average second derivative threshold (adjusted for pure white gutters)
+        if avg_second_deriv > max_allowed_curvature:
             is_valid = False
             validation_errors.append(f"Average curvature ({avg_second_deriv:.1f}) too high (sharp corner, not smooth gutter)")
         
@@ -845,9 +1019,10 @@ class ContentDetector:
             is_valid = False
             validation_errors.append(f"Signal strength ({content_reduction_pct:.1f}%) too low (no significant gutter detected)")
         
-        # Additional reject conditions for column edges
-        # Reject if max gradient > 15000 AND second derivative > 1000 (very sharp corner)
-        if max_gradient > 15000 and avg_second_deriv > 1000:
+        # Additional reject conditions for column edges (adjusted thresholds for pure white gutters)
+        # Reject if max gradient AND second derivative exceed thresholds (very sharp corner)
+        # But allow higher thresholds for pure white gutters
+        if max_gradient > max_sharp_corner_gradient and avg_second_deriv > max_sharp_corner_curvature:
             is_valid = False
             validation_errors.append(
                 f"Very sharp corner detected (max_gradient={max_gradient:.1f}, curvature={avg_second_deriv:.1f}) - column edge"
