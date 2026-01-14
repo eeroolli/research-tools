@@ -2250,7 +2250,10 @@ class PaperProcessorDaemon:
                     print("❌ No metadata found with this ISBN")
         
         # No unique identifier worked - proceed to manual entry
-        return self.manual_metadata_entry(metadata, doc_type)
+        manual_metadata = self.manual_metadata_entry(metadata, doc_type)
+        if manual_metadata and not manual_metadata.get('_restart'):
+            manual_metadata = self._search_online_after_manual(manual_metadata)
+        return manual_metadata
     
     def manual_metadata_entry(self, partial_metadata: dict, doc_type: str) -> dict:
         """Guide user through manual metadata entry.
@@ -2335,6 +2338,156 @@ class PaperProcessorDaemon:
         print("\n✅ Manual metadata entry complete")
         return metadata
     
+    def prompt_for_missing_search_info(self, metadata: dict, identifiers_found: dict) -> dict:
+        """Prompt user for missing search parameters used for online lookups."""
+        updated = metadata.copy()
+        doc_type = updated.get('document_type', '').lower()
+        
+        has_title = bool(updated.get('title'))
+        has_authors = bool(updated.get('authors'))
+        has_year = bool(updated.get('year') or identifiers_found.get('best_year'))
+        has_journal = bool(updated.get('journal'))
+        has_isbn = bool(identifiers_found.get('isbns'))
+        
+        needs_info = False
+        if doc_type in ['book', 'book_chapter']:
+            needs_info = not (has_title or (has_authors and has_year) or has_isbn)
+        else:
+            needs_info = not (has_title or (has_authors and has_year) or has_journal)
+        
+        if not needs_info:
+            return updated
+        
+        print("\n⚠️  Not enough information for online library search.")
+        print("Please provide at least one of the following to continue:")
+        if doc_type in ['book', 'book_chapter']:
+            print(" - Title, or Author(s) + Year, or ISBN")
+        else:
+            print(" - Title, or Author(s) + Year, or Journal")
+        
+        # Title
+        if not has_title:
+            title = input("Title (press Enter to skip): ").strip()
+            if title:
+                updated['title'] = title
+        
+        # Authors
+        if not has_authors:
+            authors_input = input("Authors (comma-separated, press Enter to skip): ").strip()
+            if authors_input:
+                updated['authors'] = [a.strip() for a in authors_input.split(',') if a.strip()]
+        
+        # Year
+        if not has_year:
+            year_input = input("Publication year (press Enter to skip): ").strip()
+            if year_input:
+                updated['year'] = year_input
+        
+        # Journal (for papers) or ISBN (for books)
+        if doc_type in ['book', 'book_chapter']:
+            if not has_isbn:
+                isbn_input = input("ISBN (press Enter to skip): ").strip()
+                if isbn_input:
+                    updated.setdefault('isbn', isbn_input)
+        else:
+            if not has_journal:
+                journal_input = input("Journal/Conference (press Enter to skip): ").strip()
+                if journal_input:
+                    updated['journal'] = journal_input
+        
+        return updated
+    
+    def _search_online_after_manual(self, metadata: dict) -> dict:
+        """Run online lookups using manually entered metadata (papers and books)."""
+        doc_type = metadata.get('document_type', '').lower()
+        
+        if doc_type in ['book', 'book_chapter']:
+            title = metadata.get('title')
+            authors = metadata.get('authors', [])
+            year = metadata.get('year')
+            isbn = metadata.get('isbn')
+            
+            if title or (authors and year) or isbn:
+                print("\n🔍 Searching national libraries with provided metadata...")
+                try:
+                    nat_results = self._search_national_library_for_book(
+                        book_title=title,
+                        authors=authors,
+                        language=None,
+                        country_code=None,
+                        item_type='books'
+                    )
+                except Exception as e:
+                    self.logger.warning(f"National library search failed: {e}")
+                    nat_results = []
+                
+                if nat_results:
+                    print(f"Found {len(nat_results)} result(s).")
+                    for idx, item in enumerate(nat_results[:5], 1):
+                        print(f"[{idx}] {item.get('title', 'Unknown')} ({item.get('year', '?')})")
+                    print("[0] None of these")
+                    choice = input("Select best match (0 to skip): ").strip()
+                    if choice.isdigit():
+                        idx = int(choice)
+                        if 1 <= idx <= min(5, len(nat_results)):
+                            selected = nat_results[idx - 1]
+                            merged = selected.copy()
+                            for key, value in metadata.items():
+                                if key not in merged or not merged.get(key):
+                                    merged[key] = value
+                            return merged
+        else:
+            available_params = sum([
+                bool(metadata.get('title')),
+                bool(metadata.get('authors')),
+                bool(metadata.get('year')),
+                bool(metadata.get('journal'))
+            ])
+            
+            if available_params >= 2:
+                print("\n🔍 Searching CrossRef/OpenAlex with manual metadata...")
+                try:
+                    crossref_results = self.metadata_processor.crossref.search_by_metadata(
+                        title=metadata.get('title'),
+                        authors=metadata.get('authors'),
+                        year=str(metadata.get('year')).strip() if metadata.get('year') else None,
+                        journal=metadata.get('journal'),
+                        max_results=3
+                    )
+                except Exception as e:
+                    self.logger.warning(f"CrossRef manual search failed: {e}")
+                    crossref_results = []
+                
+                if crossref_results:
+                    merged = crossref_results[0]
+                    for key, value in metadata.items():
+                        if key not in merged or not merged.get(key):
+                            merged[key] = value
+                    merged['method'] = 'manual+crossref'
+                    return merged
+                
+                try:
+                    openalex_results = self.metadata_processor.openalex.search_by_metadata(
+                        title=metadata.get('title'),
+                        authors=metadata.get('authors'),
+                        year=int(metadata.get('year')) if str(metadata.get('year')).isdigit() else None,
+                        journal=metadata.get('journal'),
+                        max_results=3
+                    )
+                except Exception as e:
+                    self.logger.warning(f"OpenAlex manual search failed: {e}")
+                    openalex_results = []
+                
+                if openalex_results:
+                    merged = openalex_results[0]
+                    for key, value in metadata.items():
+                        if key not in merged or not merged.get(key):
+                            merged[key] = value
+                    merged['method'] = 'manual+openalex'
+                    return merged
+        
+        return metadata
+    
     def convert_zotero_item_to_metadata(self, zotero_item: dict) -> dict:
         """Convert Zotero item to our metadata format.
         
@@ -2349,7 +2502,9 @@ class PaperProcessorDaemon:
             'year': zotero_item.get('year', ''),
             'document_type': zotero_item.get('itemType', 'unknown'),
             'zotero_key': zotero_item.get('key'),
-            'from_zotero': True
+            'from_zotero': True,
+            'source': 'Zotero',
+            'method': 'zotero_manual'
         }
         
         # Extract authors
@@ -3882,8 +4037,40 @@ class PaperProcessorDaemon:
                     }
                     self.logger.info(f"✅ GROBID extracted: {len(metadata.get('authors', []))} authors")
                     
-                    # If we have a JSTOR ID, try to fetch full metadata from CrossRef/OpenAlex
+                    # Filter authors early to avoid propagating hallucinations into searches
+                    if metadata.get('authors'):
+                        metadata = self.filter_garbage_authors(metadata, pdf_path=pdf_to_use)
+                        result['metadata'] = metadata
+                    
+                    # If we have a JSTOR ID, try to fetch full metadata from JSTOR (authoritative) before other searches
                     jstor_ids = identifiers_found.get('jstor_ids', [])
+                    skip_metadata_search = False
+                    
+                    if jstor_ids:
+                        jstor_id = jstor_ids[0]
+                        metadata['document_type'] = 'journal_article'
+                        jstor_url = f"https://www.jstor.org/stable/{jstor_id}"
+                        print(f"\n🔍 JSTOR ID found ({jstor_id}) - fetching metadata from JSTOR page...")
+                        try:
+                            jstor_metadata = self.metadata_processor.jstor.fetch_metadata_from_url(jstor_url)
+                        except Exception as e:
+                            self.logger.warning(f"JSTOR metadata fetch failed for {jstor_id}: {e}")
+                            jstor_metadata = None
+                        
+                        if jstor_metadata:
+                            print(f"  ✅ Found metadata from JSTOR")
+                            # Merge: prefer JSTOR fields, supplement with GROBID
+                            for key, value in metadata.items():
+                                if key not in jstor_metadata or not jstor_metadata.get(key):
+                                    jstor_metadata[key] = value
+                            
+                            jstor_metadata['jstor_id'] = jstor_id
+                            result['metadata'] = jstor_metadata
+                            result['method'] = 'grobid+jstor'
+                            metadata = jstor_metadata  # Use merged metadata for subsequent steps
+                            skip_metadata_search = True
+                        else:
+                            print(f"  ⚠️  Could not fetch metadata from JSTOR page - falling back to metadata search if possible")
                     
                     # Normalize empty values to None BEFORE condition check (empty strings cause query issues)
                     # Stricter validation: ensure values are not empty after stripping
@@ -3922,110 +4109,272 @@ class PaperProcessorDaemon:
                     journal_raw = metadata.get('journal', '')
                     journal = journal_raw.strip() if journal_raw and journal_raw.strip() else None
                     
-                    # Check for non-empty search parameters (normalized values)
-                    has_search_params = any([title, authors, year_str, journal])
+                    # Count available parameters for metadata search
+                    available_params = sum([
+                        bool(title),
+                        bool(authors),
+                        bool(year_str),
+                        bool(journal)
+                    ])
                     
-                    if jstor_ids and has_search_params:
-                        jstor_id = jstor_ids[0]
-                        self.logger.info(f"JSTOR ID {jstor_id} found - trying to fetch metadata from CrossRef/OpenAlex")
-                        print(f"\n🔍 JSTOR ID found ({jstor_id}) - searching CrossRef/OpenAlex for full metadata...")
+                    doc_type = metadata.get('document_type', '').lower()
+                    if doc_type not in ['book', 'book_chapter']:
+                        has_search_params = available_params >= 2
+                    else:
+                        # Books handled via national libraries later
+                        has_search_params = False
+                    
+                    # If we still lack parameters, prompt user to fill gaps for later searches
+                    if not has_search_params and not skip_metadata_search:
+                        metadata = self.prompt_for_missing_search_info(metadata, identifiers_found)
+                        result['metadata'] = metadata
                         
-                        # Ensure we have at least one search parameter (double-check after normalization)
-                        if not any([title, authors, year_str, journal]):
-                            self.logger.warning(f"JSTOR ID {jstor_id} found but no searchable metadata available")
-                            print(f"  ⚠️  No searchable metadata (title/authors/year/journal) - skipping CrossRef/OpenAlex search")
-                        else:
-                            # Try CrossRef first (uses year_str)
+                        # Re-normalize after user input
+                        title_raw = metadata.get('title', '')
+                        title = title_raw.strip() if title_raw and title_raw.strip() else None
+                        
+                        authors_raw = metadata.get('authors', [])
+                        authors = authors_raw if (authors_raw and isinstance(authors_raw, list) and len(authors_raw) > 0) else None
+                        if authors:
+                            authors = [a for a in authors if a and str(a).strip()]
+                            if not authors:
+                                authors = None
+                        
+                        year_raw = metadata.get('year') or identifiers_found.get('best_year')
+                        year_str = None
+                        year_int = None
+                        if year_raw:
                             try:
-                                crossref_results = self.metadata_processor.crossref.search_by_metadata(
-                                    title=title,
-                                    authors=authors,
-                                    year=year_str,  # Pass as string for CrossRef
-                                    journal=journal,
-                                    max_results=3
-                                )
-                                if crossref_results:
-                                    # Use the first (most relevant) result
-                                    api_metadata = crossref_results[0]
-                                    # Merge tags/keywords from both sources
-                                    grobid_keywords = metadata.get('keywords', [])
-                                    api_tags = api_metadata.get('tags', [])
-                                    api_keywords = api_metadata.get('keywords', [])
-                                    
-                                    # Combine all tags/keywords
-                                    combined_tags = []
-                                    if grobid_keywords:
-                                        combined_tags.extend([str(k) for k in grobid_keywords if k])
-                                    if api_tags:
-                                        combined_tags.extend([str(t) if not isinstance(t, dict) else t.get('tag', '') for t in api_tags if t])
-                                    if api_keywords:
-                                        combined_tags.extend([str(k) for k in api_keywords if k and str(k) not in combined_tags])
-                                    
-                                    # Merge with existing metadata (prefer API data)
-                                    metadata.update(api_metadata)
-                                    # Preserve combined tags/keywords
-                                    if combined_tags:
-                                        metadata['tags'] = list(set(combined_tags))  # Remove duplicates
-                                    metadata['jstor_id'] = jstor_id  # Preserve JSTOR ID
-                                    result['metadata'] = metadata
-                                    result['method'] = 'grobid+crossref'
-                                    print(f"  ✅ Found metadata in CrossRef - merged with GROBID extraction")
-                                    self.logger.info("JSTOR article: Found metadata in CrossRef")
+                                year_str = str(year_raw).strip()
+                                if year_str and year_str.isdigit():
+                                    year_int = int(year_str)
+                                    if not (1900 <= year_int <= 2100):
+                                        year_str = None
+                                        year_int = None
                                 else:
-                                    # Try OpenAlex as fallback (uses year_int)
-                                    try:
-                                        openalex_results = self.metadata_processor.openalex.search_by_metadata(
-                                            title=title,
-                                            authors=authors,
-                                            year=year_int,  # Pass as integer for OpenAlex
-                                            journal=journal,
-                                            max_results=3
-                                        )
-                                        if openalex_results:
-                                            api_metadata = openalex_results[0]
-                                            # Merge tags/keywords from both sources
-                                            grobid_keywords = metadata.get('keywords', [])
-                                            api_tags = api_metadata.get('tags', [])
-                                            api_keywords = api_metadata.get('keywords', [])
-                                            
-                                            # Combine all tags/keywords
-                                            combined_tags = []
-                                            if grobid_keywords:
-                                                combined_tags.extend([str(k) for k in grobid_keywords if k])
-                                            if api_tags:
-                                                combined_tags.extend([str(t) if not isinstance(t, dict) else t.get('tag', '') for t in api_tags if t])
-                                            if api_keywords:
-                                                combined_tags.extend([str(k) for k in api_keywords if k and str(k) not in combined_tags])
-                                            
-                                            # Merge with existing metadata (prefer API data)
-                                            metadata.update(api_metadata)
-                                            # Preserve combined tags/keywords
-                                            if combined_tags:
-                                                metadata['tags'] = list(set(combined_tags))  # Remove duplicates
-                                            metadata['jstor_id'] = jstor_id
-                                            result['metadata'] = metadata
-                                            result['method'] = 'grobid+openalex'
-                                            print(f"  ✅ Found metadata in OpenAlex - merged with GROBID extraction")
-                                            self.logger.info("JSTOR article: Found metadata in OpenAlex")
-                                        else:
-                                            print(f"  ⚠️  No metadata found in CrossRef/OpenAlex - using GROBID extraction only")
-                                            metadata['jstor_id'] = jstor_id
-                                            result['metadata'] = metadata
-                                    except Exception as e:
-                                        self.logger.warning(f"OpenAlex search failed for JSTOR ID {jstor_id}: {e}")
-                                        metadata['jstor_id'] = jstor_id
-                                        result['metadata'] = metadata
-                            except Exception as e:
-                                self.logger.warning(f"CrossRef search failed for JSTOR ID {jstor_id}: {e}")
-                                metadata['jstor_id'] = jstor_id
+                                    year_str = None
+                                    year_int = None
+                            except (ValueError, TypeError):
+                                year_str = None
+                                year_int = None
+                        
+                        journal_raw = metadata.get('journal', '')
+                        journal = journal_raw.strip() if journal_raw and journal_raw.strip() else None
+                        
+                        available_params = sum([
+                            bool(title),
+                            bool(authors),
+                            bool(year_str),
+                            bool(journal)
+                        ])
+                        
+                        if doc_type not in ['book', 'book_chapter']:
+                            has_search_params = available_params >= 2
+                        else:
+                            has_search_params = False
+                    
+                    # Books: try national library search before metadata APIs
+                    if doc_type in ['book', 'book_chapter'] and not skip_metadata_search:
+                        try:
+                            nat_results = self._search_national_library_for_book(
+                                book_title=metadata.get('title'),
+                                authors=metadata.get('authors', []),
+                                language=None,
+                                country_code=None,
+                                item_type='books'
+                            )
+                        except Exception as e:
+                            self.logger.warning(f"National library search failed: {e}")
+                            nat_results = []
+                        
+                        if nat_results:
+                            print(f"\n🔍 Found {len(nat_results)} book result(s) from national libraries.")
+                            for idx, item in enumerate(nat_results[:5], 1):
+                                print(f"[{idx}] {item.get('title', 'Unknown')} ({item.get('year', '?')})")
+                            print("[0] None of these")
+                            choice = input("Select best match (0 to skip): ").strip()
+                            if choice.isdigit():
+                                idx = int(choice)
+                                if 1 <= idx <= min(5, len(nat_results)):
+                                    selected = nat_results[idx - 1]
+                                    merged = selected.copy()
+                                    for key, value in metadata.items():
+                                        if key not in merged or not merged.get(key):
+                                            merged[key] = value
+                                    result['metadata'] = merged
+                                    result['method'] = 'grobid+national_library'
+                                    metadata = merged
+                                    has_search_params = False  # skip CrossRef/OpenAlex once book metadata found
+                    
+                    if has_search_params and not skip_metadata_search:
+                        jstor_id = jstor_ids[0] if jstor_ids else None
+                        self.logger.info(f"Searching CrossRef/OpenAlex with {available_params} metadata parameters")
+                        print(f"\n🔍 Searching CrossRef/OpenAlex for metadata...")
+                        
+                        try:
+                            crossref_results = self.metadata_processor.crossref.search_by_metadata(
+                                title=title,
+                                authors=authors,
+                                year=year_str,  # Pass as string for CrossRef
+                                journal=journal,
+                                max_results=3
+                            )
+                            if crossref_results:
+                                api_metadata = crossref_results[0]
+                                grobid_keywords = metadata.get('keywords', [])
+                                api_tags = api_metadata.get('tags', [])
+                                api_keywords = api_metadata.get('keywords', [])
+                                
+                                combined_tags = []
+                                if grobid_keywords:
+                                    combined_tags.extend([str(k) for k in grobid_keywords if k])
+                                if api_tags:
+                                    combined_tags.extend([str(t) if not isinstance(t, dict) else t.get('tag', '') for t in api_tags if t])
+                                if api_keywords:
+                                    combined_tags.extend([str(k) for k in api_keywords if k and str(k) not in combined_tags])
+                                
+                                metadata.update(api_metadata)
+                                if combined_tags:
+                                    metadata['tags'] = list(set(combined_tags))  # Remove duplicates
+                                if jstor_id:
+                                    metadata['jstor_id'] = jstor_id
                                 result['metadata'] = metadata
+                                result['method'] = 'grobid+crossref'
+                                print(f"  ✅ Found metadata in CrossRef - merged with GROBID extraction")
+                                self.logger.info("Metadata search: Found metadata in CrossRef")
+                            else:
+                                try:
+                                    openalex_results = self.metadata_processor.openalex.search_by_metadata(
+                                        title=title,
+                                        authors=authors,
+                                        year=year_int,  # Pass as integer for OpenAlex
+                                        journal=journal,
+                                        max_results=3
+                                    )
+                                    if openalex_results:
+                                        api_metadata = openalex_results[0]
+                                        grobid_keywords = metadata.get('keywords', [])
+                                        api_tags = api_metadata.get('tags', [])
+                                        api_keywords = api_metadata.get('keywords', [])
+                                        
+                                        combined_tags = []
+                                        if grobid_keywords:
+                                            combined_tags.extend([str(k) for k in grobid_keywords if k])
+                                        if api_tags:
+                                            combined_tags.extend([str(t) if not isinstance(t, dict) else t.get('tag', '') for t in api_tags if t])
+                                        if api_keywords:
+                                            combined_tags.extend([str(k) for k in api_keywords if k and str(k) not in combined_tags])
+                                        
+                                        metadata.update(api_metadata)
+                                        if combined_tags:
+                                            metadata['tags'] = list(set(combined_tags))  # Remove duplicates
+                                        if jstor_id:
+                                            metadata['jstor_id'] = jstor_id
+                                        result['metadata'] = metadata
+                                        result['method'] = 'grobid+openalex'
+                                        print(f"  ✅ Found metadata in OpenAlex - merged with GROBID extraction")
+                                        self.logger.info("Metadata search: Found metadata in OpenAlex")
+                                    else:
+                                        print(f"  ⚠️  No metadata found in CrossRef/OpenAlex - using GROBID extraction only")
+                                        if jstor_id:
+                                            metadata['jstor_id'] = jstor_id
+                                        result['metadata'] = metadata
+                                except Exception as e:
+                                    self.logger.warning(f"OpenAlex search failed: {e}")
+                                    if jstor_id:
+                                        metadata['jstor_id'] = jstor_id
+                                    result['metadata'] = metadata
+                        except Exception as e:
+                            self.logger.warning(f"CrossRef search failed: {e}")
+                            if jstor_id:
+                                metadata['jstor_id'] = jstor_id
+                            result['metadata'] = metadata
                 else:
                     self.logger.info("GROBID did not find authors")
+                    # Ensure result is properly initialized if GROBID failed
+                    if result is None or not isinstance(result, dict):
+                        self.logger.warning("Result was None or invalid after GROBID failure - initializing")
+                        result = {
+                            'success': False,
+                            'metadata': {},
+                            'method': 'grobid',
+                            'processing_time_seconds': 0,
+                            'identifiers_found': identifiers_found if 'identifiers_found' in locals() else {}
+                        }
+                    
+                    # Try regex extraction from first page text before falling back to Ollama
+                    self.logger.info("Step 2.5: GROBID failed - trying regex extraction from first page...")
+                    try:
+                        import pdfplumber
+                        with pdfplumber.open(pdf_to_use) as pdf:
+                            if len(pdf.pages) > effective_page_offset:
+                                first_page_text = pdf.pages[effective_page_offset].extract_text() or ""
+                                if first_page_text:
+                                    regex_authors = self.metadata_processor._extract_authors_with_regex_simple(first_page_text)
+                                    # #region agent log
+                                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                                    with open(log_path, 'a', encoding='utf-8') as f:
+                                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"paper_processor_daemon.py:4308","message":"Regex author extraction result","data":{"regex_authors":regex_authors,"text_length":len(first_page_text),"text_preview":first_page_text[:200]},"timestamp":int(time.time()*1000)}) + '\n')
+                                    # #endregion
+                                    if regex_authors:
+                                        self.logger.info(f"✅ Regex found {len(regex_authors)} author(s): {', '.join(regex_authors)}")
+                                        # Create result with regex authors
+                                        result = {
+                                            'success': True,
+                                            'metadata': {
+                                                'authors': regex_authors,
+                                                'title': metadata.get('title', '') if metadata else '',
+                                                'year': identifiers_found.get('best_year', ''),
+                                                'document_type': 'journal_article' if identifiers_found.get('jstor_ids') else 'unknown'
+                                            },
+                                            'method': 'regex_fallback',
+                                            'processing_time_seconds': 0,
+                                            'identifiers_found': identifiers_found
+                                        }
+                    except Exception as e:
+                        self.logger.warning(f"Regex extraction failed: {e}")
+                        # #region agent log
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"paper_processor_daemon.py:4330","message":"Regex extraction exception","data":{"exception_type":type(e).__name__,"exception_message":str(e)},"timestamp":int(time.time()*1000)}) + '\n')
+                        # #endregion
+                    
+                    # #region agent log
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"paper_processor_daemon.py:4333","message":"After regex attempt - checking if Ollama will run","data":{"result_success":result.get('success',False) if result else False,"result_has_authors":bool(result.get('metadata',{}).get('authors')) if result else False},"timestamp":int(time.time()*1000)}) + '\n')
+                    # #endregion
             
             # Step 3: Last resort - try Ollama if still no authors
+            # Safety check: ensure result exists
+            if result is None or not isinstance(result, dict):
+                self.logger.error("Result is None or invalid before Ollama check - initializing")
+                result = {
+                    'success': False,
+                    'metadata': {},
+                    'method': 'unknown',
+                    'processing_time_seconds': 0,
+                    'identifiers_found': identifiers_found if 'identifiers_found' in locals() else {}
+                }
+            
             if not result.get('success') or not result.get('metadata', {}).get('authors'):
-                self.logger.info("Step 3: No authors found from GREP/API/GROBID - trying Ollama as last resort...")
-                if self._ensure_ollama_ready():
+                use_ollama = False
+                try:
+                    use_ollama = self.config.getboolean('METADATA', 'use_ollama_fallback', fallback=False)
+                except Exception:
+                    use_ollama = False
+                
+                if use_ollama:
+                    self.logger.info("Step 3: No authors found from GREP/API/GROBID - trying Ollama as last resort...")
+                else:
+                    self.logger.info("Step 3: Ollama fallback disabled in config - skipping")
+                    # #region agent log
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"paper_processor_daemon.py:4306","message":"Ollama fallback disabled - regex extraction will not run","data":{"use_ollama":use_ollama,"ollama_enabled_in_config":False},"timestamp":int(time.time()*1000)}) + '\n')
+                    # #endregion
+                
+                if use_ollama and self._ensure_ollama_ready():
                     # Try with Ollama fallback
                     ollama_result = self.metadata_processor.process_pdf(pdf_to_use, use_ollama_fallback=True, 
                                                                        progress_callback=self._show_ollama_progress,
@@ -4033,6 +4382,9 @@ class PaperProcessorDaemon:
                     if ollama_result['success'] and ollama_result.get('metadata', {}).get('authors'):
                         # Preserve identifiers_found from GREP
                         ollama_result['identifiers_found'] = identifiers_found
+                        # Filter authors immediately to limit hallucinations before further handling
+                        filtered_meta = self.filter_garbage_authors(ollama_result['metadata'], pdf_path=pdf_to_use)
+                        ollama_result['metadata'] = filtered_meta
                         result = ollama_result
                         # Only log "Ollama found authors" if Ollama was actually used (not regex fallback)
                         method = ollama_result.get('method', '')
@@ -4045,12 +4397,33 @@ class PaperProcessorDaemon:
                     else:
                         self.logger.warning("Ollama also failed to find authors")
                 else:
-                    self.logger.warning("Ollama not available - limited extraction methods only")
+                    if use_ollama:
+                        self.logger.warning("Ollama not available - limited extraction methods only")
+            
+            # Safety check: ensure result exists and has required keys
+            if result is None:
+                self.logger.error("Metadata extraction returned None - this should not happen")
+                result = {
+                    'success': False,
+                    'metadata': {},
+                    'method': 'unknown',
+                    'processing_time_seconds': 0,
+                    'identifiers_found': identifiers_found if 'identifiers_found' in locals() else {}
+                }
+            elif not isinstance(result, dict):
+                self.logger.error(f"Metadata extraction returned unexpected type: {type(result)}")
+                result = {
+                    'success': False,
+                    'metadata': {},
+                    'method': 'unknown',
+                    'processing_time_seconds': 0,
+                    'identifiers_found': identifiers_found if 'identifiers_found' in locals() else {}
+                }
             
             extraction_time = result.get('processing_time_seconds', 0)
             
             # Step 2: Check if extraction succeeded
-            if result['success'] and result['metadata']:
+            if result.get('success') and result.get('metadata'):
                 metadata = result['metadata']
                 
                 # Filter garbage authors (keeps only known authors when extraction is poor)
@@ -6313,185 +6686,64 @@ class PaperProcessorDaemon:
                     min(page_height, source_page_rect.height)
                 )
                 
-                # #region agent log
                 try:
-                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                    with open(log_path, 'a', encoding='utf-8') as f:
-                        f.write(json.dumps({
-                            'sessionId': 'debug-session',
-                            'runId': 'run1',
-                            'hypothesisId': 'B',
-                            'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
-                            'message': 'Before show_pdf_page for left page',
-                            'data': {
-                                'page_num': page_num,
-                                'doc_len': len(doc),
-                                'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
-                                'page_is_none': page is None,
-                                'source_page_rect': [source_page_rect.x0, source_page_rect.y0, source_page_rect.x1, source_page_rect.y1],
-                                'left_page_rect': [left_page.rect.x0, left_page.rect.y0, left_page.rect.x1, left_page.rect.y1],
-                                'left_clip_rect': [left_clip_rect.x0, left_clip_rect.y0, left_clip_rect.x1, left_clip_rect.y1]
-                            },
-                            'timestamp': int(time.time() * 1000)
-                        }) + '\n')
-                except: pass
-                # #endregion
-                
-                try:
-                    # Ensure source page is still valid before calling show_pdf_page
+                    # Ensure source page is still valid
                     if page is None:
                         raise ValueError(f"Source page {page_num} is None")
-                    # Validate page_num is within document bounds
                     if page_num < 0 or page_num >= len(doc):
                         raise ValueError(f"Page number {page_num} is out of bounds (document has {len(doc)} pages)")
-                    # Re-access page from doc to ensure it's valid (PyMuPDF requires doc + page_num, not page object when using clip)
+                    
+                    # Re-access page immediately before get_pixmap
                     source_page = doc[page_num]
                     if source_page is None:
                         raise ValueError(f"Source page {page_num} is None")
-                    # Validate clip rectangle is within source page bounds
+                    
+                    # Validate clip rectangle
                     source_rect = source_page.rect
                     if (left_clip_rect.x0 < 0 or left_clip_rect.y0 < 0 or 
                         left_clip_rect.x1 > source_rect.width or left_clip_rect.y1 > source_rect.height):
                         raise ValueError(f"Clip rectangle {left_clip_rect} is outside source page bounds {source_rect}")
-                    # Ensure document is not closed
-                    if hasattr(doc, 'is_closed') and doc.is_closed:
-                        raise ValueError(f"Source document is closed")
-                    # #region agent log
-                    try:
-                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                        with open(log_path, 'a', encoding='utf-8') as f:
-                            # Test page access one more time just before calling show_pdf_page
-                            test_page = doc[page_num]
-                            f.write(json.dumps({
-                                'sessionId': 'debug-session',
-                                'runId': 'run1',
-                                'hypothesisId': 'B',
-                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
-                                'message': 'Immediately before show_pdf_page call for left page',
-                                'data': {
-                                    'page_num': page_num,
-                                    'doc_len': len(doc),
-                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
-                                    'test_page_is_none': test_page is None,
-                                    'test_page_type': type(test_page).__name__ if test_page is not None else None,
-                                    'left_clip_rect': [left_clip_rect.x0, left_clip_rect.y0, left_clip_rect.x1, left_clip_rect.y1],
-                                    'source_rect': [source_rect.x0, source_rect.y0, source_rect.x1, source_rect.y1]
-                                },
-                                'timestamp': int(time.time() * 1000)
-                            }) + '\n')
-                    except Exception as log_e:
-                        pass
-                    # #endregion
-                    # Use get_pixmap + insert_image as workaround for show_pdf_page clip parameter issues
-                    # This avoids PyMuPDF's internal page access that might fail with clip parameter
-                    # For scanned documents (raster images), this doesn't lose quality
-                    # #region agent log
-                    try:
-                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                        with open(log_path, 'a', encoding='utf-8') as f:
-                            # Re-validate source_page right before get_pixmap
-                            test_source = doc[page_num] if page_num >= 0 and page_num < len(doc) else None
-                            f.write(json.dumps({
-                                'sessionId': 'debug-session',
-                                'runId': 'run1',
-                                'hypothesisId': 'H1,H2,H3',
-                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
-                                'message': 'Before get_pixmap for left page',
-                                'data': {
-                                    'page_num': page_num,
-                                    'source_page_is_none': source_page is None,
-                                    'test_source_is_none': test_source is None,
-                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
-                                    'left_clip_rect': [left_clip_rect.x0, left_clip_rect.y0, left_clip_rect.x1, left_clip_rect.y1],
-                                    'source_rect': [source_rect.x0, source_rect.y0, source_rect.x1, source_rect.y1],
-                                    'clip_within_bounds': (left_clip_rect.x0 >= 0 and left_clip_rect.y0 >= 0 and 
-                                                          left_clip_rect.x1 <= source_rect.width and 
-                                                          left_clip_rect.y1 <= source_rect.height)
-                                },
-                                'timestamp': int(time.time() * 1000)
-                            }) + '\n')
-                    except: pass
-                    # #endregion
-                    # Re-access page immediately before get_pixmap to ensure it's still valid
-                    source_page = doc[page_num]
-                    if source_page is None:
-                        raise ValueError(f"Source page {page_num} became None before get_pixmap")
-                    # Get full pixmap and crop manually to avoid PyMuPDF's clip parameter issues
-                    # The clip parameter can cause AssertionError "page is None" in PyMuPDF's C code
-                    # Get pixmap at native PDF resolution (may be 300 DPI or higher for scanned PDFs)
+                    
+                    # Get full pixmap (avoid clip parameter which causes "page is None" error)
                     full_pixmap = source_page.get_pixmap()
-                    # Calculate scale factors from actual pixmap dimensions vs PDF point dimensions
-                    # This handles PDFs scanned at any resolution (e.g., 300 DPI, 600 DPI, etc.)
-                    source_rect = source_page.rect
+                    
+                    # Calculate scale factors
                     scale_x = full_pixmap.width / source_rect.width if source_rect.width > 0 else 1.0
                     scale_y = full_pixmap.height / source_rect.height if source_rect.height > 0 else 1.0
-                    # Convert clip rectangle from PDF points to pixmap pixels using calculated scale
+                    
+                    # Convert clip rectangle to pixmap coordinates
                     clip_x0 = int(left_clip_rect.x0 * scale_x)
                     clip_y0 = int(left_clip_rect.y0 * scale_y)
                     clip_x1 = int(left_clip_rect.x1 * scale_x)
                     clip_y1 = int(left_clip_rect.y1 * scale_y)
-                    # Ensure coordinates are within pixmap bounds
+                    
+                    # Ensure coordinates are within bounds
                     clip_x0 = max(0, min(clip_x0, full_pixmap.width))
                     clip_y0 = max(0, min(clip_y0, full_pixmap.height))
                     clip_x1 = max(clip_x0, min(clip_x1, full_pixmap.width))
                     clip_y1 = max(clip_y0, min(clip_y1, full_pixmap.height))
-                    # Crop using numpy for direct pixel manipulation (more efficient than PIL roundtrip)
-                    import numpy as np
-                    # #region agent log
-                    try:
-                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                        with open(log_path, 'a', encoding='utf-8') as f:
-                            f.write(json.dumps({
-                                'sessionId': 'debug-session',
-                                'runId': 'run1',
-                                'hypothesisId': 'H1,H2,H3',
-                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
-                                'message': 'Before numpy crop for left page',
-                                'data': {
-                                    'page_num': page_num,
-                                    'full_pixmap_width': full_pixmap.width,
-                                    'full_pixmap_height': full_pixmap.height,
-                                    'full_pixmap_n': full_pixmap.n,
-                                    'clip_x0': clip_x0,
-                                    'clip_y0': clip_y0,
-                                    'clip_x1': clip_x1,
-                                    'clip_y1': clip_y1,
-                                    'scale_x': scale_x,
-                                    'scale_y': scale_y
-                                },
-                                'timestamp': int(time.time() * 1000)
-                            }) + '\n')
-                    except: pass
-                    # #endregion
-                    # Get pixmap samples as numpy array
-                    samples = np.frombuffer(full_pixmap.samples, dtype=np.uint8)
-                    # Reshape to image dimensions (height, width, colors)
-                    if full_pixmap.n == 4:  # RGBA
-                        img_array = samples.reshape(full_pixmap.height, full_pixmap.width, 4)
-                    elif full_pixmap.n == 3:  # RGB
-                        img_array = samples.reshape(full_pixmap.height, full_pixmap.width, 3)
-                    else:  # Grayscale or other
-                        img_array = samples.reshape(full_pixmap.height, full_pixmap.width, full_pixmap.n)
-                    # Crop the numpy array directly
-                    cropped_array = img_array[clip_y0:clip_y1, clip_x0:clip_x1]
-                    # Create new pixmap from cropped array
-                    # Use PIL to convert numpy array to PNG bytes, then create Pixmap from bytes
+                    
+                    # Crop using PIL (reliable method)
                     from PIL import Image
                     import io
-                    # Convert numpy array to PIL Image
-                    if cropped_array.shape[2] == 4:  # RGBA
-                        pil_img = Image.fromarray(cropped_array, 'RGBA')
-                    elif cropped_array.shape[2] == 3:  # RGB
-                        pil_img = Image.fromarray(cropped_array, 'RGB')
-                    else:
-                        pil_img = Image.fromarray(cropped_array)
-                    # Convert to PNG bytes
+                    
+                    # Convert pixmap to PIL Image
+                    img_data = full_pixmap.tobytes("png")
+                    pil_img = Image.open(io.BytesIO(img_data))
+                    
+                    # Crop the image
+                    cropped_img = pil_img.crop((clip_x0, clip_y0, clip_x1, clip_y1))
+                    
+                    # Convert back to PNG bytes and insert directly
                     img_bytes = io.BytesIO()
-                    pil_img.save(img_bytes, format='PNG')
+                    cropped_img.save(img_bytes, format='PNG')
                     img_bytes.seek(0)
-                    # Create pixmap from PNG bytes
-                    clip_pixmap = fitz.Pixmap(img_bytes)
-                    left_page.insert_image(left_page.rect, pixmap=clip_pixmap)
+                    
+                    # Insert as image stream (more reliable than creating new Pixmap)
+                    left_page.insert_image(left_page.rect, stream=img_bytes.getvalue())
+                    
+                    # Clean up
+                    full_pixmap = None
                 except Exception as e:
                     # #region agent log
                     try:
@@ -6543,160 +6795,63 @@ class PaperProcessorDaemon:
                 )
                 
                 try:
-                    # Ensure source page is still valid before calling show_pdf_page
+                    # Ensure source page is still valid
                     if page is None:
                         raise ValueError(f"Source page {page_num} is None")
-                    # Validate page_num is within document bounds
                     if page_num < 0 or page_num >= len(doc):
                         raise ValueError(f"Page number {page_num} is out of bounds (document has {len(doc)} pages)")
-                    # Re-access page from doc to ensure it's valid (PyMuPDF requires doc + page_num, not page object when using clip)
+                    
+                    # Re-access page immediately before get_pixmap
                     source_page = doc[page_num]
                     if source_page is None:
                         raise ValueError(f"Source page {page_num} is None")
-                    # Validate clip rectangle is within source page bounds
+                    
+                    # Validate clip rectangle
                     source_rect = source_page.rect
                     if (right_clip_rect.x0 < 0 or right_clip_rect.y0 < 0 or 
                         right_clip_rect.x1 > source_rect.width or right_clip_rect.y1 > source_rect.height):
                         raise ValueError(f"Clip rectangle {right_clip_rect} is outside source page bounds {source_rect}")
-                    # Ensure document is not closed
-                    if hasattr(doc, 'is_closed') and doc.is_closed:
-                        raise ValueError(f"Source document is closed")
-                    # #region agent log
-                    try:
-                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                        with open(log_path, 'a', encoding='utf-8') as f:
-                            # Test page access one more time just before calling show_pdf_page
-                            test_page = doc[page_num]
-                            f.write(json.dumps({
-                                'sessionId': 'debug-session',
-                                'runId': 'run1',
-                                'hypothesisId': 'B',
-                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
-                                'message': 'Immediately before show_pdf_page call for right page',
-                                'data': {
-                                    'page_num': page_num,
-                                    'doc_len': len(doc),
-                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
-                                    'test_page_is_none': test_page is None,
-                                    'test_page_type': type(test_page).__name__ if test_page is not None else None,
-                                    'right_clip_rect': [right_clip_rect.x0, right_clip_rect.y0, right_clip_rect.x1, right_clip_rect.y1],
-                                    'source_rect': [source_rect.x0, source_rect.y0, source_rect.x1, source_rect.y1]
-                                },
-                                'timestamp': int(time.time() * 1000)
-                            }) + '\n')
-                    except Exception as log_e:
-                        pass
-                    # #endregion
-                    # Use get_pixmap + insert_image as workaround for show_pdf_page clip parameter issues
-                    # This avoids PyMuPDF's internal page access that might fail with clip parameter
-                    # For scanned documents (raster images), this doesn't lose quality
-                    # #region agent log
-                    try:
-                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                        with open(log_path, 'a', encoding='utf-8') as f:
-                            # Re-validate source_page right before get_pixmap
-                            test_source = doc[page_num] if page_num >= 0 and page_num < len(doc) else None
-                            f.write(json.dumps({
-                                'sessionId': 'debug-session',
-                                'runId': 'run1',
-                                'hypothesisId': 'H1,H2,H3',
-                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
-                                'message': 'Before get_pixmap for right page',
-                                'data': {
-                                    'page_num': page_num,
-                                    'source_page_is_none': source_page is None,
-                                    'test_source_is_none': test_source is None,
-                                    'doc_is_closed': doc.is_closed if hasattr(doc, 'is_closed') else 'unknown',
-                                    'right_clip_rect': [right_clip_rect.x0, right_clip_rect.y0, right_clip_rect.x1, right_clip_rect.y1],
-                                    'source_rect': [source_rect.x0, source_rect.y0, source_rect.x1, source_rect.y1],
-                                    'clip_within_bounds': (right_clip_rect.x0 >= 0 and right_clip_rect.y0 >= 0 and 
-                                                          right_clip_rect.x1 <= source_rect.width and 
-                                                          right_clip_rect.y1 <= source_rect.height)
-                                },
-                                'timestamp': int(time.time() * 1000)
-                            }) + '\n')
-                    except: pass
-                    # #endregion
-                    # Re-access page immediately before get_pixmap to ensure it's still valid
-                    source_page = doc[page_num]
-                    if source_page is None:
-                        raise ValueError(f"Source page {page_num} became None before get_pixmap")
-                    # Get full pixmap and crop manually to avoid PyMuPDF's clip parameter issues
-                    # The clip parameter can cause AssertionError "page is None" in PyMuPDF's C code
-                    # Get pixmap at native PDF resolution (may be 300 DPI or higher for scanned PDFs)
+                    
+                    # Get full pixmap (avoid clip parameter which causes "page is None" error)
                     full_pixmap = source_page.get_pixmap()
-                    # Calculate scale factors from actual pixmap dimensions vs PDF point dimensions
-                    # This handles PDFs scanned at any resolution (e.g., 300 DPI, 600 DPI, etc.)
-                    source_rect = source_page.rect
+                    
+                    # Calculate scale factors
                     scale_x = full_pixmap.width / source_rect.width if source_rect.width > 0 else 1.0
                     scale_y = full_pixmap.height / source_rect.height if source_rect.height > 0 else 1.0
-                    # Convert clip rectangle from PDF points to pixmap pixels using calculated scale
+                    
+                    # Convert clip rectangle to pixmap coordinates
                     clip_x0 = int(right_clip_rect.x0 * scale_x)
                     clip_y0 = int(right_clip_rect.y0 * scale_y)
                     clip_x1 = int(right_clip_rect.x1 * scale_x)
                     clip_y1 = int(right_clip_rect.y1 * scale_y)
-                    # Ensure coordinates are within pixmap bounds
+                    
+                    # Ensure coordinates are within bounds
                     clip_x0 = max(0, min(clip_x0, full_pixmap.width))
                     clip_y0 = max(0, min(clip_y0, full_pixmap.height))
                     clip_x1 = max(clip_x0, min(clip_x1, full_pixmap.width))
                     clip_y1 = max(clip_y0, min(clip_y1, full_pixmap.height))
-                    # Crop using numpy for direct pixel manipulation (more efficient than PIL roundtrip)
-                    import numpy as np
-                    # #region agent log
-                    try:
-                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                        with open(log_path, 'a', encoding='utf-8') as f:
-                            f.write(json.dumps({
-                                'sessionId': 'debug-session',
-                                'runId': 'run1',
-                                'hypothesisId': 'H1,H2,H3',
-                                'location': 'paper_processor_daemon.py:_split_with_custom_gutter',
-                                'message': 'Before numpy crop for right page',
-                                'data': {
-                                    'page_num': page_num,
-                                    'full_pixmap_width': full_pixmap.width,
-                                    'full_pixmap_height': full_pixmap.height,
-                                    'full_pixmap_n': full_pixmap.n,
-                                    'clip_x0': clip_x0,
-                                    'clip_y0': clip_y0,
-                                    'clip_x1': clip_x1,
-                                    'clip_y1': clip_y1,
-                                    'scale_x': scale_x,
-                                    'scale_y': scale_y
-                                },
-                                'timestamp': int(time.time() * 1000)
-                            }) + '\n')
-                    except: pass
-                    # #endregion
-                    # Get pixmap samples as numpy array
-                    samples = np.frombuffer(full_pixmap.samples, dtype=np.uint8)
-                    # Reshape to image dimensions (height, width, colors)
-                    if full_pixmap.n == 4:  # RGBA
-                        img_array = samples.reshape(full_pixmap.height, full_pixmap.width, 4)
-                    elif full_pixmap.n == 3:  # RGB
-                        img_array = samples.reshape(full_pixmap.height, full_pixmap.width, 3)
-                    else:  # Grayscale or other
-                        img_array = samples.reshape(full_pixmap.height, full_pixmap.width, full_pixmap.n)
-                    # Crop the numpy array directly
-                    cropped_array = img_array[clip_y0:clip_y1, clip_x0:clip_x1]
-                    # Create new pixmap from cropped array
-                    # Use PIL to convert numpy array to PNG bytes, then create Pixmap from bytes
+                    
+                    # Crop using PIL (reliable method)
                     from PIL import Image
                     import io
-                    # Convert numpy array to PIL Image
-                    if cropped_array.shape[2] == 4:  # RGBA
-                        pil_img = Image.fromarray(cropped_array, 'RGBA')
-                    elif cropped_array.shape[2] == 3:  # RGB
-                        pil_img = Image.fromarray(cropped_array, 'RGB')
-                    else:
-                        pil_img = Image.fromarray(cropped_array)
-                    # Convert to PNG bytes
+                    
+                    # Convert pixmap to PIL Image
+                    img_data = full_pixmap.tobytes("png")
+                    pil_img = Image.open(io.BytesIO(img_data))
+                    
+                    # Crop the image
+                    cropped_img = pil_img.crop((clip_x0, clip_y0, clip_x1, clip_y1))
+                    
+                    # Convert back to PNG bytes and insert directly
                     img_bytes = io.BytesIO()
-                    pil_img.save(img_bytes, format='PNG')
+                    cropped_img.save(img_bytes, format='PNG')
                     img_bytes.seek(0)
-                    # Create pixmap from PNG bytes
-                    clip_pixmap = fitz.Pixmap(img_bytes)
-                    right_page.insert_image(right_page.rect, pixmap=clip_pixmap)
+                    
+                    # Insert as image stream (more reliable than creating new Pixmap)
+                    right_page.insert_image(right_page.rect, stream=img_bytes.getvalue())
+                    
+                    # Clean up
+                    full_pixmap = None
                 except Exception as e:
                     # #region agent log
                     try:
