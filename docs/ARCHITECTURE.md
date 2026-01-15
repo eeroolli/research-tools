@@ -2,7 +2,7 @@
 
 ## Overview
 
-The paper processor daemon is a modular system for processing scanned academic papers. It watches a directory for new PDF files, extracts metadata, integrates with Zotero, and manages file operations.
+The paper processor daemon is a modular system for processing scanned academic papers. It watches a directory for new PDF files, extracts metadata, integrates with Zotero, and manages file operations. A legacy, monolithic script still orchestrates parts of the flow while module extraction continues.
 
 ## Architecture Principles
 
@@ -11,6 +11,7 @@ The paper processor daemon is a modular system for processing scanned academic p
 3. **Error Handling**: Structured exception hierarchy for specific error types
 4. **Network Resilience**: Robust handling of distributed services (blacktower ↔ P1)
 5. **Testability**: Dependency injection and mockable interfaces
+6. **Incremental Refactor**: Legacy orchestration remains in `scripts/paper_processor_daemon.py` while new modules are phased in
 
 ## Module Structure
 
@@ -25,6 +26,7 @@ shared_tools/daemon/
 ├── pdf_processor.py      # PDF preprocessing, splitting, border removal
 ├── metadata_workflow.py  # Metadata extraction orchestration
 ├── zotero_workflow.py    # Zotero search, matching, attachment
+├── enrichment_workflow.py# Online enrichment orchestration (match policy + planner)
 ├── user_interaction.py   # Menus, prompts, input handling
 ├── display.py            # Metadata formatting and display
 ├── exceptions.py         # Exception hierarchy
@@ -55,17 +57,10 @@ shared_tools/metadata/
 ├── paper_processor.py    # Main paper metadata extraction orchestrator
 ├── jstor_handler.py      # JSTOR workflow orchestration
 ├── extractor.py          # Metadata extraction base classes
+├── enrichment_policy.py  # Match policy scoring for online enrichment
+├── enrichment_planner.py # Field-level update planning for enrichment
 └── ...                   # Other metadata modules
 ```
-
-### PDF Utilities (shared_tools/pdf/)
-
-`
-shared_tools/pdf/
-├── border_remover.py     # Border detection/removal for scanned PDFs
-├── content_detector.py   # Gutter detection + content-aware splitting support
-└── ...                   # Other PDF helpers
-`
 
 ## Key Modules
 
@@ -97,6 +92,7 @@ shared_tools/pdf/
 - PDF preprocessing
 - Page offset handling
 - Border removal integration
+- Two-up splitting support (gutter detection + geometric fallback)
 - Context managers for temporary PDFs
 
 ### Metadata Workflow (`metadata_workflow.py`)
@@ -152,7 +148,7 @@ shared_tools/pdf/
 ### Paper Processor (`paper_processor.py`)
 
 - Main orchestrator for paper metadata extraction
-- Uses utility modules (AuthorExtractor, DocumentClassifier, JSTORHandler)
+- Uses utility modules (AuthorExtractor, DocumentClassifier, JSTORHandler, GrobidValidator)
 - Coordinates extraction strategies (GREP → API → GROBID → Ollama)
 - Maintains backward compatibility with existing API
 
@@ -161,9 +157,9 @@ shared_tools/pdf/
 ```
 New PDF File
     ↓
-File Watcher (core.py)
+File Watcher (core.py) or legacy loop in `scripts/paper_processor_daemon.py`
     ↓
-PDF Preprocessing (pdf_processor.py)
+PDF Preprocessing (pdf_processor.py + `shared_tools/pdf/content_detector.py`)
     ↓
 Metadata Extraction (metadata_workflow.py)
     ↓
@@ -196,6 +192,8 @@ grobid_validator.py → identifier_extractor.py (extract_text)
 document_classifier.py → identifier_extractor.py (extract_text)
 jstor_handler.py → jstor_client.py, api_clients
 identifier_extractor.py → PyPDF2 (text extraction)
+content_detector.py → PyMuPDF + OpenCV (gutter detection)
+border_remover.py → OpenCV (border detection/removal)
 ```
 
 ## Distributed Setup (blacktower ↔ P1)
@@ -244,3 +242,8 @@ Centralized configuration in `config.conf`:
 7. **Single Responsibility**: Each utility module has a focused purpose (author extraction, document classification, validation)
 8. **Exception Routing**: Exception handlers route to existing processing paths instead of creating ad-hoc solutions
 
+## Current Integration Notes
+
+- The primary orchestration entry point is still `scripts/paper_processor_daemon.py`.
+- `shared_tools/daemon/` modules are available and used selectively (e.g., service management, config loading).
+- Metadata extraction is centralized in `shared_tools/metadata/paper_processor.py`, which calls the shared utilities.
