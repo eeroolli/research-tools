@@ -130,8 +130,8 @@ class PaperMetadataProcessor:
         
         # Extract author (case-insensitive)
         # Matches "author\n...", "authors\n...", "Author(s): ...", and "Authors: ..." formats
-        author_pattern = r'(?:^|\n)author(?:s|\(s\))?\s*(?::\s*|\n)(.+?)(?=\n(?:title|publication|journal|date|url)|$)'
-        match = re.search(author_pattern, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        author_pattern = r'(?:^|\n)author(?:s|\(s\))?\s*(?::\s*|\n)([^\n]+)(?=\n(?:title|publication|journal|date|url)|$)'
+        match = re.search(author_pattern, text, re.IGNORECASE | re.MULTILINE)
         if match:
             author = match.group(1).strip()
             # Clean up author

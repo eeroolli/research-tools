@@ -21,20 +21,20 @@ class AuthorExtractor:
         # "By [Author]" or "Authors: [Author1], [Author2]" or "Author(s): [Author]"
         rf'(?:By|Authors?|Author\(s\))\s*:?\s*([^\n]+)',
         # "Author Name" at start of line
-        rf'^({WORD}\s+{WORD}(?:\s+{WORD})*)',
+        rf'^({WORD}[^\S\r\n]+{WORD}(?:[^\S\r\n]+{WORD})*)',
         # "Lastname, Firstname"
-        rf'({WORD}),\s*{WORD}(?:\s+{WORD})*',
+        rf'({WORD}),[^\S\r\n]*{WORD}(?:[^\S\r\n]+{WORD})*',
         # "Firstname Lastname"
-        rf'({WORD}\s+{WORD}(?:\s+{WORD})*)',
+        rf'({WORD}[^\S\r\n]+{WORD}(?:[^\S\r\n]+{WORD})*)',
         # "Lastname & Lastname" or "Lastname and Lastname"
-        rf'({WORD})\s+(?:and|&)\s+({WORD})',
+        rf'({WORD})[^\S\r\n]+(?:and|&)[^\S\r\n]+({WORD})',
     ]
 
     # Common academic name patterns (looser)
     NAME_PATTERNS = [
-        rf'{WORD}\s+{WORD}',              # First Last
-        rf'{WORD},\s*{WORD}',            # Last, First
-        rf'{WORD}\s+[A-Z]\.\s*{WORD}',   # First M. Last
+        rf'{WORD}[^\S\r\n]+{WORD}',              # First Last
+        rf'{WORD},[^\S\r\n]*{WORD}',            # Last, First
+        rf'{WORD}[^\S\r\n]+[A-Z]\.[^\S\r\n]*{WORD}',   # First M. Last
     ]
 
     # Words that indicate non-author entities (institutions, places, common phrases)
@@ -134,7 +134,7 @@ class AuthorExtractor:
                     authors.add(match.strip())
 
         # "and" / "&" separated names
-        and_pattern = rf'({cls.WORD}(?:\s+{cls.WORD})*)\s+(?:and|&)\s+({cls.WORD}(?:\s+{cls.WORD})*)'
+        and_pattern = rf'({cls.WORD}(?:[^\S\r\n]+{cls.WORD})*)[^\S\r\n]+(?:and|&)[^\S\r\n]+({cls.WORD}(?:[^\S\r\n]+{cls.WORD})*)'
         for match in re.findall(and_pattern, text, re.UNICODE | re.IGNORECASE):
             if match[0] and match[1]:
                 authors.add(match[0].strip())
