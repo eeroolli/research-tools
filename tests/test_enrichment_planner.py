@@ -16,7 +16,7 @@ def test_planner_fills_missing_fields():
 
     plan = planner.build_plan(zotero, candidate, decision)
     assert plan["updates"]["pages"] == "10-20"
-    assert "doi" not in plan["updates"]  # manual_on_conflict requires empty Zotero
+    assert plan["updates"]["doi"] == "10.1234/abc"
 
 
 def test_planner_respects_manual_on_conflict():
