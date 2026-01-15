@@ -32,6 +32,8 @@ from shared_tools.ai.ollama_client import OllamaClient
 from shared_tools.utils.author_extractor import AuthorExtractor
 from shared_tools.utils.document_classifier import DocumentClassifier
 from shared_tools.metadata.jstor_handler import JSTORHandler
+from shared_tools.utils.author_validator import AuthorValidator
+from shared_tools.utils.journal_validator import JournalValidator
 
 
 class PaperMetadataProcessor:
@@ -51,6 +53,10 @@ class PaperMetadataProcessor:
         self.extractor = IdentifierExtractor()
         self.validator = IdentifierValidator()
         self.priority_manager = APIPriorityManager()
+        
+        # Initialize author/journal validators (lazy loading with caching)
+        self.author_validator = None
+        self.journal_validator = None
         
         # Initialize API clients
         self.crossref = CrossRefClient(email=email)
@@ -92,6 +98,86 @@ class PaperMetadataProcessor:
             return None
         except Exception:
             return None
+    
+    def _filter_regex_authors(self, regex_authors: List[str]) -> List[str]:
+        """Filter regex-extracted authors using Zotero author/journal lists.
+        
+        Args:
+            regex_authors: List of author names from regex extraction
+            
+        Returns:
+            Filtered list of authors based on config mode
+        """
+        if not regex_authors:
+            return []
+        
+        # Lazy initialization of validators (they handle caching internally)
+        if self.author_validator is None:
+            try:
+                self.author_validator = AuthorValidator()
+            except Exception as e:
+                # If validator fails (e.g., DB not found), skip filtering
+                print(f"  ⚠️  Could not initialize author validator: {e}")
+                return regex_authors
+        
+        if self.journal_validator is None:
+            try:
+                self.journal_validator = JournalValidator()
+            except Exception as e:
+                # If validator fails, skip journal filtering
+                print(f"  ⚠️  Could not initialize journal validator: {e}")
+                self.journal_validator = None
+        
+        # Step 1: Filter out journal names
+        non_journal_candidates = []
+        if self.journal_validator:
+            for candidate in regex_authors:
+                # Check if candidate matches a known journal
+                journal_result = self.journal_validator.validate_journal(candidate)
+                if not journal_result.get('matched', False):
+                    non_journal_candidates.append(candidate)
+        else:
+            non_journal_candidates = regex_authors
+        
+        if not non_journal_candidates:
+            return []
+        
+        # Step 2: Validate against Zotero authors
+        validation_result = self.author_validator.validate_authors(non_journal_candidates)
+        known_authors = validation_result.get('known_authors', [])
+        unknown_authors = validation_result.get('unknown_authors', [])
+        
+        # Step 3: Apply filtering mode from config
+        config = configparser.ConfigParser()
+        root_dir = Path(__file__).parent.parent.parent
+        config.read([
+            root_dir / 'config.conf',
+            root_dir / 'config.personal.conf'
+        ])
+        
+        mode = config.get('AUTHOR_MATCHING', 'mode', fallback='balanced')
+        max_unknown = config.getint('AUTHOR_MATCHING', 'max_unknown_authors', fallback=2)
+        
+        filtered = []
+        
+        if mode == 'prefer_zotero_only':
+            # Only keep known authors
+            filtered = [author['name'] for author in known_authors]
+        
+        elif mode == 'balanced':
+            # Prefer known authors, but allow limited unknowns if no matches
+            if known_authors:
+                # We have matches - only keep those
+                filtered = [author['name'] for author in known_authors]
+            else:
+                # No matches - keep up to max_unknown_authors
+                filtered = [author['name'] for author in unknown_authors[:max_unknown]]
+        
+        elif mode == 'permissive':
+            # Keep all non-journal candidates
+            filtered = non_journal_candidates
+        
+        return filtered
     
     def _extract_structured_repository_metadata(self, text: str) -> Optional[Dict]:
         """Extract structured metadata from repository pages using labeled fields.
@@ -326,9 +412,16 @@ class PaperMetadataProcessor:
                             }) + '\n')
                         # #endregion
                         if regex_authors:
-                            print(f"  Authors (regex): {regex_authors}")
-                            # Store regex authors in identifiers for later use
-                            identifiers['regex_authors'] = regex_authors
+                            print(f"  Authors (regex, before filtering): {regex_authors}")
+                            # Filter against Zotero author/journal lists
+                            filtered_authors = self._filter_regex_authors(regex_authors)
+                            if filtered_authors:
+                                print(f"  Authors (regex, after filtering): {filtered_authors}")
+                                # Store filtered regex authors in identifiers for later use
+                                identifiers['regex_authors'] = filtered_authors
+                            else:
+                                print(f"  ⚠️  All regex authors filtered out")
+                                identifiers['regex_authors'] = []
         except Exception as e:
             # If extraction fails, continue without regex authors
             pass
@@ -479,12 +572,19 @@ class PaperMetadataProcessor:
             
             regex_authors = AuthorExtractor.extract_authors_simple(text or "")
             if regex_authors:
-                print(f"  ✅ Regex found {len(regex_authors)} author(s): {', '.join(regex_authors)}")
+                print(f"  ✅ Regex found {len(regex_authors)} author(s) (before filtering): {', '.join(regex_authors)}")
+                # Filter against Zotero author/journal lists
+                filtered_authors = self._filter_regex_authors(regex_authors)
+                if filtered_authors:
+                    print(f"  ✅ Regex found {len(filtered_authors)} author(s) (after filtering): {', '.join(filtered_authors)}")
+                else:
+                    print(f"  ⚠️  All regex authors filtered out")
+                    filtered_authors = []
                 
-                # Create metadata with regex authors
+                # Create metadata with filtered regex authors
                 metadata = {
                     'title': identifiers.get('title', ''),
-                    'authors': regex_authors,
+                    'authors': filtered_authors,
                     'url': identifiers['urls'][0] if identifiers['urls'] else '',
                     'document_type': 'working_paper' if is_institutional else 'academic_paper',
                     'extraction_method': 'regex_fallback'
@@ -597,12 +697,19 @@ class PaperMetadataProcessor:
                 f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"paper_processor.py:758","message":"Regex author extraction result","data":{"regex_authors":regex_authors,"text_length":len(text_page1) if text_page1 else 0,"text_preview":text_page1[:200] if text_page1 else None},"timestamp":int(time.time()*1000)}) + '\n')
             # #endregion
             if regex_authors:
-                print(f"  ✅ Regex found {len(regex_authors)} author(s): {', '.join(regex_authors)}")
+                print(f"  ✅ Regex found {len(regex_authors)} author(s) (before filtering): {', '.join(regex_authors)}")
+                # Filter against Zotero author/journal lists
+                filtered_authors = self._filter_regex_authors(regex_authors)
+                if filtered_authors:
+                    print(f"  ✅ Regex found {len(filtered_authors)} author(s) (after filtering): {', '.join(filtered_authors)}")
+                else:
+                    print(f"  ⚠️  All regex authors filtered out")
+                    filtered_authors = []
                 
-                # Create basic metadata with regex authors
+                # Create basic metadata with filtered regex authors
                 metadata = {
                     'title': identifiers.get('title', ''),
-                    'authors': regex_authors,
+                    'authors': filtered_authors,
                     'document_type': 'book_chapter',
                     'extraction_method': 'regex_fallback'
                 }
