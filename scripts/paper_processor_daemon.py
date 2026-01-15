@@ -10930,6 +10930,9 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         # Show detailed metadata and give option to review/edit before proceeding
         self._display_zotero_item_details(selected_item)
+
+        # Auto-enrichment attempt (non-blocking)
+        self._auto_enrich_selected_item(metadata, selected_item)
         
         # Create context
         context = ItemSelectedContext(
@@ -10997,6 +11000,57 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         # Should not reach here
         print("⚠️  Unexpected navigation result")
         return
+
+    def _auto_enrich_selected_item(self, extracted_metadata: dict, zotero_item: dict) -> None:
+        """Automatically attempt online enrichment for an existing Zotero item."""
+        try:
+            item_key = zotero_item.get('key') or zotero_item.get('item_key')
+            if not item_key:
+                return
+
+            zotero_metadata = self.convert_zotero_item_to_metadata(zotero_item) or {}
+            # Use Zotero metadata as base; supplement with extracted fields if missing
+            search_base = zotero_metadata.copy()
+            for k, v in (extracted_metadata or {}).items():
+                if k not in search_base or not search_base.get(k):
+                    search_base[k] = v
+
+            candidates = self.enrichment_workflow.search_online(search_base)
+            if not candidates:
+                return
+
+            summary = self.enrichment_workflow.evaluate_and_plan(zotero_metadata, candidates)
+            decision = summary.get("decision")
+            plan = summary.get("plan")
+            candidate = summary.get("candidate")
+            if not decision or not plan or not candidate:
+                return
+
+            status = decision.get("status")
+            reason = decision.get("reason")
+
+            if status == "auto_accept":
+                display_enrichment_summary(zotero_metadata, candidate, plan, heading="AUTO ENRICHMENT (ONLINE)")
+                apply_result = self.enrichment_workflow.apply_plan(
+                    self.zotero_processor, item_key, plan
+                )
+                applied = apply_result.get("applied", [])
+                failed = apply_result.get("failed", [])
+                if applied:
+                    print(Colors.colorize(f"Auto-applied enrichment fields to Zotero ({item_key}): {', '.join(applied)}", ColorScheme.SUCCESS))
+                if failed:
+                    print(Colors.colorize(f"Failed to apply fields: {', '.join(failed)}", ColorScheme.ERROR))
+                self.logger.info(
+                    "Auto-enrichment applied",
+                    extra={"item_key": item_key, "applied": applied, "failed": failed},
+                )
+            elif status == "manual_review":
+                print(Colors.colorize(f"\nEnrichment available but requires manual review (reason: {reason}). Use option [5] to review/apply.", ColorScheme.WARN))
+            else:
+                # reject or weak match; do nothing
+                self.logger.debug("Auto-enrichment skipped", extra={"item_key": item_key, "status": status, "reason": reason})
+        except Exception as e:
+            self.logger.warning(f"Auto-enrichment failed: {e}")
     
     def _process_selected_item(self, pdf_path: Path, zotero_item: dict, target_filename: str, metadata: dict = None, preprocessed_pdf: Path = None, preprocessing_state: dict = None):
         """Process selected Zotero item: copy PDF and attach.
