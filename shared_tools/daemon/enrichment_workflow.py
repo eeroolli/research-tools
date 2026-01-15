@@ -84,6 +84,39 @@ class EnrichmentWorkflow:
         """Build an update plan using the planner and decision evidence."""
         return self.planner.build_plan(zotero_metadata, candidate, decision)
 
+    def evaluate_and_plan(
+        self, zotero_metadata: Dict, candidates: List[Dict]
+    ) -> Dict:
+        """Evaluate candidates, pick best, and build a plan."""
+        best, decision = self.choose_best(zotero_metadata, candidates) if candidates else (None, None)
+        if best and decision:
+            plan = self.plan_updates(zotero_metadata, best, decision)
+        else:
+            plan = None
+        return {"candidate": best, "decision": decision, "plan": plan}
+
+    def apply_plan(self, zotero_processor, item_key: str, plan: Dict) -> Dict:
+        """Apply plan updates to Zotero via the provided processor."""
+        updates = plan.get("updates", {}) if plan else {}
+        applied = []
+        failed = []
+        for field, value in updates.items():
+            ok = False
+            try:
+                ok = zotero_processor.update_item_field_if_missing(item_key, field, value)
+            except Exception:
+                ok = False
+            if ok:
+                applied.append(field)
+            else:
+                failed.append(field)
+        if applied or failed:
+            self.logger.info(
+                "Enrichment apply results",
+                extra={"item_key": item_key, "applied": applied, "failed": failed},
+            )
+        return {"applied": applied, "failed": failed}
+
     # Batch helper
     def process_batch(self, zotero_items: List[Dict]) -> List[Dict]:
         """Process a list of Zotero items; returns a report list per item."""

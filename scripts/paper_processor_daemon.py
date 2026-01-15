@@ -47,6 +47,7 @@ from shared_tools.utils.grobid_validator import GrobidValidator
 from shared_tools.metadata.enrichment_policy import MatchPolicy, MatchPolicyConfig
 from shared_tools.metadata.enrichment_planner import EnrichmentPlanner
 from shared_tools.daemon.enrichment_workflow import EnrichmentWorkflow
+from shared_tools.daemon.enrichment_display import display_enrichment_summary
 
 # Import book lookup service for book chapters
 from add_or_remove_books_zotero import DetailedISBNLookupService
@@ -8376,7 +8377,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         self.logger.info("="*60)
         sys.exit(0)
 
-    def compare_metadata_step(self, extracted_metadata: dict, zotero_metadata: dict) -> dict:
+    def compare_metadata_step(self, extracted_metadata: dict, zotero_metadata: dict, zotero_item: dict = None) -> dict:
         """Step 1: Compare extracted metadata with Zotero item metadata.
         
         Args:
@@ -8397,7 +8398,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         choice = self._get_metadata_comparison_choice()
         
         # Handle choice and return final metadata
-        return self._handle_metadata_choice(choice, extracted_metadata, zotero_metadata)
+        return self._handle_metadata_choice(choice, extracted_metadata, zotero_metadata, zotero_item=zotero_item)
     
     def _display_metadata_comparison(self, extracted: dict, zotero: dict):
         """Display side-by-side metadata comparison."""
@@ -8449,7 +8450,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             else:
                 print("Invalid choice. Please try again.")
     
-    def _handle_metadata_choice(self, choice: str, extracted: dict, zotero: dict) -> dict:
+    def _handle_metadata_choice(self, choice: str, extracted: dict, zotero: dict, zotero_item: dict = None) -> dict:
         """Handle user's metadata comparison choice."""
         if choice == '1':
             print("✅ Using extracted metadata")
@@ -8470,7 +8471,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         elif choice == '5':
             # Search online libraries for enhanced metadata
             print("🔍 Searching online libraries for enhanced metadata...")
-            return self._search_online_metadata(extracted, zotero)
+            return self._search_online_metadata(extracted, zotero, zotero_item=zotero_item)
             
         elif choice == '6':
             print("📝 Moving to manual processing...")
@@ -8585,7 +8586,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         print("\n✅ Metadata merge complete")
         return merged
     
-    def _search_online_metadata(self, extracted: dict, zotero: dict) -> dict:
+    def _search_online_metadata(self, extracted: dict, zotero: dict, zotero_item: dict = None) -> dict:
         """Search online libraries and let user choose how to merge results.
         
         Args:
@@ -8600,7 +8601,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         # Search online libraries
         print("\n🔍 Searching CrossRef, arXiv, OpenAlex...")
-        online_metadata = self.search_online_libraries(base_metadata)
+        online_metadata = self.search_online_libraries(base_metadata, zotero_item=zotero_item)
         
         if not online_metadata:
             print("⚠️  No online metadata found. Using Zotero/Extracted metadata.")
@@ -8652,6 +8653,25 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 return zotero if zotero else extracted
             else:
                 print("⚠️  Invalid choice. Please enter 1-5.")
+
+        # If we have a Zotero item, offer to apply fill-only updates from online metadata
+        if zotero_item and zotero_item.get('key') and online_metadata:
+            decision = self.enrichment_workflow.match_policy.evaluate(zotero or {}, online_metadata)
+            plan = self.enrichment_workflow.plan_updates(zotero or {}, online_metadata, decision)
+            display_enrichment_summary(zotero or {}, online_metadata, plan, heading="ENRICHMENT REVIEW")
+            apply_choice = input("Apply these enrichment fields to Zotero? [Y/n]: ").strip().lower()
+            if not apply_choice or apply_choice == 'y':
+                apply_result = self.enrichment_workflow.apply_plan(
+                    self.zotero_processor, zotero_item['key'], plan
+                )
+                applied = apply_result.get("applied", [])
+                failed = apply_result.get("failed", [])
+                if applied:
+                    print(Colors.colorize(f"Applied fields to Zotero ({zotero_item['key']}): {', '.join(applied)}", ColorScheme.SUCCESS))
+                if failed:
+                    print(Colors.colorize(f"Failed to apply fields: {', '.join(failed)}", ColorScheme.ERROR))
+            else:
+                print("Skipped applying enrichment to Zotero.")
     
     def attach_to_existing_zotero_item(self, pdf_path: Path, zotero_item: dict, metadata: dict) -> bool:
         """Attach scanned PDF to existing Zotero item with 3-step UX.
@@ -8673,7 +8693,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         # STEP 1: Metadata Comparison
         print(Colors.colorize("\n🔄 Step 1: Metadata Comparison", ColorScheme.PAGE_TITLE))
         zotero_metadata = self.convert_zotero_item_to_metadata(zotero_item)
-        final_metadata = self.compare_metadata_step(metadata, zotero_metadata)
+        final_metadata = self.compare_metadata_step(metadata, zotero_metadata, zotero_item=zotero_item)
         
         if final_metadata is None:
             # User chose manual processing
@@ -9572,7 +9592,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         return enhanced_metadata
     
-    def search_online_libraries(self, metadata: dict, pdf_path: Path = None) -> dict:
+    def search_online_libraries(self, metadata: dict, pdf_path: Path = None, zotero_item: dict = None) -> dict:
         """Search online libraries (CrossRef, arXiv, National Libraries) with metadata.
         
         Shows all results and lets user select one or choose "none".
@@ -9806,11 +9826,28 @@ if ($hwnd -ne [IntPtr]::Zero) {{
 
         # Evaluate best candidate with match policy
         best_candidate, decision = self.enrichment_workflow.choose_best(metadata, all_results)
-        if decision:
+        plan = None
+        if decision and best_candidate:
             status = decision.get("status")
             reason = decision.get("reason")
+            plan = self.enrichment_workflow.plan_updates(metadata, best_candidate, decision)
             if status == "auto_accept":
                 print("\n✅ Match policy auto-accepted the best online result.")
+                display_enrichment_summary(metadata, best_candidate, plan, heading="AUTO ENRICHMENT (ONLINE)")
+                if zotero_item and zotero_item.get('key'):
+                    apply_result = self.enrichment_workflow.apply_plan(
+                        self.zotero_processor, zotero_item['key'], plan
+                    )
+                    applied = apply_result.get("applied", [])
+                    failed = apply_result.get("failed", [])
+                    if applied:
+                        print(Colors.colorize(f"Applied fields to Zotero ({zotero_item['key']}): {', '.join(applied)}", ColorScheme.SUCCESS))
+                    if failed:
+                        print(Colors.colorize(f"Failed to apply fields: {', '.join(failed)}", ColorScheme.ERROR))
+                    self.logger.info(
+                        "Auto-applied enrichment",
+                        extra={"item_key": zotero_item['key'], "applied": applied, "failed": failed},
+                    )
                 return best_candidate
             if status == "reject":
                 print("\n⚠️  Match policy rejected available online results.")
