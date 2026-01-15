@@ -44,6 +44,9 @@ from shared_tools.zotero.local_search import ZoteroLocalSearch
 from shared_tools.utils.filename_generator import FilenameGenerator
 from shared_tools.utils.author_extractor import AuthorExtractor
 from shared_tools.utils.grobid_validator import GrobidValidator
+from shared_tools.metadata.enrichment_policy import MatchPolicy, MatchPolicyConfig
+from shared_tools.metadata.enrichment_planner import EnrichmentPlanner
+from shared_tools.daemon.enrichment_workflow import EnrichmentWorkflow
 
 # Import book lookup service for book chapters
 from add_or_remove_books_zotero import DetailedISBNLookupService
@@ -89,6 +92,12 @@ class PaperProcessorDaemon:
         # Initialize processors
         self.metadata_processor = PaperMetadataProcessor()
         self.zotero_processor = ZoteroPaperProcessor()
+        self.enrichment_workflow = EnrichmentWorkflow(
+            metadata_processor=self.metadata_processor,
+            match_policy=MatchPolicy(self.enrichment_policy_config),
+            planner=EnrichmentPlanner(self.enrichment_field_policy),
+            logger=self.logger,
+        )
         
         # Initialize book lookup service (for book chapters)
         self.book_lookup_service = DetailedISBNLookupService()
@@ -212,6 +221,9 @@ class PaperProcessorDaemon:
         # Get UX configuration
         self.page_offset_timeout = self.config.getint('UX', 'page_offset_timeout', fallback=10)
         self.prompt_timeout = self.config.getint('UX', 'prompt_timeout', fallback=10)
+
+        # Enrichment policy configuration
+        self.enrichment_policy_config, self.enrichment_field_policy = self._load_enrichment_settings()
         
         # Check if publications directory is accessible
         self._validate_publications_directory()
@@ -223,6 +235,46 @@ class PaperProcessorDaemon:
         log_file = log_folder_path / 'scanned_papers_log.csv'
         self.scanned_papers_logger = ScannedPapersLogger(log_file)
     
+    def _load_enrichment_settings(self) -> Tuple[MatchPolicyConfig, Dict]:
+        """Load enrichment policy and field policy from config files."""
+        try:
+            section = 'ENRICHMENT'
+            auto_accept = self.config.getfloat(section, 'auto_accept_threshold', fallback=0.85)
+            manual_review = self.config.getfloat(section, 'manual_review_threshold', fallback=0.75)
+            lang_conf = self.config.getfloat(section, 'language_confidence_min', fallback=0.90)
+            weight_title = self.config.getfloat(section, 'weight_title', fallback=0.45)
+            weight_authors = self.config.getfloat(section, 'weight_authors', fallback=0.30)
+            weight_year = self.config.getfloat(section, 'weight_year', fallback=0.15)
+            weight_type = self.config.getfloat(section, 'weight_type', fallback=0.10)
+            weight_language = self.config.getfloat(section, 'weight_language', fallback=0.05)
+
+            policy_cfg = MatchPolicyConfig(
+                auto_accept_threshold=auto_accept,
+                manual_review_threshold=manual_review,
+                language_confidence_min=lang_conf,
+                weight_title=weight_title,
+                weight_authors=weight_authors,
+                weight_year=weight_year,
+                weight_type=weight_type,
+                weight_language=weight_language,
+            )
+        except Exception:
+            policy_cfg = MatchPolicyConfig()
+
+        field_policy_raw = self.config.get(
+            'ENRICHMENT',
+            'field_policy',
+            fallback="",
+        )
+        field_policy: Dict[str, str] = {}
+        if field_policy_raw:
+            for pair in field_policy_raw.split(','):
+                if ':' in pair:
+                    key, val = pair.split(':', 1)
+                    field_policy[key.strip()] = val.strip()
+
+        return policy_cfg, field_policy
+
     @staticmethod
     def _normalize_path(path_str: str) -> str:
         """Normalize a path string to WSL format (static method).
@@ -9751,6 +9803,20 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 print(f"   No libraries were checked (document type: {doc_type if doc_type else 'unknown'})")
             print()
             return None
+
+        # Evaluate best candidate with match policy
+        best_candidate, decision = self.enrichment_workflow.choose_best(metadata, all_results)
+        if decision:
+            status = decision.get("status")
+            reason = decision.get("reason")
+            if status == "auto_accept":
+                print("\n✅ Match policy auto-accepted the best online result.")
+                return best_candidate
+            if status == "reject":
+                print("\n⚠️  Match policy rejected available online results.")
+                return None
+            if status == "manual_review":
+                print("\nℹ️  Match policy requires manual review (reason: " + str(reason) + ").")
         
         # Display all results and let user choose
         print(f"✅ Found {len(all_results)} result(s) in {source_name}")
