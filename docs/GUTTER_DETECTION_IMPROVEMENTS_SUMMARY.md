@@ -198,9 +198,57 @@ is_real_gutter = (avg_gradient < 400 and  # Stricter - must be gradual
 - `docs/SPLITTING_ISSUE_ANALYSIS.md`: Previous analysis document
 - `.cursor/debug.log`: Runtime evidence data
 
+## Recent Improvements (January 2026)
+
+### Improved Edge Detection Algorithm
+
+**Problem:** The binary search edge detection was defaulting to restrictive `edge_hint` values (40-60%) when it encountered white space, causing all detections to converge to 50% regardless of actual layout.
+
+**Solution:** Implemented a new approach based on core principles:
+1. **Never cut content** - Always find actual content boundaries
+2. **Always split between content** - Gutter is the midpoint of detected edges
+3. **Start from safe positions** - Begin search from column centers (25%, 75%) where content is guaranteed
+4. **Search freely** - Remove restrictive `edge_hint` limits to find actual boundaries
+
+**Changes Made:**
+- **Left column right edge**: Search from 25% rightward with `edge_hint=img_width` (no upper limit)
+- **Right column left edge**: Search from 75% leftward with `edge_hint=0` (no lower limit)
+- **Binary search logic**: Improved white space handling - when hitting white space, continue searching in smaller increments to find the transition point instead of stopping
+- **Gutter calculation**: Uses edges without safety margin for accurate positioning, while safety margin is still applied to bounding boxes to avoid cutting text
+
+### Outer-Edge Mode (Two-Column Layouts)
+
+**Problem:** In skewed or header-heavy scans, edge detection consistently found the **outer edges** of both columns instead of the inner edges. This caused inner-edge validations to fail, even though the outer edges were reliable and safe to use.
+
+**Solution:** Added an **outer-edge mode**:
+- If detected edges overlap (`left_col_right_no_margin >= right_col_left_no_margin`), treat them as **outer edges**
+- Compute gutter as the **midpoint between outer edges**
+- Validate the gutter position (40–60%) instead of rejecting on negative gap
+- Propagate `edge_mode` to `_find_gutter_position` so the overlap check uses the correct range
+
+**Benefits:**
+- Works reliably with skewed scans and strong headers
+- Uses stable outer edges for safe border removal
+- Preserves “never cut content” by splitting at the outer-edge midpoint
+
+**Files Modified:**
+- `shared_tools/pdf/content_detector.py`: Added `edge_mode` and outer-edge gutter validation
+- `scripts/paper_processor_daemon.py`: Overlap check respects `edge_mode`
+
+**Benefits:**
+- Handles asymmetric layouts (e.g., 55/45 splits) correctly
+- Finds actual content boundaries instead of defaulting to hints
+- Handles empty pages (searches until it finds the other column)
+- Never cuts content (finds real edges with safety margins for boxes)
+- Splits between content (gutter is midpoint of detected edges)
+
+**Files Modified:**
+- `shared_tools/pdf/content_detector.py`: Updated `detect_two_column_regions()` and `detect_content_edge_binary_search()`
+
 ## Notes
 
 - Shape analysis instrumentation is already in place (lines 5701-5743, 5814-5850)
 - Current validation logic exists but needs tightening (lines 5822-5845)
 - Border detection stats are passed to split logic but may not be used optimally
 - Manual split option exists in preview menu but may not be sufficient for all cases
+- Edge detection now uses unrestricted search from column centers to find actual boundaries
