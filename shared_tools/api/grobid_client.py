@@ -144,6 +144,12 @@ class GrobidClient:
                     )
 
             # Send PDF to GROBID with page limit for better author extraction
+            # #region agent log
+            import os, json, time
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"grobid_client.py:147","message":"GROBID call start","data":{"pdf_path":str(pdf_to_process),"max_pages":max_pages},"timestamp":int(time.time()*1000)}) + '\n')
+            # #endregion
             response = _call_grobid(pdf_to_process, max_pages)
             
             if response.status_code != 200:
@@ -166,6 +172,12 @@ class GrobidClient:
             
             # Extract metadata
             metadata = self._parse_grobid_xml(root)
+            # #region agent log
+            import os, json, time
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"grobid_client.py:169","message":"GROBID extraction result","data":{"has_metadata":bool(metadata),"authors":metadata.get('authors',[]) if metadata else [],"title":metadata.get('title','')[:50] if metadata else None,"max_pages":max_pages},"timestamp":int(time.time()*1000)}) + '\n')
+            # #endregion
             
             # Log what was extracted for debugging conference info
             if self.logger.isEnabledFor(logging.DEBUG):
@@ -206,7 +218,7 @@ class GrobidClient:
                 except Exception:
                     pass
                 
-                # Retry with more pages
+                # Retry with more pages (no rotation retries; Document Capture Pro provides correct orientation)
                 if max_pages < 4:
                     self.logger.info("Retrying GROBID with max_pages=4...")
                     resp2 = _call_grobid(pdf_to_process, 4)
@@ -221,27 +233,6 @@ class GrobidClient:
                                 return metadata2
                         except Exception:
                             pass
-                
-                # Try forced rotation variants (90/270) once
-                # Skip if rotation detection already found PDF is correctly oriented
-                if not (handle_rotation and rotation_applied is None):
-                    for rot in ['rotated_90', 'rotated_270']:
-                        try:
-                            self.logger.info(f"Retrying GROBID with forced rotation: {rot}...")
-                            rotated_pdf = self.rotation_handler.create_corrected_pdf(pdf_path, rot)
-                            if rotated_pdf and rotated_pdf.exists():
-                                self.temp_files.append(rotated_pdf)
-                                resp3 = _call_grobid(rotated_pdf, 2)
-                                if resp3.status_code == 200:
-                                    root3 = ET.fromstring(resp3.text)
-                                    metadata3 = self._parse_grobid_xml(root3)
-                                    if metadata3 and metadata3.get('authors'):
-                                        metadata3['extraction_method'] = 'grobid'
-                                        metadata3['extraction_note'] = f'extracted from pages 1-2, forced rotation {rot}'
-                                        self.logger.info(f"GROBID rotation retry succeeded: {len(metadata3.get('authors', []))} authors")
-                                        return metadata3
-                        except Exception as e:
-                            self.logger.debug(f"Rotation retry failed for {rot}: {e}")
             
             return metadata
             

@@ -1,9 +1,9 @@
 # Cursor AI Rules
 
 ## Use the correct Agent
-- I want to use debug agent to find the bugs and write a report for the planning agent indicating what are the problems and possible solutions. It is extremely seldom that I want debug agent to fix something, and in these cases it has to ask for confirmation for any change.
+- I want to use debug agent to find the bugs and write a report for the planning agent indicating what are the problems and possible solutions. It is extremely seldom that I want debug agent to fix something, and in these cases it has to ask for confirmation for any change. nstrumentation (logging/debug probes) is permitted without explicit approval, as long as it does not change program behavior; any functional code changes still require explicit approval.
 - I prefer to keep the codebase well strucutured and modulized, therefore planning agent is required to keep an overview of the changes and plan changes that solve the core problem, instead of just adding more and more code.
-- The coding agent is the only one that should make changes in the code, and only in cooperation with me. It should not change code by own initiative.
+- The coding agent is the only one that should make changes in the code, and only in cooperation with me. It should not change code by own initiative. I
 
 ## Problem Analysis First
 - Always ask clarifying questions until there is complete clarity
@@ -60,7 +60,7 @@
 - Handle bash, python, and powershell scripts appropriately
 
 ## Code Bloat Prevention
-- Do not add new functions without considering if existing code can be improved or reused. Many task are already solved. Check first, then write.
+- Do not add new functions without considering if existing code can be improved or reused. Many tasks are already solved. Check first if there are any functions in other modules, before writing new ones.
 - Refactor existing code before adding new functionality
 - Bigger is not better—simplicity and clarity are paramount
 - Always use standard libraries, rather than writing a new function or method.

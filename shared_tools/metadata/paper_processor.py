@@ -11,6 +11,8 @@ This makes 90% of papers process in seconds instead of minutes.
 """
 
 import sys
+import json
+import time
 import configparser
 import re
 from pathlib import Path
@@ -25,7 +27,11 @@ from shared_tools.api.crossref_client import CrossRefClient
 from shared_tools.api.arxiv_client import ArxivClient
 from shared_tools.api.openalex_client import OpenAlexClient
 from shared_tools.api.pubmed_client import PubMedClient
+from shared_tools.api.jstor_client import JSTORClient
 from shared_tools.ai.ollama_client import OllamaClient
+from shared_tools.utils.author_extractor import AuthorExtractor
+from shared_tools.utils.document_classifier import DocumentClassifier
+from shared_tools.metadata.jstor_handler import JSTORHandler
 
 
 class PaperMetadataProcessor:
@@ -51,6 +57,7 @@ class PaperMetadataProcessor:
         self.arxiv = ArxivClient()
         self.openalex = OpenAlexClient(email=email)
         self.pubmed = PubMedClient(email=email)
+        self.jstor = JSTORClient()
         self.ollama = OllamaClient()
         
         # Map API names to clients
@@ -60,34 +67,7 @@ class PaperMetadataProcessor:
             'openalex': self.openalex,
             'pubmed': self.pubmed
         }
-        
-        # Regex patterns for author extraction
-        self.author_patterns = [
-            # Pattern 1: "By [Author]" or "Authors: [Author1], [Author2]"
-            r'(?:By|Authors?)\s*:?\s*([^.\n]+)',
-            # Pattern 2: "Author Name" at start of line
-            r'^([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
-            # Pattern 3: "Lastname, Firstname" pattern
-            r'([A-Z][a-z]+),\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*',
-            # Pattern 4: "Firstname Lastname" pattern
-            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
-            # Pattern 5: "Lastname & Lastname" or "Lastname and Lastname"
-            r'([A-Z][a-z]+)\s+(?:and|&)\s+([A-Z][a-z]+)',
-        ]
-        
-        # Common academic name patterns
-        self.name_patterns = [
-            r'[A-Z][a-z]+\s+[A-Z][a-z]+',  # First Last
-            r'[A-Z][a-z]+,\s*[A-Z][a-z]+',  # Last, First
-            r'[A-Z][a-z]+\s+[A-Z]\.\s*[A-Z][a-z]+',  # First M. Last
-        ]
-        
-        # Common non-author words to filter (institutions, common phrases, etc.)
-        self.non_author_words = {
-            'foundation', 'grant', 'national', 'science', 'association', 'stable', 'statistics', 
-            'university', 'chicago', 'department', 'professor', 'methods', 'section', 'analysis',
-            'response', 'responses', 'multinomial', 'general', 'social', 'let', 'american', 'statistical'
-        }
+        self.jstor_handler = JSTORHandler(self.api_clients, self.priority_manager, self.jstor)
     
     def _read_email_from_config(self) -> Optional[str]:
         """Read CrossRef email from config files.
@@ -113,116 +93,6 @@ class PaperMetadataProcessor:
         except Exception:
             return None
     
-    def _read_handwritten_threshold_from_config(self) -> int:
-        """Read handwritten note text threshold from config files.
-        
-        Returns:
-            Minimum text length threshold (default: 50 characters)
-        """
-        try:
-            config = configparser.ConfigParser()
-            
-            # Read both config files (personal overrides main)
-            root_dir = Path(__file__).parent.parent.parent
-            config.read([
-                root_dir / 'config.conf',
-                root_dir / 'config.personal.conf'
-            ])
-            
-            if config.has_option('METADATA', 'handwritten_note_text_threshold'):
-                threshold = config.getint('METADATA', 'handwritten_note_text_threshold')
-                return max(0, threshold)  # Ensure non-negative
-            
-            return 50  # Default threshold
-        except Exception:
-            return 50  # Default threshold
-    
-    def _check_if_handwritten_note(self, pdf_path: Path, page_offset: int = 0, max_pages_to_check: int = 2) -> bool:
-        """Check if PDF appears to be a handwritten note (very little OCR text).
-        
-        Args:
-            pdf_path: Path to PDF file
-            page_offset: 0-indexed page offset
-            max_pages_to_check: Maximum number of pages to check (default: 2)
-            
-        Returns:
-            True if appears to be handwritten note, False otherwise
-        """
-        try:
-            import pdfplumber
-            threshold = self._read_handwritten_threshold_from_config()
-            
-            with pdfplumber.open(pdf_path) as pdf:
-                if len(pdf.pages) == 0:
-                    return False
-                
-                # Check first few pages for text content
-                total_text_length = 0
-                pages_checked = 0
-                
-                for i in range(page_offset, min(page_offset + max_pages_to_check, len(pdf.pages))):
-                    page_text = pdf.pages[i].extract_text()
-                    if page_text:
-                        total_text_length += len(page_text.strip())
-                    pages_checked += 1
-                
-                # If average text per page is below threshold, likely handwritten
-                if pages_checked > 0:
-                    avg_text_per_page = total_text_length / pages_checked
-                    return avg_text_per_page < threshold
-                
-                return False
-                
-        except Exception as e:
-            print(f"  ⚠️  Error checking for handwritten note: {e}")
-            return False
-    
-    def _extract_authors_with_regex(self, text: str) -> List[str]:
-        """Extract authors using regex patterns as fallback.
-        
-        Args:
-            text: Extracted text from PDF
-            
-        Returns:
-            List of author names found
-        """
-        authors = set()
-        
-        # Try each pattern
-        for pattern_idx, pattern in enumerate(self.author_patterns):
-            matches = re.findall(pattern, text, re.MULTILINE | re.IGNORECASE)
-            for match in matches:
-                if isinstance(match, tuple):
-                    # Handle patterns that capture multiple groups
-                    for group in match:
-                        if group and len(group.strip()) > 2:
-                            authors.add(group.strip())
-                else:
-                    if match and len(match.strip()) > 2:
-                        authors.add(match.strip())
-        
-        # Clean up and validate names
-        cleaned_authors = []
-        for author in authors:
-            # Remove common prefixes/suffixes
-            author_orig = author
-            author = re.sub(r'^(By|Authors?|Author)\s*:?\s*', '', author, flags=re.IGNORECASE)
-            author = re.sub(r'\s+', ' ', author.strip())
-            
-            # Must have at least first and last name
-            if len(author.split()) >= 2 and len(author) > 3:
-                cleaned_authors.append(author)
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_authors = []
-        for author in cleaned_authors:
-            if author.lower() not in seen:
-                seen.add(author.lower())
-                unique_authors.append(author)
-        
-        return unique_authors
-
     def _extract_structured_repository_metadata(self, text: str) -> Optional[Dict]:
         """Extract structured metadata from repository pages using labeled fields.
         
@@ -259,13 +129,14 @@ class PaperMetadataProcessor:
                 found_any = True
         
         # Extract author (case-insensitive)
-        author_pattern = r'(?:^|\n)author\s*\n(.+?)(?=\n(?:title|publication|journal|date|url)|$)'
+        # Matches "author\n...", "authors\n...", "Author(s): ...", and "Authors: ..." formats
+        author_pattern = r'(?:^|\n)author(?:s|\(s\))?\s*(?::\s*|\n)(.+?)(?=\n(?:title|publication|journal|date|url)|$)'
         match = re.search(author_pattern, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
         if match:
             author = match.group(1).strip()
             # Clean up author
             author = ' '.join(author.split())
-            if len(author) > 2 and ',' in author:  # Author format "Last, First"
+            if len(author) > 2:  # Removed comma requirement to support "First Last and First Last" format
                 metadata['authors'] = [author]
                 found_any = True
         
@@ -332,58 +203,6 @@ class PaperMetadataProcessor:
         
         return None
     
-    def _extract_authors_with_regex_simple(self, text: str) -> List[str]:
-        """Simple regex extraction focusing on common academic patterns.
-        
-        Args:
-            text: Extracted text from PDF
-            
-        Returns:
-            List of author names found
-        """
-        authors = set()
-        
-        # Look for common academic name patterns
-        for pattern_idx, pattern in enumerate(self.name_patterns):
-            matches = re.findall(pattern, text)
-            for match in matches:
-                if match and len(match.strip()) > 3:
-                    authors.add(match.strip())
-        
-        # Look for "and" or "&" separated names
-        and_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:and|&)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'
-        and_matches = re.findall(and_pattern, text)
-        for match in and_matches:
-            if match[0] and match[1]:
-                authors.add(match[0].strip())
-                authors.add(match[1].strip())
-        
-        # Clean up
-        cleaned_authors = []
-        for author in authors:
-            author_orig = author
-            author = re.sub(r'\s+', ' ', author.strip())
-            
-            # Check if author contains non-author words (institutions, common phrases)
-            author_words_lower = set(word.lower() for word in author.split())
-            has_non_author_word = bool(author_words_lower & self.non_author_words)
-            
-            # Reject if contains non-author words OR doesn't meet basic criteria
-            if has_non_author_word:
-                continue
-            elif len(author.split()) >= 2 and len(author) > 3:
-                cleaned_authors.append(author)
-        
-        # Remove duplicates
-        seen = set()
-        unique_authors = []
-        for author in cleaned_authors:
-            if author.lower() not in seen:
-                seen.add(author.lower())
-                unique_authors.append(author)
-        
-        return unique_authors
-    
     def _detect_language_from_filename(self, pdf_path: Path) -> Optional[str]:
         """Detect language from filename prefix (NO_, EN_, DE_, etc.)
         
@@ -440,7 +259,7 @@ class PaperMetadataProcessor:
         # Step 0: Check if this appears to be a handwritten note
         print("\n🔍 Step 0: Checking document type...")
         try:
-            if self._check_if_handwritten_note(pdf_path, page_offset=page_offset):
+            if DocumentClassifier.is_handwritten_note(pdf_path, page_offset=page_offset):
                 print(f"  📝 Detected: Handwritten note (very little OCR text)")
                 print(f"  ⚠️  Skipping Ollama processing - no extractable text")
                 result['method'] = 'handwritten_note_detected'
@@ -462,6 +281,12 @@ class PaperMetadataProcessor:
         print("\n📋 Step 1: Extracting identifiers with regex...")
         identifiers = self.extractor.extract_first_page_identifiers(pdf_path, page_offset=page_offset)
         result['identifiers_found'] = identifiers
+        # #region agent log
+        import os
+        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"paper_processor.py:467","message":"Identifiers extracted","data":{"jstor_ids":identifiers.get('jstor_ids',[]),"dois":identifiers.get('dois',[]),"years":identifiers.get('years',[]) if 'years' in identifiers else None},"timestamp":int(time.time()*1000)}) + '\n')
+        # #endregion
         
         print(f"  DOIs: {identifiers['dois']}")
         print(f"  arXiv IDs: {identifiers['arxiv_ids']}")
@@ -473,6 +298,40 @@ class PaperMetadataProcessor:
             print(f"  Years: {identifiers['years']} (best: {identifiers.get('best_year')})")
         elif identifiers.get('best_year'):
             print(f"  Year: {identifiers.get('best_year')}")
+        
+        # Step 1b: Fast author extraction with regex (runs early to catch "Author(s): Name" patterns)
+        regex_authors = []
+        try:
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                if len(pdf.pages) > page_offset:
+                    first_page_text = pdf.pages[page_offset].extract_text() or ""
+                    if first_page_text:
+                        regex_authors = AuthorExtractor.extract_authors_simple(first_page_text)
+                        # #region agent log
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                "sessionId": "debug-session",
+                                "runId": "author-regex-step1",
+                                "hypothesisId": "A1",
+                                "location": "paper_processor.py:535",
+                                "message": "Regex authors step1",
+                                "data": {
+                                    "text_length": len(first_page_text),
+                                    "regex_authors": regex_authors[:10],
+                                    "num_regex_authors": len(regex_authors)
+                                },
+                                "timestamp": int(time.time() * 1000)
+                            }) + '\n')
+                        # #endregion
+                        if regex_authors:
+                            print(f"  Authors (regex): {regex_authors}")
+                            # Store regex authors in identifiers for later use
+                            identifiers['regex_authors'] = regex_authors
+        except Exception as e:
+            # If extraction fails, continue without regex authors
+            pass
         
         # Step 2: Validate identifiers
         print("\n🔍 Step 2: Validating identifiers...")
@@ -559,13 +418,26 @@ class PaperMetadataProcessor:
             jstor_id = valid_jstor_ids[0]
             print(f"  JSTOR ID: {jstor_id}")
             print(f"  ℹ️  JSTOR ID confirms this is a journal article")
-            print(f"  ℹ️  Will try to fetch metadata via CrossRef/OpenAlex after extraction")
-            # Don't return early - continue to GROBID extraction to get title/authors
-            # Then we'll search CrossRef/OpenAlex with that metadata
-            # Store JSTOR ID for later use
-            result['jstor_id'] = jstor_id
-            result['document_type_hint'] = 'journal_article'
-            # Continue processing - don't return yet
+            
+            print(f"  🔍 Fetching metadata from JSTOR page...")
+            jstor_result = self.jstor_handler.process_jstor_id(jstor_id)
+            
+            if jstor_result:
+                jstor_metadata = jstor_result.get('metadata', {})
+                method = jstor_result.get('method', 'jstor')
+                
+                result['method'] = method
+                result['metadata'] = jstor_metadata
+                result['success'] = True
+                result['processing_time_seconds'] = time.time() - start_time
+                print(f"  ✅ Got metadata from JSTOR in {result['processing_time_seconds']:.1f}s")
+                return result
+            else:
+                print(f"  ⚠️  Could not fetch metadata from JSTOR page - will try GROBID extraction")
+                # Store JSTOR ID for later use (fallback if JSTOR fetch fails)
+                result['jstor_id'] = jstor_id
+                result['document_type_hint'] = 'journal_article'
+                # Continue processing - don't return yet
         
         elif valid_isbns:
             print(f"\n📚 Step 3: ISBN found - use existing book lookup workflow")
@@ -605,7 +477,7 @@ class PaperMetadataProcessor:
                 else:
                     text = ""
             
-            regex_authors = self._extract_authors_with_regex_simple(text)
+            regex_authors = AuthorExtractor.extract_authors_simple(text or "")
             if regex_authors:
                 print(f"  ✅ Regex found {len(regex_authors)} author(s): {', '.join(regex_authors)}")
                 
@@ -700,7 +572,7 @@ class PaperMetadataProcessor:
                     text_page1 = ""
             
             # Check if text is too short (likely handwritten note)
-            threshold = self._read_handwritten_threshold_from_config()
+            threshold = DocumentClassifier.get_handwritten_threshold()
             if len(text_page1.strip()) < threshold:
                 print(f"  📝 Very little text extracted ({len(text_page1.strip())} chars) - likely handwritten note")
                 print(f"  ⚠️  Skipping Ollama processing - no extractable text")
@@ -717,7 +589,13 @@ class PaperMetadataProcessor:
             
             # Try regex extraction first
             print(f"  🔍 Trying regex author extraction...")
-            regex_authors = self._extract_authors_with_regex_simple(text_page1)
+            regex_authors = AuthorExtractor.extract_authors_simple(text_page1 or "")
+            # #region agent log
+            import os
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"paper_processor.py:758","message":"Regex author extraction result","data":{"regex_authors":regex_authors,"text_length":len(text_page1) if text_page1 else 0,"text_preview":text_page1[:200] if text_page1 else None},"timestamp":int(time.time()*1000)}) + '\n')
+            # #endregion
             if regex_authors:
                 print(f"  ✅ Regex found {len(regex_authors)} author(s): {', '.join(regex_authors)}")
                 

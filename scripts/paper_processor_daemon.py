@@ -42,6 +42,8 @@ from shared_tools.metadata.paper_processor import PaperMetadataProcessor
 from shared_tools.zotero.paper_processor import ZoteroPaperProcessor
 from shared_tools.zotero.local_search import ZoteroLocalSearch
 from shared_tools.utils.filename_generator import FilenameGenerator
+from shared_tools.utils.author_extractor import AuthorExtractor
+from shared_tools.utils.grobid_validator import GrobidValidator
 
 # Import book lookup service for book chapters
 from add_or_remove_books_zotero import DetailedISBNLookupService
@@ -205,6 +207,7 @@ class PaperProcessorDaemon:
         # Get gutter detection configuration
         self.gutter_min_percent = self.config.getint('GUTTER', 'gutter_min_percent', fallback=40)
         self.gutter_max_percent = self.config.getint('GUTTER', 'gutter_max_percent', fallback=60)
+        self.min_consistent_pages = self.config.getint('GUTTER', 'min_consistent_pages', fallback=2)
         
         # Get UX configuration
         self.page_offset_timeout = self.config.getint('UX', 'page_offset_timeout', fallback=10)
@@ -757,140 +760,34 @@ class PaperProcessorDaemon:
         
         # For GROBID: validate against document text first (filter hallucinations)
         if extraction_method == 'grobid' and pdf_path:
-            # Get document text for validation
-            doc_text = ""
+            # #region agent log
             try:
-                import pdfplumber
-                with pdfplumber.open(str(pdf_path)) as pdf:
-                    # Check first 3 pages for author mentions
-                    for page in pdf.pages[:min(3, len(pdf.pages))]:
-                        page_text = page.extract_text()
-                        if page_text:
-                            doc_text += page_text.lower()
-            except Exception as e:
-                self.logger.debug(f"Could not extract text for validation: {e}")
-                doc_text = ""
+                import time as _time, json as _json
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'B1',
+                        'location': 'paper_processor_daemon.py:filter_garbage_authors',
+                        'message': 'Calling GrobidValidator',
+                        'data': {
+                            'authors_count': len(metadata.get('authors', [])),
+                            'extraction_method': extraction_method,
+                            'has_pdf_path': bool(pdf_path)
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             
-            if doc_text:
-                # Validate GROBID authors against document text using word boundaries
-                import re
-                authors_in_text = []
-                authors_not_in_text = []
-                for author in original_authors:
-                    author_lower = author.lower()
-                    
-                    # Extract first and last names, handling both "Last, First" and "First Last" formats
-                    if ',' in author_lower:
-                        # "Last, First" format (GROBID standard)
-                        name_parts = author_lower.split(',')
-                        last_name = name_parts[0].strip() if name_parts else ""
-                        first_name = name_parts[1].strip() if len(name_parts) > 1 else ""
-                    else:
-                        # "First Last" format (fallback)
-                        name_parts = author_lower.split()
-                        if len(name_parts) >= 2:
-                            first_name = name_parts[0].strip()
-                            last_name = name_parts[-1].strip()  # Last part is surname
-                        elif len(name_parts) == 1:
-                            first_name = ""
-                            last_name = name_parts[0].strip()
-                        else:
-                            first_name = ""
-                            last_name = ""
-                    
-                    found_in_text = False
-                    
-                    # Primary check: Last name with word boundaries (prevents false positives)
-                    last_name_found = False
-                    if last_name and len(last_name) > 2:
-                        last_name_escaped = re.escape(last_name)
-                        pattern = r'\b' + last_name_escaped + r'\b'
-                        if re.search(pattern, doc_text):
-                            last_name_found = True
-                            found_in_text = True  # Last name alone is sufficient
-                    
-                    # Relaxed check: First and last name proximity (allows middle initials)
-                    if last_name_found and first_name and len(first_name) > 1:
-                        # Find positions of first and last names in text
-                        first_name_escaped = re.escape(first_name)
-                        first_pattern = r'\b' + first_name_escaped + r'\b'
-                        last_pattern = r'\b' + last_name_escaped + r'\b'
-                        
-                        # Find all occurrences
-                        first_matches = list(re.finditer(first_pattern, doc_text))
-                        last_matches = list(re.finditer(last_pattern, doc_text))
-                        
-                        # Check if first and last names appear within ~30-40 characters of each other
-                        # This allows middle initials/names between them
-                        proximity_threshold = 40  # characters
-                        for first_match in first_matches:
-                            for last_match in last_matches:
-                                # Calculate distance between matches
-                                first_pos = first_match.start()
-                                last_pos = last_match.start()
-                                distance = abs(first_pos - last_pos)
-                                
-                                # Check if they're close enough (within threshold)
-                                if distance <= proximity_threshold:
-                                    found_in_text = True
-                                    break
-                            if found_in_text:
-                                break
-                    
-                    # Fallback: Try exact full name match if proximity check didn't work
-                    if not found_in_text and author_lower:
-                        author_escaped = re.escape(author_lower)
-                        pattern = r'\b' + author_escaped + r'\b'
-                        if re.search(pattern, doc_text):
-                            found_in_text = True
-                    
-                    if found_in_text:
-                        authors_in_text.append(author)
-                    else:
-                        authors_not_in_text.append(author)
-                
-                # If most GROBID authors don't appear in document, filter them out
-                total = len(original_authors)
-                if total > 0:
-                    ratio_found = len(authors_in_text) / total
-                    
-                    # Filter out authors that don't appear in document text (strict filtering)
-                    # This is the primary filter - if author doesn't appear in text, it's a hallucination
-                    if authors_not_in_text:
-                        self.logger.info(f"Filtering {len(authors_not_in_text)} GROBID author(s) that don't appear in document: {authors_not_in_text}")
-                    
-                    # PRIMARY FILTER: Keep only authors that appear in document text
-                    # GROBID hallucinates authors (even ones in Zotero) if they don't appear in the PDF
-                    # So PDF text presence is the ONLY reliable filter - Zotero validation is secondary
-                    metadata['authors'] = authors_in_text
-                    
-                    if len(authors_in_text) < total:
-                        self.logger.info(f"Filtered GROBID authors: kept {len(authors_in_text)}/{total} that appear in document text")
-                        if authors_not_in_text:
-                            self.logger.info(f"  Filtered out (not in PDF): {authors_not_in_text}")
-                    
-                    if not authors_in_text:
-                        # No authors found in text - clear them all (all were hallucinations)
-                        metadata['authors'] = []
-                        self.logger.warning(f"All GROBID authors filtered out - none appear in document text")
-                        return metadata
-                    
-                    # SECONDARY: Optional Zotero validation for authors that DO appear in text
-                    # This is just for logging/preference, not filtering - we already filtered by PDF text
-                    if self.author_validator:
-                        authors_in_zotero = []
-                        authors_not_in_zotero = []
-                        for author in authors_in_text:
-                            validation = self.author_validator.validate_authors([author])
-                            if validation['known_authors'] or validation['ocr_corrections']:
-                                authors_in_zotero.append(author)
-                            else:
-                                authors_not_in_zotero.append(author)
-                        
-                        if authors_not_in_zotero:
-                            self.logger.debug(f"GROBID authors appear in PDF but not in Zotero: {authors_not_in_zotero}")
-                        if authors_in_zotero:
-                            self.logger.debug(f"GROBID authors appear in PDF and are in Zotero: {authors_in_zotero}")
+            metadata = GrobidValidator.validate_authors(
+                metadata,
+                pdf_path,
+                regex_authors=None,
+                logger=self.logger
+            )
         
         # Zotero-based filtering (for non-reliable extraction methods)
         if not self.author_validator:
@@ -2251,7 +2148,73 @@ class PaperProcessorDaemon:
         
         # No unique identifier worked - proceed to manual entry
         manual_metadata = self.manual_metadata_entry(metadata, doc_type)
+        # #region agent log
+        try:
+            import time as _time, json as _json
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(_json.dumps({
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'M1',
+                    'location': 'paper_processor_daemon.py:handle_failed_extraction',
+                    'message': 'Manual metadata entry result',
+                    'data': {
+                        'has_metadata': bool(manual_metadata),
+                        'from_zotero': bool(manual_metadata.get('from_zotero')) if isinstance(manual_metadata, dict) else False,
+                        'method': manual_metadata.get('method') if isinstance(manual_metadata, dict) else None,
+                        'document_type': manual_metadata.get('document_type') if isinstance(manual_metadata, dict) else None
+                    },
+                    'timestamp': int(_time.time() * 1000)
+                }) + '\n')
+        except Exception:
+            pass
+        # #endregion
         if manual_metadata and not manual_metadata.get('_restart'):
+            if manual_metadata.get('from_zotero'):
+                # #region agent log
+                try:
+                    import time as _time, json as _json
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(_json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'M6',
+                            'location': 'paper_processor_daemon.py:handle_failed_extraction',
+                            'message': 'Skipping _search_online_after_manual due to from_zotero',
+                            'data': {
+                                'from_zotero': True,
+                                'method': manual_metadata.get('method'),
+                                'document_type': manual_metadata.get('document_type')
+                            },
+                            'timestamp': int(_time.time() * 1000)
+                        }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
+                return manual_metadata
+            # #region agent log
+            try:
+                import time as _time, json as _json
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'M2',
+                        'location': 'paper_processor_daemon.py:handle_failed_extraction',
+                        'message': 'Calling _search_online_after_manual',
+                        'data': {
+                            'from_zotero': bool(manual_metadata.get('from_zotero')),
+                            'method': manual_metadata.get('method'),
+                            'document_type': manual_metadata.get('document_type')
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             manual_metadata = self._search_online_after_manual(manual_metadata)
         return manual_metadata
     
@@ -2307,6 +2270,27 @@ class PaperProcessorDaemon:
                         # User selected a match
                         selected = author_matches[idx - 1]
                         print(f"\n✅ Using: {selected.get('title')}")
+                        # #region agent log
+                        try:
+                            import time as _time, json as _json
+                            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                            with open(log_path, 'a', encoding='utf-8') as f:
+                                f.write(_json.dumps({
+                                    'sessionId': 'debug-session',
+                                    'runId': 'run1',
+                                    'hypothesisId': 'M3',
+                                    'location': 'paper_processor_daemon.py:manual_metadata_entry',
+                                    'message': 'Zotero match selected',
+                                    'data': {
+                                        'title': selected.get('title'),
+                                        'item_type': selected.get('itemType'),
+                                        'year': selected.get('year')
+                                    },
+                                    'timestamp': int(_time.time() * 1000)
+                                }) + '\n')
+                        except Exception:
+                            pass
+                        # #endregion
                         return self.convert_zotero_item_to_metadata(selected)
         
         # Continue with manual entry
@@ -2400,6 +2384,32 @@ class PaperProcessorDaemon:
     def _search_online_after_manual(self, metadata: dict) -> dict:
         """Run online lookups using manually entered metadata (papers and books)."""
         doc_type = metadata.get('document_type', '').lower()
+        # #region agent log
+        try:
+            import time as _time, json as _json
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(_json.dumps({
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'M4',
+                    'location': 'paper_processor_daemon.py:_search_online_after_manual',
+                    'message': 'Entry',
+                    'data': {
+                        'from_zotero': bool(metadata.get('from_zotero')),
+                        'method': metadata.get('method'),
+                        'document_type': doc_type,
+                        'has_title': bool(metadata.get('title')),
+                        'has_authors': bool(metadata.get('authors')),
+                        'has_year': bool(metadata.get('year')),
+                        'has_journal': bool(metadata.get('journal')),
+                        'has_isbn': bool(metadata.get('isbn'))
+                    },
+                    'timestamp': int(_time.time() * 1000)
+                }) + '\n')
+        except Exception:
+            pass
+        # #endregion
         
         if doc_type in ['book', 'book_chapter']:
             title = metadata.get('title')
@@ -2446,6 +2456,29 @@ class PaperProcessorDaemon:
             
             if available_params >= 2:
                 print("\n🔍 Searching CrossRef/OpenAlex with manual metadata...")
+                # #region agent log
+                try:
+                    import time as _time, json as _json
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(_json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'M5',
+                            'location': 'paper_processor_daemon.py:_search_online_after_manual',
+                            'message': 'CrossRef search triggered',
+                            'data': {
+                                'available_params': available_params,
+                                'title_len': len(metadata.get('title') or ''),
+                                'authors_count': len(metadata.get('authors') or []),
+                                'year': metadata.get('year'),
+                                'journal_present': bool(metadata.get('journal'))
+                            },
+                            'timestamp': int(_time.time() * 1000)
+                        }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
                 try:
                     crossref_results = self.metadata_processor.crossref.search_by_metadata(
                         title=metadata.get('title'),
@@ -4310,7 +4343,7 @@ class PaperProcessorDaemon:
                             if len(pdf.pages) > effective_page_offset:
                                 first_page_text = pdf.pages[effective_page_offset].extract_text() or ""
                                 if first_page_text:
-                                    regex_authors = self.metadata_processor._extract_authors_with_regex_simple(first_page_text)
+                                    regex_authors = AuthorExtractor.extract_authors_simple(first_page_text)
                                     if regex_authors:
                                         self.logger.info(f"✅ Regex found {len(regex_authors)} author(s): {', '.join(regex_authors)}")
                                         # Create result with regex authors
@@ -4562,6 +4595,28 @@ class PaperProcessorDaemon:
             else:
                 # Extraction failed - use guided workflow
                 self.logger.warning("Metadata extraction failed - starting guided workflow")
+                # #region agent log
+                try:
+                    import time as _time, json as _json
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    regex_count = len(identifiers_found.get('regex_authors', [])) if identifiers_found else 0
+                    has_single = regex_count == 1
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(_json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'R1',
+                            'location': 'paper_processor_daemon.py:process_paper',
+                            'message': 'Regex authors before manual flow',
+                            'data': {
+                                'regex_authors_count': regex_count,
+                                'has_single_regex_author': has_single
+                            },
+                            'timestamp': int(_time.time() * 1000)
+                        }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
                 metadata = self.handle_failed_extraction(pdf_path)
                 
                 # Check for restart request
@@ -5746,6 +5801,26 @@ class PaperProcessorDaemon:
             return None
         
         try:
+            # #region agent log
+            try:
+                import time as _time, json as _json
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'G1',
+                        'location': 'paper_processor_daemon.py:_find_gutter_position',
+                        'message': 'Entry',
+                        'data': {
+                            'pdf_path': str(pdf_path),
+                            'min_consistent_pages': getattr(self, 'min_consistent_pages', None)
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             # Run both methods in parallel
             edge_results = self.content_detector.detect_two_column_regions_binary_search(
                 pdf_path,
@@ -5880,6 +5955,75 @@ class PaperProcessorDaemon:
                     f"Page {page_num + 1} dual-method detection succeeded: "
                     f"gutter={density_gutter_x_pts:.1f}pts ({density_gutter_x_pts/page_width_pts*100:.1f}%)"
                 )
+                # #region agent log
+                try:
+                    import time as _time, json as _json
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(_json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'G2',
+                            'location': 'paper_processor_daemon.py:_find_gutter_position',
+                            'message': 'Valid gutter added',
+                            'data': {
+                                'page_num': page_num + 1,
+                                'valid_count': len(valid_gutter_positions),
+                                'min_consistent_pages': getattr(self, 'min_consistent_pages', None)
+                            },
+                            'timestamp': int(_time.time() * 1000)
+                        }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
+                
+                # Early exit once enough consistent pages are found
+                min_pages = getattr(self, 'min_consistent_pages', 2) or 2
+                if len(valid_gutter_positions) >= min_pages:
+                    median_gutter = float(np.median(valid_gutter_positions))
+                    consistent_idxs = []
+                    for i, gutter_pos in enumerate(valid_gutter_positions):
+                        diff_pct = abs(gutter_pos - median_gutter) / page_width * 100 if page_width > 0 else 0
+                        if diff_pct <= 5.0:
+                            consistent_idxs.append(i)
+                    if len(consistent_idxs) >= min_pages:
+                        consistent_gutters = [valid_gutter_positions[i] for i in consistent_idxs]
+                        consistent_left_boxes = [valid_left_boxes[i] for i in consistent_idxs]
+                        consistent_right_boxes = [valid_right_boxes[i] for i in consistent_idxs]
+                        final_median_gutter = float(np.median(consistent_gutters))
+                        doc.close()
+                        # #region agent log
+                        try:
+                            import time as _time, json as _json
+                            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                            with open(log_path, 'a', encoding='utf-8') as f:
+                                f.write(_json.dumps({
+                                    'sessionId': 'debug-session',
+                                    'runId': 'run1',
+                                    'hypothesisId': 'G5',
+                                    'location': 'paper_processor_daemon.py:_find_gutter_position',
+                                    'message': 'Early exit with consistent gutters',
+                                    'data': {
+                                        'valid_pages': len(valid_gutter_positions),
+                                        'consistent_pages': len(consistent_gutters),
+                                        'median_gutter': final_median_gutter
+                                    },
+                                    'timestamp': int(_time.time() * 1000)
+                                }) + '\n')
+                        except Exception:
+                            pass
+                        # #endregion
+                        return {
+                            'gutter_x_per_page': [float(x) for x in consistent_gutters],
+                            'left_column_boxes': consistent_left_boxes,
+                            'right_column_boxes': consistent_right_boxes,
+                            'method': 'dual_method_edge_density',
+                            'variation': 0.0,
+                            'confidence': [1.0] * len(consistent_gutters),
+                            'gutter_x': final_median_gutter,
+                            'gutter_positions': [float(x) for x in consistent_gutters],
+                            'page_width': float(page_width)
+                        }
             
             doc.close()
             
@@ -5917,6 +6061,28 @@ class PaperProcessorDaemon:
                     f"(require at least 2)"
                 )
                 return None
+            
+            # #region agent log
+            try:
+                import time as _time, json as _json
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'G3',
+                        'location': 'paper_processor_daemon.py:_find_gutter_position',
+                        'message': 'Exit with consistent gutters',
+                        'data': {
+                            'valid_pages': len(valid_gutter_positions),
+                            'consistent_pages': len(consistent_gutters),
+                            'median_gutter': final_median_gutter
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             
             # Calculate final median from consistent pages
             final_median_gutter = float(np.median(consistent_gutters))
@@ -6034,12 +6200,17 @@ class PaperProcessorDaemon:
                 doc.close()
                 return None, "PDF has no pages"
             
+            
             # Create new document for split pages
             new_doc = fitz.open()
             
             pages_created = 0
+            stage = "start"
+            current_page_num = None
             doc_len = len(doc)
             for page_num in range(doc_len):
+                current_page_num = page_num
+                stage = "get_page"
                 try:
                     page = doc[page_num]
                 except (IndexError, AttributeError) as e:
@@ -6100,8 +6271,8 @@ class PaperProcessorDaemon:
                 )
                 
                 # Create left page (from 0 to page_gutter_x)
+                stage = "new_left_page"
                 left_page = new_doc.new_page(width=page_gutter_x, height=page_height)
-                # Clip region on source page - ensure it's within source page bounds
                 source_page_rect = page.rect
                 left_clip_rect = fitz.Rect(
                     max(0, 0),
@@ -6111,73 +6282,40 @@ class PaperProcessorDaemon:
                 )
                 
                 try:
-                    # Ensure source page is still valid
                     if page is None:
                         raise ValueError(f"Source page {page_num} is None")
                     if page_num < 0 or page_num >= len(doc):
                         raise ValueError(f"Page number {page_num} is out of bounds (document has {len(doc)} pages)")
                     
-                    # Re-access page immediately before get_pixmap
-                    source_page = doc[page_num]
+                    source_page = doc.load_page(page_num)
                     if source_page is None:
                         raise ValueError(f"Source page {page_num} is None")
                     
-                    # Validate clip rectangle
                     source_rect = source_page.rect
                     if (left_clip_rect.x0 < 0 or left_clip_rect.y0 < 0 or 
                         left_clip_rect.x1 > source_rect.width or left_clip_rect.y1 > source_rect.height):
                         raise ValueError(f"Clip rectangle {left_clip_rect} is outside source page bounds {source_rect}")
                     
-                    # Get full pixmap (avoid clip parameter which causes "page is None" error)
-                    full_pixmap = source_page.get_pixmap()
-                    
-                    # Calculate scale factors
-                    scale_x = full_pixmap.width / source_rect.width if source_rect.width > 0 else 1.0
-                    scale_y = full_pixmap.height / source_rect.height if source_rect.height > 0 else 1.0
-                    
-                    # Convert clip rectangle to pixmap coordinates
-                    clip_x0 = int(left_clip_rect.x0 * scale_x)
-                    clip_y0 = int(left_clip_rect.y0 * scale_y)
-                    clip_x1 = int(left_clip_rect.x1 * scale_x)
-                    clip_y1 = int(left_clip_rect.y1 * scale_y)
-                    
-                    # Ensure coordinates are within bounds
-                    clip_x0 = max(0, min(clip_x0, full_pixmap.width))
-                    clip_y0 = max(0, min(clip_y0, full_pixmap.height))
-                    clip_x1 = max(clip_x0, min(clip_x1, full_pixmap.width))
-                    clip_y1 = max(clip_y0, min(clip_y1, full_pixmap.height))
-                    
-                    # Crop using PIL (reliable method)
-                    from PIL import Image
-                    import io
-                    
-                    # Convert pixmap to PIL Image
-                    img_data = full_pixmap.tobytes("png")
-                    pil_img = Image.open(io.BytesIO(img_data))
-                    
-                    # Crop the image
-                    cropped_img = pil_img.crop((clip_x0, clip_y0, clip_x1, clip_y1))
-                    
-                    # Convert back to PNG bytes and insert directly
-                    img_bytes = io.BytesIO()
-                    cropped_img.save(img_bytes, format='PNG')
-                    img_bytes.seek(0)
-                    
-                    # Insert as image stream (more reliable than creating new Pixmap)
-                    left_page.insert_image(left_page.rect, stream=img_bytes.getvalue())
-                    
-                    # Clean up
-                    full_pixmap = None
+                    stage = "left_show_pdf_page"
+                    left_page.show_pdf_page(left_page.rect, doc, page_num, clip=left_clip_rect)
                 except Exception as e:
-                    error_msg = f"Failed to create left page {page_num + 1}: {e}"
-                    self.logger.error(error_msg)
-                    doc.close()
-                    new_doc.close()
-                    return None, error_msg
+                    self.logger.warning(
+                        f"Left show_pdf_page failed on page {page_num + 1} (stage={locals().get('stage','unknown')}): {e} - trying pixmap fallback"
+                    )
+                    try:
+                        stage = "left_pixmap_fallback"
+                        pix = source_page.get_pixmap(clip=left_clip_rect)
+                        left_page.insert_image(left_page.rect, pixmap=pix)
+                    except Exception as e2:
+                        error_msg = f"Failed to create left page {page_num + 1} (stage={locals().get('stage','unknown')}): {e2}"
+                        self.logger.error(error_msg)
+                        doc.close()
+                        new_doc.close()
+                        return None, error_msg
                 
                 # Create right page (from page_gutter_x to page_width)
+                stage = "new_right_page"
                 right_page = new_doc.new_page(width=page_width - page_gutter_x, height=page_height)
-                # Clip region on source page - ensure it's within source page bounds
                 source_page_rect = page.rect
                 right_clip_rect = fitz.Rect(
                     max(0, page_gutter_x),
@@ -6187,114 +6325,85 @@ class PaperProcessorDaemon:
                 )
                 
                 try:
-                    # Ensure source page is still valid
                     if page is None:
                         raise ValueError(f"Source page {page_num} is None")
                     if page_num < 0 or page_num >= len(doc):
                         raise ValueError(f"Page number {page_num} is out of bounds (document has {len(doc)} pages)")
                     
-                    # Re-access page immediately before get_pixmap
-                    source_page = doc[page_num]
+                    source_page = doc.load_page(page_num)
                     if source_page is None:
                         raise ValueError(f"Source page {page_num} is None")
                     
-                    # Validate clip rectangle
                     source_rect = source_page.rect
                     if (right_clip_rect.x0 < 0 or right_clip_rect.y0 < 0 or 
                         right_clip_rect.x1 > source_rect.width or right_clip_rect.y1 > source_rect.height):
                         raise ValueError(f"Clip rectangle {right_clip_rect} is outside source page bounds {source_rect}")
                     
-                    # Get full pixmap (avoid clip parameter which causes "page is None" error)
-                    full_pixmap = source_page.get_pixmap()
-                    
-                    # Calculate scale factors
-                    scale_x = full_pixmap.width / source_rect.width if source_rect.width > 0 else 1.0
-                    scale_y = full_pixmap.height / source_rect.height if source_rect.height > 0 else 1.0
-                    
-                    # Convert clip rectangle to pixmap coordinates
-                    clip_x0 = int(right_clip_rect.x0 * scale_x)
-                    clip_y0 = int(right_clip_rect.y0 * scale_y)
-                    clip_x1 = int(right_clip_rect.x1 * scale_x)
-                    clip_y1 = int(right_clip_rect.y1 * scale_y)
-                    
-                    # Ensure coordinates are within bounds
-                    clip_x0 = max(0, min(clip_x0, full_pixmap.width))
-                    clip_y0 = max(0, min(clip_y0, full_pixmap.height))
-                    clip_x1 = max(clip_x0, min(clip_x1, full_pixmap.width))
-                    clip_y1 = max(clip_y0, min(clip_y1, full_pixmap.height))
-                    
-                    # Crop using PIL (reliable method)
-                    from PIL import Image
-                    import io
-                    
-                    # Convert pixmap to PIL Image
-                    img_data = full_pixmap.tobytes("png")
-                    pil_img = Image.open(io.BytesIO(img_data))
-                    
-                    # Crop the image
-                    cropped_img = pil_img.crop((clip_x0, clip_y0, clip_x1, clip_y1))
-                    
-                    # Convert back to PNG bytes and insert directly
-                    img_bytes = io.BytesIO()
-                    cropped_img.save(img_bytes, format='PNG')
-                    img_bytes.seek(0)
-                    
-                    # Insert as image stream (more reliable than creating new Pixmap)
-                    right_page.insert_image(right_page.rect, stream=img_bytes.getvalue())
-                    
-                    # Clean up
-                    full_pixmap = None
+                    stage = "right_show_pdf_page"
+                    right_page.show_pdf_page(right_page.rect, doc, page_num, clip=right_clip_rect)
                 except Exception as e:
-                    error_msg = f"Failed to create right page {page_num + 1}: {e}"
-                    self.logger.error(error_msg)
-                    doc.close()
-                    new_doc.close()
-                    return None, error_msg
+                    self.logger.warning(
+                        f"Right show_pdf_page failed on page {page_num + 1} (stage={locals().get('stage','unknown')}): {e} - trying pixmap fallback"
+                    )
+                    try:
+                        stage = "right_pixmap_fallback"
+                        pix = source_page.get_pixmap(clip=right_clip_rect)
+                        right_page.insert_image(right_page.rect, pixmap=pix)
+                    except Exception as e2:
+                        error_msg = f"Failed to create right page {page_num + 1} (stage={locals().get('stage','unknown')}): {e2}"
+                        self.logger.error(error_msg)
+                        doc.close()
+                        new_doc.close()
+                        return None, error_msg
                 pages_created += 2
                 
                 # Diagnostic logging: Check content immediately after creation
-                left_text = left_page.get_text()
-                right_text = right_page.get_text()
-                left_text_length = len(left_text.strip()) if left_text else 0
-                right_text_length = len(right_text.strip()) if right_text else 0
-                
-                # Check image content density for left page
+                stage = "post_split_diagnostics"
                 try:
-                    import numpy as np
-                    import cv2
-                    zoom = 1.0
-                    mat = fitz.Matrix(zoom, zoom)
-                    left_pix = left_page.get_pixmap(matrix=mat, alpha=False)
-                    left_img = np.frombuffer(left_pix.samples, dtype=np.uint8).reshape(left_pix.h, left_pix.w, 3)
-                    if len(left_img.shape) == 3:
-                        left_gray = cv2.cvtColor(left_img, cv2.COLOR_RGB2GRAY)
-                    else:
-                        left_gray = left_img
-                    left_content_pixels = np.sum(left_gray < 240)
-                    left_total_pixels = left_gray.size
-                    left_content_ratio = (left_content_pixels / left_total_pixels) if left_total_pixels > 0 else 0.0
+                    left_text = left_page.get_text()
+                    right_text = right_page.get_text()
+                    left_text_length = len(left_text.strip()) if left_text else 0
+                    right_text_length = len(right_text.strip()) if right_text else 0
+                    
+                    # Check image content density for left page
+                    try:
+                        import numpy as np
+                        import cv2
+                        zoom = 1.0
+                        mat = fitz.Matrix(zoom, zoom)
+                        left_pix = left_page.get_pixmap(matrix=mat, alpha=False)
+                        left_img = np.frombuffer(left_pix.samples, dtype=np.uint8).reshape(left_pix.h, left_pix.w, 3)
+                        if len(left_img.shape) == 3:
+                            left_gray = cv2.cvtColor(left_img, cv2.COLOR_RGB2GRAY)
+                        else:
+                            left_gray = left_img
+                        left_content_pixels = np.sum(left_gray < 240)
+                        left_total_pixels = left_gray.size
+                        left_content_ratio = (left_content_pixels / left_total_pixels) if left_total_pixels > 0 else 0.0
+                    except Exception:
+                        left_content_ratio = None
+                    
+                    # Check image content density for right page
+                    try:
+                        right_pix = right_page.get_pixmap(matrix=mat, alpha=False)
+                        right_img = np.frombuffer(right_pix.samples, dtype=np.uint8).reshape(right_pix.h, right_pix.w, 3)
+                        if len(right_img.shape) == 3:
+                            right_gray = cv2.cvtColor(right_img, cv2.COLOR_RGB2GRAY)
+                        else:
+                            right_gray = right_img
+                        right_content_pixels = np.sum(right_gray < 240)
+                        right_total_pixels = right_gray.size
+                        right_content_ratio = (right_content_pixels / right_total_pixels) if right_total_pixels > 0 else 0.0
+                    except Exception:
+                        right_content_ratio = None
+                    
+                    self.logger.debug(
+                        f"Page {page_num + 1} after split: "
+                        f"left=[text={left_text_length}chars, content={left_content_ratio:.1%}], "
+                        f"right=[text={right_text_length}chars, content={right_content_ratio:.1%}]"
+                    )
                 except Exception:
-                    left_content_ratio = None
-                
-                # Check image content density for right page
-                try:
-                    right_pix = right_page.get_pixmap(matrix=mat, alpha=False)
-                    right_img = np.frombuffer(right_pix.samples, dtype=np.uint8).reshape(right_pix.h, right_pix.w, 3)
-                    if len(right_img.shape) == 3:
-                        right_gray = cv2.cvtColor(right_img, cv2.COLOR_RGB2GRAY)
-                    else:
-                        right_gray = right_img
-                    right_content_pixels = np.sum(right_gray < 240)
-                    right_total_pixels = right_gray.size
-                    right_content_ratio = (right_content_pixels / right_total_pixels) if right_total_pixels > 0 else 0.0
-                except Exception:
-                    right_content_ratio = None
-                
-                self.logger.debug(
-                    f"Page {page_num + 1} after split: "
-                    f"left=[text={left_text_length}chars, content={left_content_ratio:.1%}], "
-                    f"right=[text={right_text_length}chars, content={right_content_ratio:.1%}]"
-                )
+                    pass
                 
             
             # Check if we have the expected number of pages (2 per original)
@@ -6376,6 +6485,27 @@ class PaperProcessorDaemon:
             else:
                 # Default 'auto' - try to detect actual gutter position first
                 gutter_result = self._find_gutter_position(pdf_path)
+            
+            # #region agent log
+            try:
+                import time as _time, json as _json
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'G4',
+                        'location': 'paper_processor_daemon.py:_split_with_mutool',
+                        'message': 'Split method decision',
+                        'data': {
+                            'split_method': split_method,
+                            'gutter_result_type': 'none' if gutter_result is None else type(gutter_result).__name__
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             
             # Handle new dict return format or legacy float format
             if gutter_result is None:
@@ -9150,6 +9280,28 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 # User selected an item
                 selected_item = item_map[choice]
                 self.logger.info(f"User selected item: {selected_item.get('title', 'Unknown')}")
+                # #region agent log
+                try:
+                    import time as _time, json as _json, os as _os
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if _os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    tags = selected_item.get('tags', []) if isinstance(selected_item, dict) else []
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(_json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'T10',
+                            'location': 'paper_processor_daemon.py:display_and_select_zotero_matches',
+                            'message': 'Zotero item selected (local DB snapshot)',
+                            'data': {
+                                'item_key': selected_item.get('item_key') or selected_item.get('key'),
+                                'tag_count': len(tags),
+                                'tag_preview': tags[:5]
+                            },
+                            'timestamp': int(_time.time() * 1000)
+                        }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
                 return ('select', selected_item)
             elif choice == 'a':
                 return ('search', None)

@@ -7,6 +7,9 @@ resorting to slower AI-based extraction.
 """
 
 import re
+import os
+import json
+import time
 import configparser
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -611,8 +614,59 @@ class IdentifierExtractor:
         }
     
     @classmethod
+    def extract_text(
+        cls,
+        pdf_path,
+        page_offset: int = 0,
+        max_pages: int = 1,
+        document_type: Optional[str] = None,
+    ) -> str:
+        """Extract text from PDF pages with optional document-type handling.
+        
+        Args:
+            pdf_path: Path to PDF file
+            page_offset: 0-indexed page offset (0 = first page)
+            max_pages: Maximum pages to read starting from page_offset
+            document_type: Optional hint (e.g., 'book_chapter' for landscape handling)
+        
+        Returns:
+            Concatenated text from the selected pages, or empty string on failure.
+        """
+        try:
+            import pdfplumber
+        except ImportError:
+            print("Error: pdfplumber not installed")
+            return ""
+        
+        try:
+            pdf_path = Path(pdf_path)
+            with pdfplumber.open(pdf_path) as pdf:
+                if len(pdf.pages) == 0 or page_offset >= len(pdf.pages):
+                    return ""
+                
+                texts = []
+                end_page = min(len(pdf.pages), page_offset + max_pages)
+                for idx in range(page_offset, end_page):
+                    page = pdf.pages[idx]
+                    if document_type == 'book_chapter' and idx == page_offset:
+                        page_text = cls._extract_text_for_book_chapter(page)
+                    else:
+                        page_text = page.extract_text() or ""
+                    if page_text:
+                        texts.append(page_text)
+                
+                return "\n".join(texts).strip()
+        except Exception as e:
+            print(f"Error extracting text from {pdf_path}: {e}")
+            return ""
+    
+    @classmethod
     def extract_first_page_identifiers(cls, pdf_path, document_type: Optional[str] = None, page_offset: int = 0) -> dict:
-        """Extract identifiers from first page of PDF.
+        """Extract identifiers from first page(s) of PDF.
+        
+        Scans page 1 always, plus pages 2-3 if they have < 4000 characters each.
+        This helps find ISBNs/DOIs on book front matter without picking up
+        quoted authors from article body text.
         
         Args:
             pdf_path: Path to PDF file
@@ -626,36 +680,79 @@ class IdentifierExtractor:
         try:
             import pdfplumber
         except ImportError:
-            print("Error: pdfplumber not installed")
             return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}
         
         try:
-            from pathlib import Path
             pdf_path = Path(pdf_path)
+            combined_text = ""
+            pages_scanned = []
+            char_threshold = 4000
             
             with pdfplumber.open(pdf_path) as pdf:
-                if len(pdf.pages) == 0:
+                if len(pdf.pages) == 0 or page_offset >= len(pdf.pages):
                     return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}
                 
-                # Check if page_offset is valid
-                if page_offset >= len(pdf.pages):
-                    return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}
-                
-                # Extract text from page at offset (or first page if offset is 0)
-                target_page = pdf.pages[page_offset]
-                
-                # For book chapters, handle landscape pages (left side might be previous chapter)
+                # Always include page 1 (page_offset)
+                page1 = pdf.pages[page_offset]
                 if document_type == 'book_chapter':
-                    text = cls._extract_text_for_book_chapter(target_page)
+                    page1_text = cls._extract_text_for_book_chapter(page1)
                 else:
-                    text = target_page.extract_text()
+                    page1_text = page1.extract_text() or ""
+                combined_text = page1_text
+                pages_scanned.append(page_offset + 1)
                 
-                if not text:
-                    return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}
-                
-                # Extract all identifiers
-                return cls.extract_all(text)
-                
+                # Optionally include page 2 if it has < char_threshold characters
+                if page_offset + 1 < len(pdf.pages):
+                    page2 = pdf.pages[page_offset + 1]
+                    page2_text = page2.extract_text() or ""
+                    page2_len = len(page2_text)
+                    # #region agent log
+                    try:
+                        import os, json, time
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"isbn-check","hypothesisId":"P2","location":"identifier_extractor.py:extract_first_page_identifiers","message":"Page 2 character check","data":{"page2_length":page2_len,"char_threshold":char_threshold,"page2_included":page2_len < char_threshold,"page2_preview":page2_text[:500] if page2_text else None},"timestamp":int(time.time()*1000)}) + '\n')
+                    except: pass
+                    # #endregion
+                    if page2_len < char_threshold:
+                        combined_text += "\n" + page2_text
+                        pages_scanned.append(page_offset + 2)
+                        
+                        # Optionally include page 3 if page 2 was included AND page 3 has < char_threshold characters
+                        if page_offset + 2 < len(pdf.pages):
+                            page3 = pdf.pages[page_offset + 2]
+                            page3_text = page3.extract_text() or ""
+                            page3_len = len(page3_text)
+                            # #region agent log
+                            try:
+                                with open(log_path, 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps({"sessionId":"debug-session","runId":"isbn-check","hypothesisId":"P3","location":"identifier_extractor.py:extract_first_page_identifiers","message":"Page 3 character check","data":{"page3_length":page3_len,"char_threshold":char_threshold,"page3_included":page3_len < char_threshold},"timestamp":int(time.time()*1000)}) + '\n')
+                            except: pass
+                            # #endregion
+                            if page3_len < char_threshold:
+                                combined_text += "\n" + page3_text
+                                pages_scanned.append(page_offset + 3)
+            
+            # #region agent log
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"identifier_extractor.py:extract_first_page_identifiers","message":"Pages scanned for identifiers","data":{"text_length":len(combined_text) if combined_text else 0,"text_preview":combined_text[:300] if combined_text else None,"page_offset":page_offset,"pages_scanned":pages_scanned,"char_threshold":char_threshold},"timestamp":int(time.time()*1000)}) + '\n')
+            # #endregion
+            
+            if not combined_text:
+                return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}
+            
+            # Extract all identifiers (NOT authors - those come from page 1 only via separate call)
+            identifiers = cls.extract_all(combined_text)
+            # #region agent log
+            try:
+                import os, json, time
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"isbn-check","hypothesisId":"ID","location":"identifier_extractor.py:extract_first_page_identifiers","message":"Identifiers extracted","data":{"isbns":identifiers.get('isbns',[]),"dois":identifiers.get('dois',[]),"issns":identifiers.get('issns',[]),"pages_scanned":pages_scanned,"combined_text_length":len(combined_text)},"timestamp":int(time.time()*1000)}) + '\n')
+            except: pass
+            # #endregion
+            return identifiers
         except Exception as e:
             print(f"Error extracting identifiers from {pdf_path}: {e}")
             return {'dois': [], 'issns': [], 'isbns': [], 'arxiv_ids': [], 'jstor_ids': [], 'urls': [], 'years': [], 'best_year': None}

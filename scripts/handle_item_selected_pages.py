@@ -277,6 +277,30 @@ def create_edit_tags_page(daemon) -> Page:
         add_tags = [tag for tag in updated_tag_names if tag not in current_tag_names]
         remove_tags = [tag for tag in current_tag_names if tag not in updated_tag_names]
         
+        # #region agent log
+        try:
+            import time as _time, json as _json, os
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(_json.dumps({
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'T1',
+                    'location': 'handle_item_selected_pages.py:handler_t',
+                    'message': 'Tag edit delta computed',
+                    'data': {
+                        'item_key': item_key,
+                        'current_count': len(current_tag_names),
+                        'updated_count': len(updated_tag_names),
+                        'add_count': len(add_tags),
+                        'remove_count': len(remove_tags)
+                    },
+                    'timestamp': int(_time.time() * 1000)
+                }) + '\n')
+        except Exception:
+            pass
+        # #endregion
+
         if add_tags or remove_tags:
             print(f"\n💾 Saving tag changes to Zotero...")
             success = daemon.zotero_processor.update_item_tags(
@@ -606,7 +630,7 @@ def create_filename_title_override_page(daemon) -> Page:
         
         lines.extend([
             "",
-            "  (z/Enter) Use Zotero title (default)",
+            "  (Enter) Use Zotero title (default)",
         ])
         
         if metadata_title and metadata_title != zotero_title:
@@ -614,13 +638,14 @@ def create_filename_title_override_page(daemon) -> Page:
         
         lines.extend([
             "  (c) Enter custom title",
+            "  (z) Go back",
             "  (q) Quit - move to manual review"
         ])
         
         return lines
     
-    def handler_z(ctx):
-        """Use Zotero title - proceed to proposed actions."""
+    def handler_default(ctx):
+        """Use Zotero title (default) - proceed to proposed actions."""
         # Don't set override - will use Zotero title by default
         return NavigationResult.show_page('proposed_actions')
     
@@ -704,32 +729,21 @@ def create_filename_title_override_page(daemon) -> Page:
         daemon.move_to_manual_review(ctx['pdf_path'])
         return NavigationResult.quit_scan(move_to_manual=True)
     
-    # Determine valid inputs based on whether metadata title differs
-    def get_valid_inputs(ctx):
-        metadata = ctx.get('metadata', {})
-        zotero_title = ctx['selected_item'].get('title', '').strip()
-        metadata_title = metadata.get('title', '').strip()
-        
-        if metadata_title and metadata_title != zotero_title:
-            return ['z', 'm', 'c', 'q']
-        else:
-            return ['z', 'c', 'q']
-    
-    # Create page with dynamic valid inputs
-    # We'll use a lambda to get valid inputs from context
+    # Create page with consistent navigation: 'z' always means "back", Enter means "use default"
+    # Include all possible inputs; 'm' handler will check if metadata title differs
     return Page(
         page_id='filename_title_override',
         title='📄 FILENAME TITLE',
         content=content,
-        prompt='\nChoose filename title [z/m/c/q]: ',
-        valid_inputs=['z', 'm', 'c', 'q'],  # Will handle 'm' gracefully if not applicable
+        prompt='\nChoose filename title [Enter/m/c/z/q]: ',
+        valid_inputs=['', 'm', 'c', 'z', 'q'],  # '' = Enter key, 'z' = back (standard command)
         handlers={
-            'z': handler_z,
-            'm': handler_m,
-            'c': handler_c
+            '': handler_default,  # Empty string = Enter key = default = Use Zotero title
+            'm': handler_m,  # Use metadata title (handler checks if available)
+            'c': handler_c   # Custom title
         },
-        default='z',
-        back_page='review_and_proceed',
+        default='',  # Default is Enter key (empty string) = Use Zotero title
+        back_page='review_and_proceed',  # 'z' will use this via standard back command
         quit_action=quit_action
     )
 
@@ -779,6 +793,30 @@ def create_proposed_actions_page(daemon) -> Page:
             split_method='auto',
             trim_leading=True
         )
+        
+        # #region agent log
+        try:
+            import json, os, time
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'H4',
+                    'location': 'handle_item_selected_pages.py:handler_y',
+                    'message': 'After _preprocess_pdf_with_options',
+                    'data': {
+                        'processed_pdf': str(processed_pdf) if processed_pdf else None,
+                        'processed_pdf_is_original': str(processed_pdf) == str(pdf_path) if processed_pdf else False,
+                        'original_pdf': str(pdf_path),
+                        'split_succeeded': preprocessing_state.get('split_succeeded', False),
+                        'split_attempted': preprocessing_state.get('split_attempted', False),
+                        'split_method': preprocessing_state.get('split_method', 'none')
+                    },
+                    'timestamp': int(time.time() * 1000)
+                }) + '\n')
+        except: pass
+        # #endregion
         
         # Store processed PDF and state in context for preview page
         ctx['processed_pdf'] = processed_pdf
@@ -880,6 +918,30 @@ def create_pdf_preview_page(daemon) -> Page:
         if not processed_pdf:
             return ["❌ Error: No processed PDF found in context"]
         
+        # #region agent log
+        try:
+            import json, os, time
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'H4,H5',
+                    'location': 'handle_item_selected_pages.py:create_pdf_preview_page',
+                    'message': 'PDF preview - before opening in viewer',
+                    'data': {
+                        'processed_pdf': str(processed_pdf) if processed_pdf else None,
+                        'processed_pdf_exists': processed_pdf.exists() if processed_pdf else False,
+                        'original_pdf': str(ctx.get('original_pdf', 'N/A')),
+                        'split_succeeded': preprocessing_state.get('split_succeeded', False),
+                        'split_attempted': preprocessing_state.get('split_attempted', False),
+                        'split_method': preprocessing_state.get('split_method', 'none')
+                    },
+                    'timestamp': int(time.time() * 1000)
+                }) + '\n')
+        except: pass
+        # #endregion
+        
         # Open PDF in viewer
         daemon._open_pdf_in_viewer(processed_pdf)
         
@@ -887,17 +949,18 @@ def create_pdf_preview_page(daemon) -> Page:
         border_status = "✓ Applied" if preprocessing_state.get('border_removal', False) else "✗ Not applied"
         split_method = preprocessing_state.get('split_method', 'none')
         split_attempted = preprocessing_state.get('split_attempted', False)
+        split_succeeded = preprocessing_state.get('split_succeeded', False)
         
-        # Determine split status
-        if split_method == 'manual' and split_attempted:
+        # Determine split status - must check split_succeeded, not just split_attempted
+        if split_method == 'manual' and split_attempted and split_succeeded:
             manual_ratio = preprocessing_state.get('manual_split_ratio')
             if manual_ratio:
                 split_status = f"✓ Applied (manual {manual_ratio:.0f}/{100-manual_ratio:.0f})"
             else:
                 split_status = "✓ Applied (manual)"
-        elif split_method == 'auto' and split_attempted:
+        elif split_method == 'auto' and split_attempted and split_succeeded:
             split_status = "✓ Applied (gutter detection)"
-        elif split_method == '50-50' and split_attempted:
+        elif split_method == '50-50' and split_attempted and split_succeeded:
             split_status = "✓ Applied (50/50 geometric)"
         elif split_method != 'none' and split_attempted:
             split_status = f"✗ Attempted ({split_method}) but failed/cancelled"
@@ -1247,7 +1310,7 @@ def _handle_manual_split(ctx, daemon):
     
     # Perform split
     print("\n🔄 Performing manual split...")
-    split_path = daemon._split_with_custom_gutter(original_pdf, split_x)
+    split_path, error_msg = daemon._split_with_custom_gutter(original_pdf, split_x)
     
     if split_path:
         # Update preprocessing state
@@ -1263,7 +1326,8 @@ def _handle_manual_split(ctx, daemon):
         print(f"✅ Manual split completed: {ratio:.0f}/{100-ratio:.0f}")
         return NavigationResult.show_page('pdf_preview')
     else:
-        print("❌ Manual split failed")
+        error_display = f": {error_msg}" if error_msg else ""
+        print(f"❌ Manual split failed{error_display}")
         return NavigationResult.show_page('pdf_preview')
 
 

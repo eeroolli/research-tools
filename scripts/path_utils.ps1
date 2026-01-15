@@ -240,6 +240,107 @@ function Copy-FileWithVerification {
         return $result
     }
     
+    # Check if target drive/path is accessible (important for cloud drives like Google Drive)
+    $targetDir = Split-Path $TargetPath -Parent
+    $targetDrive = $null
+    $isCloudDrive = $false
+    
+    # Extract drive letter or root path
+    if ($targetDir -match '^([A-Z]):') {
+        $targetDrive = $matches[1] + ':'
+    } elseif ($targetDir -match '^\\\\') {
+        # UNC path (network drive)
+        $targetDrive = Split-Path $targetDir -Qualifier
+        $isCloudDrive = $true
+    }
+    
+    # Check if target directory or drive is accessible
+    if ($targetDrive) {
+        try {
+            # Try to access the drive root
+            $driveRoot = if ($targetDrive -match '^[A-Z]:') {
+                $targetDrive + '\'
+            } else {
+                $targetDrive
+            }
+            
+            $driveTest = Test-Path -Path $driveRoot -ErrorAction Stop
+            if (-not $driveTest) {
+                # Determine if it's likely a cloud drive
+                $driveName = if ($targetDir -match 'My Drive') {
+                    "Google Drive"
+                } elseif ($targetDir -match 'OneDrive') {
+                    "OneDrive"
+                } else {
+                    "drive"
+                }
+                
+                $result = @{
+                    success = $false
+                    error = "$driveName is not available. The local sync may be paused or the drive may be disconnected. Target path: $TargetPath"
+                    errorCode = 8
+                    drive = $targetDrive
+                    isCloudDrive = $isCloudDrive
+                } | ConvertTo-Json -Compress
+                return $result
+            }
+            
+            # Try to access the target directory (or its parent if it doesn't exist yet)
+            $dirToCheck = $targetDir
+            while (-not (Test-Path $dirToCheck) -and $dirToCheck -ne $driveRoot) {
+                $dirToCheck = Split-Path $dirToCheck -Parent
+            }
+            
+            if (-not (Test-Path $dirToCheck)) {
+                $result = @{
+                    success = $false
+                    error = "Target directory is not accessible: $targetDir"
+                    errorCode = 8
+                } | ConvertTo-Json -Compress
+                return $result
+            }
+            
+            # Try to get directory info to verify accessibility
+            try {
+                Get-Item -Path $dirToCheck -ErrorAction Stop | Out-Null
+            } catch {
+                $driveName = if ($targetDir -match 'My Drive') {
+                    "Google Drive"
+                } elseif ($targetDir -match 'OneDrive') {
+                    "OneDrive"
+                } else {
+                    "Target drive"
+                }
+                
+                $result = @{
+                    success = $false
+                    error = "$driveName is not accessible. The local sync may be paused or the drive may be disconnected. Error: $_"
+                    errorCode = 8
+                    drive = $targetDrive
+                    isCloudDrive = $isCloudDrive
+                } | ConvertTo-Json -Compress
+                return $result
+            }
+        } catch {
+            $driveName = if ($targetDir -match 'My Drive') {
+                "Google Drive"
+            } elseif ($targetDir -match 'OneDrive') {
+                "OneDrive"
+            } else {
+                "Target drive"
+            }
+            
+            $result = @{
+                success = $false
+                error = "$driveName is not accessible. The local sync may be paused or the drive may be disconnected. Error: $_"
+                errorCode = 8
+                drive = $targetDrive
+                isCloudDrive = $isCloudDrive
+            } | ConvertTo-Json -Compress
+            return $result
+        }
+    }
+    
     # Check if target already exists
     if (Test-Path $TargetPath) {
         # Compare file sizes

@@ -251,22 +251,22 @@ class NavigationEngine:
                 print(f"⚠️  Invalid choice. Valid: {', '.join(page.valid_inputs)}")
                 continue
             
-            # Handle standard commands
+            # Check for handler first - handlers take precedence over standard commands
+            handler = page.handlers.get(user_input)
+            if handler:
+                result = handler(context)
+                return result
+            
+            # Handle standard commands only if no handler exists for this input
             if user_input == 'z' and page.back_page:
                 return NavigationResult.show_page(page.back_page)
             
             if user_input == 'q' and page.quit_action:
                 return page.quit_action(context)
             
-            # Execute handler for this input
-            handler = page.handlers.get(user_input)
-            if handler:
-                result = handler(context)
-                return result
-            else:
-                # Handler not found - this shouldn't happen if page is configured correctly
-                print(f"⚠️  Handler not found for '{user_input}'")
-                continue
+            # Handler not found - this shouldn't happen if page is configured correctly
+            print(f"⚠️  Handler not found for '{user_input}'")
+            continue
     
     def standardize_input(self, raw_input: str, page: Page) -> str:
         """Normalize user input (e.g., Enter key -> default choice).
@@ -279,7 +279,8 @@ class NavigationEngine:
             Normalized input string
         """
         # Empty input (Enter key) -> use default if available
-        if not raw_input and page.default:
+        # Note: page.default can be empty string '', which is a valid default
+        if not raw_input and page.default is not None:
             return page.default
         
         return raw_input

@@ -1,6 +1,11 @@
 
 # My Programming Preferences
 
+## Use the correct Agent
+- I want to use debug agent to find the bugs and write a report for the planning agent indicating what are the problems and possible solutions. It is extremely seldom that I want debug agent to fix something, and in these cases it has to ask for confirmation for any change. Instrumentation (logging/debug probes) is permitted without explicit approval, as long as it does not change program behavior; any functional code changes still require explicit approval.
+- I prefer to keep the codebase well strucutured and modulized, therefore planning agent is required to keep an overview of the changes and plan changes that solve the core problem, instead of just adding more and more code.
+- The coding agent is the only one that should make changes in the code, and only in cooperation with me. It should not change code by own initiative. 
+
 ## What is the problem we are trying to solve?
 - Ask questions until there is clarity. 
 - Are we working on the right problem?

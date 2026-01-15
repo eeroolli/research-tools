@@ -28,3 +28,4 @@ dependencies:
   - pip:
     - pyzotero  # Zotero API integration
     - psutil  # System and process monitoring for CPU throttling
+    - beautifulsoup4  # HTML parsing for JSTOR DOI extraction

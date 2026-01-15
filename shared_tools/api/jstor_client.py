@@ -87,9 +87,27 @@ class JSTORClient:
             url = 'https://' + url
 
         try:
+            # #region agent log
+            import os, time
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"jstor_client.py:90","message":"JSTOR fetch attempt","data":{"url":url},"timestamp":int(time.time()*1000)}) + '\n')
+            # #endregion
             response = self.session.get(url, timeout=self.timeout)
+            # #region agent log
+            import os, time
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"jstor_client.py:93","message":"JSTOR response status","data":{"status_code":response.status_code,"url":url},"timestamp":int(time.time()*1000)}) + '\n')
+            # #endregion
             if response.status_code != 200:
                 self.logger.debug(f"JSTOR URL returned status {response.status_code}: {url}")
+                # #region agent log
+                import os, time
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"jstor_client.py:96","message":"JSTOR fetch failed","data":{"status_code":response.status_code,"url":url,"response_text_preview":response.text[:200] if hasattr(response,'text') else None},"timestamp":int(time.time()*1000)}) + '\n')
+                # #endregion
                 return None
 
             html_text = response.text
@@ -100,6 +118,12 @@ class JSTORClient:
 
             gadata_mapped = self._map_gadata_to_standard_format(gadata_raw) if gadata_raw else None
             merged = self._merge_metadata_sources(gadata_mapped, meta_tags)
+            # #region agent log
+            import os, time
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"jstor_client.py:103","message":"JSTOR metadata merge result","data":{"has_gadata":bool(gadata_raw),"has_meta_tags":bool(meta_tags),"merged_success":bool(merged),"merged_keys":list(merged.keys()) if merged else []},"timestamp":int(time.time()*1000)}) + '\n')
+            # #endregion
 
             if merged:
                 # Attach raw sources for debugging/audit

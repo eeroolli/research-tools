@@ -532,6 +532,28 @@ class ZoteroPaperProcessor:
             True if successful, False otherwise
         """
         try:
+            # #region agent log
+            try:
+                import time as _time, json as _json, os
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'T2',
+                        'location': 'paper_processor.py:update_item_tags',
+                        'message': 'Update tags entry',
+                        'data': {
+                            'item_key': item_key,
+                            'add_count': len(add_tags) if add_tags else 0,
+                            'remove_count': len(remove_tags) if remove_tags else 0
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
+
             # Get current item data
             response = requests.get(
                 f"{self.base_url}/items/{item_key}",
@@ -545,6 +567,28 @@ class ZoteroPaperProcessor:
             
             item_data = response.json()
             current_tags = item_data['data'].get('tags', [])
+            # #region agent log
+            try:
+                import time as _time, json as _json, os
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'T3',
+                        'location': 'paper_processor.py:update_item_tags',
+                        'message': 'Fetched item for tag update',
+                        'data': {
+                            'item_key': item_key,
+                            'status_code': response.status_code,
+                            'version': item_data.get('version'),
+                            'current_tag_count': len(current_tags)
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             
             # Convert current tags to list of tag names for easier manipulation
             current_tag_names = [tag['tag'] if isinstance(tag, dict) else str(tag) for tag in current_tags]
@@ -583,6 +627,29 @@ class ZoteroPaperProcessor:
                 json=update_data,
                 timeout=10
             )
+            
+            # #region agent log
+            try:
+                import time as _time, json as _json, os
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'T4',
+                        'location': 'paper_processor.py:update_item_tags',
+                        'message': 'Tag update response',
+                        'data': {
+                            'item_key': item_key,
+                            'status_code': update_response.status_code,
+                            'response_text_len': len(update_response.text or ''),
+                            'response_text_preview': (update_response.text or '')[:200]
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             
             if update_response.status_code == 204:
                 return True
