@@ -151,6 +151,10 @@ When a Zotero match is found, users get a sophisticated 3-step process:
 - Smart filename generation and duplicate handling
 - Complete file management and cleanup
 
+### PDF Splitting Notes
+- Two-up splits use content-based gutter detection with an outer-edge fallback for skewed scans
+- Splits preserve original PDF compression by clipping pages instead of rasterizing
+
 ### Current Status
 ✅ **Paper processing is fully implemented and working!** The interactive daemon provides a complete workflow for processing scanned academic papers with enhanced Zotero integration.
 
