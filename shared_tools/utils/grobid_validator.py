@@ -23,6 +23,7 @@ class GrobidValidator:
         pdf_path,
         regex_authors: Optional[List[str]] = None,
         logger: Optional[logging.Logger] = None,
+        force_text_validation: bool = False,
     ) -> dict:
         """Filter GROBID authors that do not appear in document text.
         
@@ -61,7 +62,7 @@ class GrobidValidator:
             return metadata
 
         extraction_method = metadata.get('extraction_method', metadata.get('method', ''))
-        if extraction_method != 'grobid':
+        if extraction_method != 'grobid' and not force_text_validation:
             return metadata
 
         original_authors = metadata['authors']
@@ -96,6 +97,7 @@ class GrobidValidator:
 
         authors_in_text = []
         authors_not_in_text = []
+        expanded_names = []  # Track full names found from partials
 
         for author in original_authors:
             author_lower = author.lower()
@@ -119,6 +121,52 @@ class GrobidValidator:
 
             found_in_text = False
             last_name_found = False
+            is_partial = False
+            full_name_from_partial = None
+
+            # Check if this is a partial name (e.g., "Eric M.", "J. F.")
+            # Partial names: 1-2 words ending in "." or very short (2-4 chars total)
+            author_words = author.split()
+            if len(author_words) <= 2:
+                # Check if ends with period (like "Eric M." or "J. F.")
+                if author.rstrip().endswith('.'):
+                    is_partial = True
+                # Or very short (2-4 characters total)
+                elif len(author.strip()) <= 4:
+                    is_partial = True
+
+            # If partial, search for full names starting with this partial
+            if is_partial:
+                # Escape the partial for regex (use lowercase since doc_text is lowercased)
+                partial_lower = author.rstrip('.').strip().lower()
+                partial_escaped = re.escape(partial_lower)
+                # Pattern: partial + optional period + whitespace + word(s) starting with capital
+                # Note: doc_text is lowercased, but we search for patterns that would indicate a capitalized word
+                # We'll search for the partial followed by whitespace and then a word (which we'll capitalize when reconstructing)
+                partial_pattern = r'\b' + partial_escaped + r'\.?\s+([a-z]+(?:\s+[a-z]+)?)'
+                matches = re.finditer(partial_pattern, doc_text)
+                for match in matches:
+                    # Found a full name starting with this partial
+                    # Reconstruct with proper capitalization
+                    matched_part = match.group(1)
+                    # Capitalize first letter of each word in the matched part
+                    matched_words = matched_part.split()
+                    capitalized_words = [word.capitalize() for word in matched_words]
+                    capitalized_part = ' '.join(capitalized_words)
+                    
+                    # Reconstruct full name preserving original author capitalization
+                    if author[0].isupper():
+                        # Preserve original case of partial
+                        full_name_from_partial = author.rstrip('.') + ' ' + capitalized_part
+                    else:
+                        # Use lowercase partial + capitalized part
+                        full_name_from_partial = author.rstrip('.').strip() + ' ' + capitalized_part
+                    
+                    # Add to expanded names list (will be added to authors_in_text later)
+                    if full_name_from_partial not in expanded_names:
+                        expanded_names.append(full_name_from_partial)
+                    found_in_text = True  # Partial is valid if we found a full name
+                    break
 
             if last_name and len(last_name) > 2:
                 last_name_escaped = re.escape(last_name)
@@ -159,6 +207,14 @@ class GrobidValidator:
                 authors_in_text.append(author)
             else:
                 authors_not_in_text.append(author)
+
+        # Add expanded full names to authors_in_text (if not already present)
+        for expanded_name in expanded_names:
+            # Check if this expanded name is already in the list (case-insensitive)
+            expanded_lower = expanded_name.lower()
+            already_present = any(a.lower() == expanded_lower for a in authors_in_text)
+            if not already_present:
+                authors_in_text.append(expanded_name)
 
         total = len(original_authors)
         if total > 0:

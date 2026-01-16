@@ -34,6 +34,7 @@ from shared_tools.utils.document_classifier import DocumentClassifier
 from shared_tools.metadata.jstor_handler import JSTORHandler
 from shared_tools.utils.author_validator import AuthorValidator
 from shared_tools.utils.journal_validator import JournalValidator
+from shared_tools.utils.author_filter import AuthorFilter
 
 
 class PaperMetadataProcessor:
@@ -99,6 +100,70 @@ class PaperMetadataProcessor:
         except Exception:
             return None
     
+    def _validate_doi_metadata_against_pdf(self, doi_metadata: Dict, pdf_path: Path, page_offset: int = 0) -> bool:
+        """Validate that DOI metadata matches PDF text to avoid false positives.
+        
+        Checks if the DOI metadata title or key author last names appear in the PDF text.
+        This prevents accepting metadata from a citation/reference DOI instead of the actual paper.
+        
+        Args:
+            doi_metadata: Metadata dict from DOI lookup (expects 'title' and 'authors')
+            pdf_path: Path to PDF file
+            page_offset: 0-indexed page offset for extraction
+            
+        Returns:
+            True if metadata matches PDF text, False otherwise
+        """
+        if not doi_metadata:
+            return False
+        
+        # Extract text from first 1-3 pages
+        doc_text = IdentifierExtractor.extract_text(pdf_path, page_offset=page_offset, max_pages=3)
+        if not doc_text:
+            return False  # Can't validate if no text extracted
+        
+        doc_text_lower = doc_text.lower()
+        
+        # Check title
+        title = doi_metadata.get('title', '').strip()
+        if title:
+            # Try to find significant words from title (at least 3 words or key phrases)
+            title_words = [w for w in title.lower().split() if len(w) > 3]  # Skip short words
+            if len(title_words) >= 2:
+                # Check if at least 2 significant words appear in text
+                found_words = sum(1 for word in title_words if word in doc_text_lower)
+                if found_words >= 2:
+                    return True  # Title matches
+        
+        # Check authors (last names)
+        authors = doi_metadata.get('authors', [])
+        if authors and isinstance(authors, list):
+            authors_found = 0
+            for author in authors[:3]:  # Check first 3 authors
+                if not author or not isinstance(author, str):
+                    continue
+                author_lower = author.lower()
+                # Extract last name (last word, or part before comma)
+                if ',' in author_lower:
+                    last_name = author_lower.split(',')[0].strip()
+                else:
+                    parts = author_lower.split()
+                    last_name = parts[-1].strip() if parts else ""
+                
+                if last_name and len(last_name) > 2:
+                    # Check if last name appears in text (word boundary matching)
+                    import re
+                    pattern = r'\b' + re.escape(last_name) + r'\b'
+                    if re.search(pattern, doc_text_lower):
+                        authors_found += 1
+            
+            # If at least one author last name found, consider it a match
+            if authors_found >= 1:
+                return True
+        
+        # If neither title nor authors match, likely a false positive
+        return False
+    
     def _filter_regex_authors(self, regex_authors: List[str]) -> List[str]:
         """Filter regex-extracted authors using Zotero author/journal lists.
         
@@ -128,56 +193,13 @@ class PaperMetadataProcessor:
                 print(f"  ⚠️  Could not initialize journal validator: {e}")
                 self.journal_validator = None
         
-        # Step 1: Filter out journal names
-        non_journal_candidates = []
-        if self.journal_validator:
-            for candidate in regex_authors:
-                # Check if candidate matches a known journal
-                journal_result = self.journal_validator.validate_journal(candidate)
-                if not journal_result.get('matched', False):
-                    non_journal_candidates.append(candidate)
-        else:
-            non_journal_candidates = regex_authors
-        
-        if not non_journal_candidates:
-            return []
-        
-        # Step 2: Validate against Zotero authors
-        validation_result = self.author_validator.validate_authors(non_journal_candidates)
-        known_authors = validation_result.get('known_authors', [])
-        unknown_authors = validation_result.get('unknown_authors', [])
-        
-        # Step 3: Apply filtering mode from config
-        config = configparser.ConfigParser()
-        root_dir = Path(__file__).parent.parent.parent
-        config.read([
-            root_dir / 'config.conf',
-            root_dir / 'config.personal.conf'
-        ])
-        
-        mode = config.get('AUTHOR_MATCHING', 'mode', fallback='balanced')
-        max_unknown = config.getint('AUTHOR_MATCHING', 'max_unknown_authors', fallback=2)
-        
-        filtered = []
-        
-        if mode == 'prefer_zotero_only':
-            # Only keep known authors
-            filtered = [author['name'] for author in known_authors]
-        
-        elif mode == 'balanced':
-            # Prefer known authors, but allow limited unknowns if no matches
-            if known_authors:
-                # We have matches - only keep those
-                filtered = [author['name'] for author in known_authors]
-            else:
-                # No matches - keep up to max_unknown_authors
-                filtered = [author['name'] for author in unknown_authors[:max_unknown]]
-        
-        elif mode == 'permissive':
-            # Keep all non-journal candidates
-            filtered = non_journal_candidates
-        
-        return filtered
+        # Use shared filtering method for consistent logic
+        return AuthorFilter.filter_authors_against_zotero(
+            authors=regex_authors,
+            author_validator=self.author_validator,
+            journal_validator=self.journal_validator,
+            logger=None
+        )
     
     def _extract_structured_repository_metadata(self, text: str) -> Optional[Dict]:
         """Extract structured metadata from repository pages using labeled fields.
@@ -479,13 +501,21 @@ class PaperMetadataProcessor:
             metadata = self._try_apis_for_doi(doi, doi_apis)
             
             if metadata:
-                source = metadata.get('source', 'unknown')
-                result['method'] = f'{source}_api'
-                result['metadata'] = metadata
-                result['success'] = True
-                result['processing_time_seconds'] = time.time() - start_time
-                print(f"  ✅ Got metadata from {source} in {result['processing_time_seconds']:.1f}s")
-                return result
+                # Validate DOI metadata against PDF text to avoid false positives
+                # (e.g., DOI from a citation rather than the actual paper)
+                is_valid = self._validate_doi_metadata_against_pdf(metadata, pdf_path, page_offset=page_offset)
+                
+                if is_valid:
+                    source = metadata.get('source', 'unknown')
+                    result['method'] = f'{source}_api'
+                    result['metadata'] = metadata
+                    result['success'] = True
+                    result['processing_time_seconds'] = time.time() - start_time
+                    print(f"  ✅ Got metadata from {source} in {result['processing_time_seconds']:.1f}s")
+                    return result
+                else:
+                    print(f"  ⚠️  DOI metadata doesn't match PDF text (likely from a citation) - skipping")
+                    print(f"  ℹ️  Falling back to GROBID/extraction methods...")
             else:
                 print(f"  ❌ All APIs returned no data for DOI: {doi}")
         
