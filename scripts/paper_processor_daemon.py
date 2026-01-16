@@ -44,6 +44,8 @@ from shared_tools.zotero.local_search import ZoteroLocalSearch
 from shared_tools.utils.filename_generator import FilenameGenerator
 from shared_tools.utils.author_extractor import AuthorExtractor
 from shared_tools.utils.grobid_validator import GrobidValidator
+from shared_tools.utils.author_filter import AuthorFilter
+from shared_tools.utils.author_filter import AuthorFilter
 from shared_tools.metadata.enrichment_policy import MatchPolicy, MatchPolicyConfig
 from shared_tools.metadata.enrichment_planner import EnrichmentPlanner
 from shared_tools.daemon.enrichment_workflow import EnrichmentWorkflow
@@ -330,12 +332,14 @@ class PaperProcessorDaemon:
         cloud drive access properly.
         """
         try:
+            self.publications_access_mode = 'wsl'
             # Check if this is a cloud drive path (G: drive or other cloud drives)
             # Cloud drives are accessed via PowerShell, not directly from WSL
             path_str = str(self.publications_dir)
             is_cloud_drive = path_str.startswith('/mnt/g/') or 'My Drive' in path_str
             
             if is_cloud_drive:
+                self.publications_access_mode = 'powershell'
                 # For cloud drives, just verify the path can be normalized
                 # Actual operations will use PowerShell which handles cloud access
                 normalized = self._normalize_path(str(self.publications_dir))
@@ -379,10 +383,187 @@ class PaperProcessorDaemon:
             path_str = str(self.publications_dir)
             is_cloud_drive = path_str.startswith('/mnt/g/') or 'My Drive' in path_str
             if is_cloud_drive:
+                self.publications_access_mode = 'powershell'
                 print(f"✅ Publications directory configured (cloud drive, will use PowerShell): {self.publications_dir}")
                 return
             self._handle_missing_publications_directory()
     
+    def _publications_use_powershell(self) -> bool:
+        """Return True when publications dir is only accessible via PowerShell."""
+        return getattr(self, 'publications_access_mode', 'wsl') == 'powershell'
+    
+    def _get_file_info_via_powershell(self, path: Path, with_hash: bool = False) -> Optional[Dict]:
+        """Get file info for a path using PowerShell (cloud-drive safe)."""
+        try:
+            ps_script_win = self._get_path_utils_script_win()
+        except Exception as e:
+            self.logger.debug(f"Failed to get path utils script path: {e}")
+            return None
+        
+        path_str = str(path)
+        if path_str.startswith('/'):
+            try:
+                path_str = self._convert_wsl_to_windows_path(path_str)
+            except Exception as e:
+                self.logger.debug(f"Failed to convert path for file info: {e}")
+                return None
+        
+        cmd = [
+            'powershell.exe', '-ExecutionPolicy', 'Bypass', '-File', ps_script_win,
+            'get-file-info', path_str
+        ]
+        if with_hash:
+            cmd.append('-Hash')
+        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        except Exception as e:
+            self.logger.debug(f"PowerShell get-file-info failed: {e}")
+            return None
+        
+        if result.returncode != 0:
+            self.logger.debug(f"PowerShell get-file-info error: {result.stderr}")
+            return None
+        
+        try:
+            info = json.loads(result.stdout.strip())
+            # #region agent log
+            try:
+                import time as _time, json as _json
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'H6',
+                        'location': 'paper_processor_daemon.py:_get_file_info_via_powershell',
+                        'message': 'PowerShell file info result',
+                        'data': {
+                            'path': str(path),
+                            'with_hash': bool(with_hash),
+                            'exists': bool(info.get('exists')),
+                            'is_file': bool(info.get('isFile')),
+                            'size': info.get('size')
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
+            return info
+        except Exception as e:
+            self.logger.debug(f"Failed to parse get-file-info output: {e}")
+            return None
+    
+    def _pub_exists(self, path: Path) -> bool:
+        """Check if a publications file exists using the correct backend."""
+        if self._publications_use_powershell():
+            info = self._get_file_info_via_powershell(path, with_hash=False)
+            return bool(info and info.get('exists') and info.get('isFile'))
+        return path.exists()
+    
+    def _pub_stat_display(self, path: Path) -> Optional[str]:
+        """Format stat info for conflict UI display."""
+        if self._publications_use_powershell():
+            info = self._get_file_info_via_powershell(path, with_hash=False)
+            if not info or not info.get('exists'):
+                return None
+            size = info.get('size')
+            ctime = info.get('ctime')
+            if ctime:
+                try:
+                    from datetime import datetime
+                    ctime_fmt = datetime.fromisoformat(ctime).strftime('%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    ctime_fmt = ctime
+            else:
+                ctime_fmt = 'unknown'
+            return f"{size} bytes, {ctime_fmt}"
+        
+        stat = os.stat(path)
+        return f"{stat.st_size} bytes, {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_ctime))}"
+    
+    def _pub_identical(self, source_path: Path, target_path: Path) -> bool:
+        """Compare source and target using correct backend."""
+        try:
+            if not source_path.exists():
+                return False
+        except Exception:
+            return False
+        
+        if self._publications_use_powershell():
+            info = self._get_file_info_via_powershell(target_path, with_hash=True)
+            if not info or not info.get('exists'):
+                return False
+            try:
+                source_size = source_path.stat().st_size
+            except Exception:
+                return False
+            if info.get('size') != source_size:
+                return False
+            target_hash = info.get('hash')
+            if not target_hash:
+                return False
+            source_hash = self._sha256_file(source_path)
+            return bool(source_hash) and source_hash == target_hash
+        
+        return self._are_files_identical(target_path, source_path)
+
+    def _list_pdfs_in_publications(self) -> List[str]:
+        """List all PDF files in publications directory using correct backend.
+        
+        Uses PowerShell for cloud drives, direct WSL access for local paths.
+        
+        Returns:
+            List of PDF filenames (just names, not full paths)
+        """
+        pdf_files = []
+        
+        if self._publications_use_powershell():
+            # Use PowerShell to list PDFs (for cloud drives)
+            try:
+                ps_script_win = self._get_path_utils_script_win()
+                path_str = str(self.publications_dir)
+                if path_str.startswith('/'):
+                    path_str = self._convert_wsl_to_windows_path(path_str)
+                
+                cmd = ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-File', ps_script_win,
+                       'list-pdfs', path_str]
+                
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode == 0:
+                    try:
+                        result_data = json.loads(result.stdout.strip())
+                        if result_data.get('success'):
+                            pdf_files = result_data.get('pdf_files', [])
+                        else:
+                            error_msg = result_data.get('error', 'Unknown error')
+                            self.logger.debug(f"PowerShell list-pdfs failed: {error_msg}")
+                    except json.JSONDecodeError as e:
+                        self.logger.debug(f"Failed to parse list-pdfs output: {e}")
+                else:
+                    self.logger.debug(f"PowerShell list-pdfs returned code {result.returncode}: {result.stderr}")
+            except subprocess.TimeoutExpired:
+                self.logger.warning("PowerShell list-pdfs timed out")
+            except Exception as e:
+                self.logger.debug(f"PowerShell list-pdfs exception: {e}")
+        else:
+            # Use WSL direct access (for local paths)
+            try:
+                if self.publications_dir.exists():
+                    pdf_paths = list(self.publications_dir.glob("*.pdf"))
+                    pdf_files = [p.name for p in pdf_paths]
+            except Exception as e:
+                self.logger.debug(f"WSL glob failed: {e}")
+        
+        return pdf_files
+
     def _handle_missing_publications_directory(self):
         """Handle case where publications directory path doesn't exist."""
         parent_dir = self.publications_dir.parent
@@ -415,6 +596,7 @@ class PaperProcessorDaemon:
                 # Use local directory
                 self.publications_dir = Path('./data/publications').resolve()
                 self.publications_dir.mkdir(parents=True, exist_ok=True)
+                self.publications_access_mode = 'wsl'
                 print(f"✅ Using local directory: {self.publications_dir}")
                 break
             elif choice == '2':
@@ -454,6 +636,7 @@ class PaperProcessorDaemon:
                 # Use local directory
                 self.publications_dir = Path('./data/publications').resolve()
                 self.publications_dir.mkdir(parents=True, exist_ok=True)
+                self.publications_access_mode = 'wsl'
                 print(f"✅ Using local directory: {self.publications_dir}")
                 break
             elif choice == '2':
@@ -754,6 +937,8 @@ class PaperProcessorDaemon:
         
         For GROBID authors, also validates against document text to filter hallucinations.
         
+        This method delegates to the AuthorFilter module for reusable filtering logic.
+        
         Args:
             metadata: Metadata dict with 'authors' field
             pdf_path: Optional path to PDF for document text validation (for GROBID hallucinations)
@@ -761,130 +946,12 @@ class PaperProcessorDaemon:
         Returns:
             Updated metadata dict with filtered authors
         """
-        if not metadata.get('authors'):
-            return metadata
-        
-        original_authors = metadata['authors']
-        extraction_method = metadata.get('extraction_method', metadata.get('method', ''))
-        
-        # Apply OCR correction to all authors before filtering/display
-        # This fixes OCR errors like "Tu$ey" -> "Tukey" before they're shown to user
-        corrected_authors = []
-        if self.author_validator:
-            for author in original_authors:
-                corrected = False
-                # Strategy 1: Try lastname matching first (fast, handles cases like "Tu$ey, John W" -> "Tukey, John W")
-                try:
-                    validation = self.author_validator.validate_authors([author])
-                    if validation['known_authors']:
-                        # Found exact or lastname match - use it
-                        corrected_authors.append(validation['known_authors'][0]['name'])
-                        corrected = True
-                        self.logger.debug(f"Author matched via lastname: '{author}' -> '{validation['known_authors'][0]['name']}'")
-                    elif validation['ocr_corrections']:
-                        # Found OCR correction suggestion
-                        corrected_authors.append(validation['ocr_corrections'][0]['corrected_name'])
-                        corrected = True
-                        self.logger.debug(f"OCR correction via validate: '{author}' -> '{validation['ocr_corrections'][0]['corrected_name']}'")
-                except Exception as e:
-                    self.logger.debug(f"Author validation failed for '{author}': {e}")
-                
-                # Strategy 2: If no match, try direct OCR correction (more aggressive, handles special chars)
-                if not corrected:
-                    try:
-                        # Try with higher max_distance and lower similarity threshold
-                        suggestion = self.author_validator.suggest_ocr_correction(author, max_distance=3)
-                        if suggestion and suggestion.get('corrected_name'):
-                            corrected_authors.append(suggestion['corrected_name'])
-                            self.logger.debug(f"OCR correction: '{author}' -> '{suggestion['corrected_name']}'")
-                            corrected = True
-                    except Exception as e:
-                        self.logger.debug(f"OCR correction failed for '{author}': {e}")
-                
-                # If no correction found, keep original
-                if not corrected:
-                    corrected_authors.append(author)
-        else:
-            corrected_authors = original_authors
-        
-        # Update metadata with corrected authors
-        metadata['authors'] = corrected_authors
-        original_authors = corrected_authors  # Use corrected authors for filtering
-        
-        # For GROBID: validate against document text first (filter hallucinations)
-        if extraction_method == 'grobid' and pdf_path:
-            # #region agent log
-            try:
-                import time as _time, json as _json
-                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-                with open(log_path, 'a', encoding='utf-8') as f:
-                    f.write(_json.dumps({
-                        'sessionId': 'debug-session',
-                        'runId': 'run1',
-                        'hypothesisId': 'B1',
-                        'location': 'paper_processor_daemon.py:filter_garbage_authors',
-                        'message': 'Calling GrobidValidator',
-                        'data': {
-                            'authors_count': len(metadata.get('authors', [])),
-                            'extraction_method': extraction_method,
-                            'has_pdf_path': bool(pdf_path)
-                        },
-                        'timestamp': int(_time.time() * 1000)
-                    }) + '\n')
-            except Exception:
-                pass
-            # #endregion
-            
-            metadata = GrobidValidator.validate_authors(
-                metadata,
-                pdf_path,
-                regex_authors=None,
-                logger=self.logger
-            )
-        
-        # Zotero-based filtering (for non-reliable extraction methods)
-        if not self.author_validator:
-            return metadata
-        
-        # Skip filtering if extraction method is reliable (CrossRef, arXiv, DOI)
-        # Note: GROBID already filtered above if pdf_path provided
-        reliable_methods = ['crossref', 'arxiv', 'doi']
-        if extraction_method in reliable_methods:
-            return metadata
-        
-        # Validate authors against Zotero
-        validation = self.author_validator.validate_authors(metadata.get('authors', []))
-        known_authors = validation['known_authors']
-        unknown_authors = validation['unknown_authors']
-        
-        # Decision logic: Filter if we have many unknowns and some known authors
-        total = len(metadata.get('authors', []))
-        known_count = len(known_authors)
-        unknown_count = len(unknown_authors)
-        
-        # If we have 5+ total authors and 70%+ are unknown, but we found some known authors
-        # This indicates garbage extraction (like the regex fallback)
-        should_filter = (
-            total >= 5 and 
-            known_count >= 1 and 
-            (unknown_count / total) >= 0.7
+        return AuthorFilter.filter_authors(
+            metadata=metadata,
+            pdf_path=pdf_path,
+            author_validator=self.author_validator,
+            logger=self.logger
         )
-        
-        if should_filter:
-            self.logger.info(f"🧹 Filtering authors: {total} extracted, {known_count} known, {unknown_count} unknown")
-            
-            # Keep only known authors
-            filtered_authors = [author['name'] for author in known_authors]
-            
-            # Update metadata
-            metadata['authors'] = filtered_authors
-            metadata['_original_author_count'] = total
-            metadata['_filtered'] = True
-            metadata['_filtering_reason'] = f"Kept {known_count} known authors from {total} extracted"
-            
-            self.logger.info(f"✅ Filtered to {len(filtered_authors)} known authors")
-        
-        return metadata
     
     def confirm_document_type_early(self, metadata: dict) -> dict:
         """Confirm or select document type early in the workflow.
@@ -1371,6 +1438,23 @@ class PaperProcessorDaemon:
                 # Author + Title
                 print("\n🔍 Searching Zotero by author and title...")
                 search_matches = self.local_zotero.search_by_metadata(metadata, max_matches=10)
+                # #region agent log
+                try:
+                    import json as _json, time as _time, os as _os
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if _os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as _f:
+                        _f.write(_json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "run1",
+                            "hypothesisId": "H2",
+                            "location": "paper_processor_daemon.py:search_by_author_title",
+                            "message": "search_return",
+                            "data": {"count": len(search_matches) if search_matches is not None else None},
+                            "timestamp": int(_time.time() * 1000)
+                        }) + "\n")
+                except Exception:
+                    pass
+                # #endregion
                 used_components = ["author", "title"]
                 search_info = "by author and title"
                 if year:
@@ -1380,6 +1464,23 @@ class PaperProcessorDaemon:
                 # Title + Year
                 print("\n🔍 Searching Zotero by title and year...")
                 search_matches = self.local_zotero.search_by_metadata(metadata, max_matches=10)
+                # #region agent log
+                try:
+                    import json as _json, time as _time, os as _os
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if _os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as _f:
+                        _f.write(_json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "run1",
+                            "hypothesisId": "H2",
+                            "location": "paper_processor_daemon.py:search_by_title_year",
+                            "message": "search_return",
+                            "data": {"count": len(search_matches) if search_matches is not None else None},
+                            "timestamp": int(_time.time() * 1000)
+                        }) + "\n")
+                except Exception:
+                    pass
+                # #endregion
                 used_components = ["title", "year"]
                 search_info = f"by title and year ({year})"
             
@@ -1431,7 +1532,42 @@ class PaperProcessorDaemon:
                 if search_info:
                     print(f"   Found {len(search_matches)} potential match(es) {search_info}")
                 
+                # #region agent log
+                try:
+                    import json as _json, time as _time, os as _os
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if _os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as _f:
+                        _f.write(_json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "run1",
+                            "hypothesisId": "H3",
+                            "location": "paper_processor_daemon.py:before_display_matches",
+                            "message": "display_call",
+                            "data": {"count": len(search_matches)},
+                            "timestamp": int(_time.time() * 1000)
+                        }) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+
                 action, item = self.display_and_select_zotero_matches(search_matches, search_info)
+                # #region agent log
+                try:
+                    import json as _json, time as _time, os as _os
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if _os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as _f:
+                        _f.write(_json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "run1",
+                            "hypothesisId": "H3",
+                            "location": "paper_processor_daemon.py:after_display_matches",
+                            "message": "display_return",
+                            "data": {"action": action},
+                            "timestamp": int(_time.time() * 1000)
+                        }) + "\n")
+                except Exception:
+                    pass
+                # #endregion
                 if action == 'select':
                     return (action, item, metadata)
                 # If user doesn't select from matches, allow them to provide author for more refined search
@@ -1448,6 +1584,19 @@ class PaperProcessorDaemon:
                         # Continue to author-based search below
                     else:
                         # User skipped - return with no selection
+                        return ('none', None, metadata)
+            else:
+                # No matches from title/year search
+                if not has_author:
+                    print("\n💡 No matches found. You can provide author name for refined search.")
+                    author_input = input("First author's last name (or Enter to skip, 'r' to restart): ").strip()
+                    if author_input.lower() == 'r':
+                        return ('restart', None, metadata)
+                    elif author_input:
+                        metadata['authors'] = [author_input]
+                        self.logger.info(f"User provided author for refined search (no initial matches): {author_input}")
+                        has_author = True
+                    else:
                         return ('none', None, metadata)
             
             # Step 5: Author-based search (for Priority 1, Priority 4 with author provided, or Priority 5)
@@ -1838,7 +1987,30 @@ class PaperProcessorDaemon:
             Tuple of (success: bool, error_msg: Optional[str])
         """
         # First, verify source file exists
-        if not source_path.exists():
+        source_exists = source_path.exists()
+        # #region agent log
+        try:
+            import time as _time, json as _json
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(_json.dumps({
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'H1',
+                    'location': 'paper_processor_daemon.py:_copy_file_universal:entry',
+                    'message': 'Copy request received',
+                    'data': {
+                        'source_path': str(source_path),
+                        'target_path': str(target_path),
+                        'replace_existing': bool(replace_existing),
+                        'source_exists': bool(source_exists)
+                    },
+                    'timestamp': int(_time.time() * 1000)
+                }) + '\n')
+        except Exception:
+            pass
+        # #endregion
+        if not source_exists:
             return (False, f"Source file not found: {source_path}")
         
         # First, try native Python copy (fastest, works for most paths)
@@ -1848,6 +2020,26 @@ class PaperProcessorDaemon:
             
             # Check if target exists and handle replacement
             if target_path.exists():
+                # #region agent log
+                try:
+                    import time as _time, json as _json
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(_json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'H2',
+                            'location': 'paper_processor_daemon.py:_copy_file_universal:target-exists',
+                            'message': 'Target exists before copy',
+                            'data': {
+                                'target_path': str(target_path),
+                                'replace_existing': bool(replace_existing)
+                            },
+                            'timestamp': int(_time.time() * 1000)
+                        }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
                 if not replace_existing:
                     # Check if files are identical
                     try:
@@ -1884,10 +2076,54 @@ class PaperProcessorDaemon:
             # Native copy failed - likely a cloud drive not accessible from WSL
             # Fall back to PowerShell
             self.logger.debug(f"Native copy failed ({e}), trying PowerShell fallback...")
+            # #region agent log
+            try:
+                import time as _time, json as _json
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'H3',
+                        'location': 'paper_processor_daemon.py:_copy_file_universal:native-failed',
+                        'message': 'Native copy failed, falling back to PowerShell',
+                        'data': {
+                            'error_type': type(e).__name__,
+                            'error': str(e),
+                            'source_path': str(source_path),
+                            'target_path': str(target_path)
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             return self._copy_file_via_powershell(source_path, target_path, replace_existing)
         except Exception as e:
             # Other errors - try PowerShell as fallback
             self.logger.debug(f"Unexpected error in native copy ({e}), trying PowerShell fallback...")
+            # #region agent log
+            try:
+                import time as _time, json as _json
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'H3',
+                        'location': 'paper_processor_daemon.py:_copy_file_universal:native-error',
+                        'message': 'Unexpected native copy error, falling back to PowerShell',
+                        'data': {
+                            'error_type': type(e).__name__,
+                            'error': str(e),
+                            'source_path': str(source_path),
+                            'target_path': str(target_path)
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             return self._copy_file_via_powershell(source_path, target_path, replace_existing)
     
     def _copy_file_via_powershell(self, source_path: Path, target_path: Path, replace_existing: bool = False) -> tuple:
@@ -1955,6 +2191,29 @@ class PaperProcessorDaemon:
                 else:
                     # File doesn't exist in WSL either
                     return (False, f"Source file not found or not accessible: {error or 'Unknown error'}")
+            # #region agent log
+            try:
+                import time as _time, json as _json
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'H4',
+                        'location': 'paper_processor_daemon.py:_copy_file_via_powershell:validated',
+                        'message': 'PowerShell copy validation result',
+                        'data': {
+                            'source_path': str(source_path),
+                            'target_path': str(target_path),
+                            'source_valid': bool(is_valid),
+                            'validation_error': error,
+                            'replace_existing': bool(replace_existing)
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             
             # Convert source WSL path to Windows path using PowerShell utility
             try:
@@ -2011,6 +2270,27 @@ class PaperProcessorDaemon:
                 text=True,
                 timeout=120  # 120 second timeout for large files
             )
+            # #region agent log
+            try:
+                import time as _time, json as _json
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'H4',
+                        'location': 'paper_processor_daemon.py:_copy_file_via_powershell:completed',
+                        'message': 'PowerShell copy completed',
+                        'data': {
+                            'returncode': result.returncode,
+                            'stdout_len': len(result.stdout or ''),
+                            'stderr_len': len(result.stderr or '')
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             
             if result.returncode == 0:
                 # Parse JSON response
@@ -2033,6 +2313,27 @@ class PaperProcessorDaemon:
                                 temp_source_path.unlink()
                             except:
                                 pass
+                        # #region agent log
+                        try:
+                            import time as _time, json as _json
+                            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                            with open(log_path, 'a', encoding='utf-8') as f:
+                                f.write(_json.dumps({
+                                    'sessionId': 'debug-session',
+                                    'runId': 'run1',
+                                    'hypothesisId': 'H4',
+                                    'location': 'paper_processor_daemon.py:_copy_file_via_powershell:json-failure',
+                                    'message': 'PowerShell copy reported failure',
+                                    'data': {
+                                        'error': result_data.get('error'),
+                                        'error_code': result_data.get('errorCode'),
+                                        'target_path': str(target_path)
+                                    },
+                                    'timestamp': int(_time.time() * 1000)
+                                }) + '\n')
+                        except Exception:
+                            pass
+                        # #endregion
                         return (False, result_data.get('error', 'Unknown error'))
                 except json.JSONDecodeError:
                     # If JSON parsing fails, check if copy actually succeeded
@@ -2056,7 +2357,35 @@ class PaperProcessorDaemon:
                 # Try to parse error from JSON
                 try:
                     result_data = json.loads(result.stdout.strip())
+                    error_code = result_data.get('errorCode', result.returncode)
                     error_msg = result_data.get('error', f'PowerShell copy failed with code {result.returncode}')
+                    # #region agent log
+                    try:
+                        import time as _time, json as _json
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(_json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'H4',
+                                'location': 'paper_processor_daemon.py:_copy_file_via_powershell:nonzero',
+                                'message': 'PowerShell copy returned nonzero',
+                                'data': {
+                                    'returncode': result.returncode,
+                                    'error': error_msg,
+                                    'error_code': error_code,
+                                    'target_path': str(target_path)
+                                },
+                                'timestamp': int(_time.time() * 1000)
+                            }) + '\n')
+                    except Exception:
+                        pass
+                    # #endregion
+                    
+                    # Special handling for error code 5 (target exists but differs)
+                    if error_code == 5 or (result.returncode == 5 and 'Target exists but differs' in error_msg):
+                        # Return a special error that caller can detect for conflict UI
+                        return (False, f"CONFLICT:{error_msg}")
                 except:
                     error_msg = result.stdout + result.stderr
                     if not error_msg:
@@ -3830,14 +4159,20 @@ class PaperProcessorDaemon:
         return working_tags
     
     def _add_custom_tag(self, working_tags: list) -> list:
-        """Add a custom tag entered by user."""
-        tag = input("\nEnter custom tag: ").strip()
-        if tag:
-            if tag not in working_tags:
-                working_tags.append(tag)
-                print(f"✅ Added custom tag: {tag}")
+        """Add a custom tag entered by user. Supports comma-separated tags."""
+        tag_input = input("\nEnter custom tag(s) (comma-separated for multiple): ").strip()
+        if tag_input:
+            # Split on commas, trim whitespace, filter empty strings
+            new_tags = [t.strip() for t in tag_input.split(',') if t.strip()]
+            added_count = 0
+            for tag in new_tags:
+                if tag not in working_tags:
+                    working_tags.append(tag)
+                    added_count += 1
+            if added_count > 0:
+                print(f"✅ Added {added_count} custom tag(s): {', '.join(new_tags)}")
             else:
-                print(f"❌ Tag '{tag}' already exists")
+                print(f"❌ All tag(s) already exist: {', '.join(new_tags)}")
         else:
             print("❌ No tag entered")
         
@@ -4491,6 +4826,9 @@ class PaperProcessorDaemon:
             # Step 2: Check if extraction succeeded
             if result.get('success') and result.get('metadata'):
                 metadata = result['metadata']
+                # Preserve extraction method for downstream filtering
+                if result.get('method') and not metadata.get('extraction_method'):
+                    metadata['extraction_method'] = result.get('method')
                 
                 # Filter garbage authors (keeps only known authors when extraction is poor)
                 # For GROBID, also validates against document text to filter hallucinations
@@ -8598,6 +8936,11 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         """
         # Use Zotero metadata as base for online search (it's more canonical)
         base_metadata = zotero.copy() if zotero else extracted.copy()
+        # Preserve source information from extracted metadata if available
+        if extracted:
+            for key in ['data_source', 'source', 'extraction_method']:
+                if key in extracted and key not in base_metadata:
+                    base_metadata[key] = extracted[key]
         
         # Search online libraries
         print("\n🔍 Searching CrossRef, arXiv, OpenAlex...")
@@ -8894,36 +9237,33 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         scanned_path = self.publications_dir / f"{stem}_scan{suffix}"
         final_path = base_path
         
-        if base_path.exists():
+        if self._pub_exists(base_path):
             # If same size as incoming file, hash-compare and skip if identical
             try:
-                if base_path.stat().st_size == pdf_path.stat().st_size and self._are_files_identical(base_path, pdf_path):
+                if self._pub_identical(pdf_to_copy, base_path):
                     print(f"✅ Existing base file is identical: {base_path.name} — skipping copy/attachment")
                     self.move_to_done(pdf_path)
                     return True
             except Exception:
                 pass
-            if not scanned_path.exists():
+            if not self._pub_exists(scanned_path):
                 print(f"\n⚠️  File already exists: {base_path.name}")
                 final_path = scanned_path
                 print(f"Using scanned copy name: {final_path.name}")
             else:
-                import os, time
-                base_stat = os.stat(base_path)
-                scanned_stat = os.stat(scanned_path)
-                def fmt(stat):
-                    return f"{stat.st_size} bytes, {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_ctime))}"
+                base_stat = self._pub_stat_display(base_path) or "unknown"
+                scanned_stat = self._pub_stat_display(scanned_path) or "unknown"
                 print(f"\n⚠️  Both base and scanned files exist:")
                 # If scanned also same size, check for identical content too
                 try:
-                    if scanned_path.stat().st_size == pdf_path.stat().st_size and self._are_files_identical(scanned_path, pdf_path):
+                    if self._pub_identical(pdf_to_copy, scanned_path):
                         print(f"✅ Existing scanned file is identical: {scanned_path.name} — skipping copy/attachment")
                         self.move_to_done(pdf_path)
                         return True
                 except Exception:
                     pass
-                print(f"  [1] Base   : {base_path.name} ({fmt(base_stat)})")
-                print(f"  [2] Scanned: {scanned_path.name} ({fmt(scanned_stat)})")
+                print(f"  [1] Base   : {base_path.name} ({base_stat})")
+                print(f"  [2] Scanned: {scanned_path.name} ({scanned_stat})")
                 print("  [1] Keep both → save as scanned2")
                 print("  [2] Replace base with new scanned")
                 print("  [3] Replace existing scanned with new scanned")
@@ -8945,7 +9285,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     else:
                         print("⚠️  Invalid choice. Please enter 1-3 or 'z'.")
         
-        success, error_msg = self._copy_file_universal(pdf_path, final_path, replace_existing=False)
+        success, error_msg = self._copy_file_universal(pdf_to_copy, final_path, replace_existing=False)
         copied_ok = success
         if success:
             print(f"✅ Copied to: {final_path}")
@@ -9263,6 +9603,24 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         """
         if not matches:
             return ('none', None)
+
+        # #region agent log
+        try:
+            import json as _json, time as _time, os as _os
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if _os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "H3",
+                    "location": "paper_processor_daemon.py:display_and_select_zotero_matches",
+                    "message": "entry",
+                    "data": {"count": len(matches), "search_info": search_info},
+                    "timestamp": int(_time.time() * 1000)
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
         
         print(f"\n✅ Found {len(matches)} potential match(es) {search_info}:")
         print()
@@ -9623,6 +9981,16 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         all_results = []
         source_name = None
         checked_libraries = []  # Track which libraries were checked
+        
+        # Check if incoming metadata is from a high-quality source (national-library, ISBN lookup, etc.)
+        # If so, include it as a candidate for enrichment evaluation
+        metadata_source = metadata.get('data_source') or metadata.get('source') or metadata.get('extraction_method', '')
+        if any(keyword in str(metadata_source).lower() for keyword in ['national', 'library', 'isbn_lookup', 'isbn']):
+            # Normalize metadata to candidate format
+            candidate_metadata = metadata.copy()
+            candidate_metadata['source'] = metadata_source
+            all_results.append(candidate_metadata)
+            checked_libraries.append(f"Extracted ({metadata_source})")
         
         # Use document type to guide API selection
         doc_type = metadata.get('document_type', '').lower()
@@ -11015,7 +11383,20 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 if k not in search_base or not search_base.get(k):
                     search_base[k] = v
 
-            candidates = self.enrichment_workflow.search_online(search_base)
+            # Check if extracted_metadata is from a high-quality source (national-library, ISBN lookup, etc.)
+            # These should be included as candidates for enrichment evaluation
+            additional_candidates = []
+            if extracted_metadata:
+                source = extracted_metadata.get('data_source') or extracted_metadata.get('source') or extracted_metadata.get('extraction_method', '')
+                # Include if from national-library, ISBN lookup, or other high-quality sources
+                if any(keyword in str(source).lower() for keyword in ['national', 'library', 'isbn_lookup', 'isbn']):
+                    # Normalize extracted metadata to candidate format (ensure it has required fields)
+                    candidate = extracted_metadata.copy()
+                    # Ensure it's marked as a candidate source
+                    candidate['source'] = source
+                    additional_candidates.append(candidate)
+
+            candidates = self.enrichment_workflow.search_online(search_base, additional_candidates=additional_candidates)
             if not candidates:
                 return
 
@@ -11179,15 +11560,29 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         target_path_full = self.publications_dir / target_filename
         replace_existing = False
         
-        # Try to check if file exists, but handle case where cloud drive isn't accessible from WSL
-        target_exists = False
+        # Use backend-aware existence check for cloud drives
+        target_exists = self._pub_exists(target_path_full)
+        # #region agent log
         try:
-            target_exists = target_path_full.exists()
-        except OSError as e:
-            # Cloud drives (like Google Drive) may not be accessible from WSL
-            # PowerShell will handle the existence check during copy
-            self.logger.debug(f"Could not check if target exists from WSL (cloud drive?): {e}")
-            target_exists = False
+            import time as _time, json as _json
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(_json.dumps({
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'H5',
+                    'location': 'paper_processor_daemon.py:_handle_pdf_attachment_step',
+                    'message': 'Target existence check',
+                    'data': {
+                        'target_path': str(target_path_full),
+                        'target_exists': bool(target_exists),
+                        'access_mode': getattr(self, 'publications_access_mode', 'wsl')
+                    },
+                    'timestamp': int(_time.time() * 1000)
+                }) + '\n')
+        except Exception:
+            pass
+        # #endregion
         
         if target_exists:
             # File exists - show that Zotero item already has PDF and prompt for filename edit
@@ -11235,56 +11630,48 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 
                 # Check if new filename exists
                 new_path = self.publications_dir / new_filename
-                try:
-                    if not new_path.exists():
-                        # Unique filename found
-                        target_filename = new_filename
-                        target_path_full = new_path
-                        break
-                    else:
-                        # Still exists, ask user what to do
-                        print()
-                        print(f"⚠️  File '{new_filename}' already exists")
-                        print("What would you like to do?")
-                        print("[1] Replace existing PDF with scan")
-                        print("[2] Edit filename again")
-                        print("[3] Skip attaching and finish")
-                        print("  (z) Cancel (keep original)")
-                        print()
-                        
-                        conflict_choice = input("Enter your choice: ").strip().lower()
-                        
-                        if conflict_choice == 'z':
-                            self.move_to_done(pdf_path)
-                            print("✅ Cancelled - kept original PDF")
-                            return
-                        elif conflict_choice == '3':
-                            self.move_to_done(pdf_path)
-                            print("✅ Skipped attachment and finished")
-                            return
-                        elif conflict_choice == '1':
-                            # Replace existing
-                            target_filename = new_filename
-                            target_path_full = new_path
-                            replace_existing = True
-                            break
-                        elif conflict_choice == '2':
-                            # Edit again - continue loop
-                            target_filename = new_filename
-                            continue
-                        else:
-                            # Invalid choice, default to replace
-                            target_filename = new_filename
-                            target_path_full = new_path
-                            replace_existing = True
-                            break
-                except OSError as e:
-                    # Cloud drive may not be accessible from WSL
-                    self.logger.debug(f"Could not check if new filename exists (cloud drive?): {e}")
-                    # Assume it's unique and proceed
+                if not self._pub_exists(new_path):
+                    # Unique filename found
                     target_filename = new_filename
                     target_path_full = new_path
                     break
+                else:
+                    # Still exists, ask user what to do
+                    print()
+                    print(f"⚠️  File '{new_filename}' already exists")
+                    print("What would you like to do?")
+                    print("[1] Replace existing PDF with scan")
+                    print("[2] Edit filename again")
+                    print("[3] Skip attaching and finish")
+                    print("  (z) Cancel (keep original)")
+                    print()
+                    
+                    conflict_choice = input("Enter your choice: ").strip().lower()
+                    
+                    if conflict_choice == 'z':
+                        self.move_to_done(pdf_path)
+                        print("✅ Cancelled - kept original PDF")
+                        return
+                    elif conflict_choice == '3':
+                        self.move_to_done(pdf_path)
+                        print("✅ Skipped attachment and finished")
+                        return
+                    elif conflict_choice == '1':
+                        # Replace existing
+                        target_filename = new_filename
+                        target_path_full = new_path
+                        replace_existing = True
+                        break
+                    elif conflict_choice == '2':
+                        # Edit again - continue loop
+                        target_filename = new_filename
+                        continue
+                    else:
+                        # Invalid choice, default to replace
+                        target_filename = new_filename
+                        target_path_full = new_path
+                        replace_existing = True
+                        break
         
         # Step 2: Verify and log target filename before copy
         # Defensive check: ensure target_filename doesn't contain temp file patterns
@@ -11321,10 +11708,54 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         success, target_path, error = self._copy_to_publications_via_windows(pdf_to_copy, target_filename, replace_existing=replace_existing)
         
         if not success:
-            print(f"❌ Copy failed: {error}")
-            print("📝 Moving to manual review")
-            self.move_to_manual_review(pdf_path)
-            return
+            # Check if this is a conflict error (error code 5 from PowerShell)
+            if error and error.startswith("CONFLICT:"):
+                # Re-enter conflict UI using unified API
+                target_path_full = self.publications_dir / target_filename
+                if self._pub_exists(target_path_full):
+                    print("\n⚠️  File conflict detected during copy. Please resolve:")
+                    print(f"  Existing file: {target_filename}")
+                    print("\nOptions:")
+                    print("[1] Replace existing PDF with scan")
+                    print("[2] Skip attaching and finish")
+                    print("  (z) Cancel (keep original)")
+                    print()
+                    
+                    conflict_choice = input("Enter your choice: ").strip().lower()
+                    
+                    if conflict_choice == 'z':
+                        self.move_to_done(pdf_path)
+                        print("✅ Cancelled - kept original PDF")
+                        return
+                    elif conflict_choice == '2':
+                        self.move_to_done(pdf_path)
+                        print("✅ Skipped attachment and finished")
+                        return
+                    elif conflict_choice == '1':
+                        # Retry copy with replace_existing=True
+                        success, target_path, error = self._copy_to_publications_via_windows(pdf_to_copy, target_filename, replace_existing=True)
+                        if not success:
+                            print(f"❌ Copy failed: {error}")
+                            print("📝 Moving to manual review")
+                            self.move_to_manual_review(pdf_path)
+                            return
+                    else:
+                        # Invalid choice, default to manual review
+                        print(f"❌ Copy failed: {error}")
+                        print("📝 Moving to manual review")
+                        self.move_to_manual_review(pdf_path)
+                        return
+                else:
+                    # File doesn't exist anymore (race condition?), proceed with manual review
+                    print(f"❌ Copy failed: {error}")
+                    print("📝 Moving to manual review")
+                    self.move_to_manual_review(pdf_path)
+                    return
+            else:
+                print(f"❌ Copy failed: {error}")
+                print("📝 Moving to manual review")
+                self.move_to_manual_review(pdf_path)
+                return
         
         print(f"✅ Copied")
         
@@ -11593,14 +12024,12 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         This is called on startup and periodically while daemon is idle to keep
         the cache fresh for fast fuzzy matching.
+        
+        Uses unified publications API to work with both WSL-accessible and cloud drive paths.
         """
         try:
-            # List all PDF files in publications directory
-            pdf_files = []
-            if self.publications_dir.exists():
-                # Use glob to get all PDFs
-                pdf_paths = list(self.publications_dir.glob("*.pdf"))
-                pdf_files = [p.name for p in pdf_paths]
+            # List all PDF files using unified API
+            pdf_files = self._list_pdfs_in_publications()
             
             # Save to cache file
             cache_data = {
