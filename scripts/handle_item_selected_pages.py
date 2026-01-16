@@ -8,6 +8,7 @@ and navigation handlers.
 from typing import Dict, List
 from shared_tools.ui.navigation import Page, NavigationResult
 from shared_tools.utils.filename_generator import FilenameGenerator
+from shared_tools.utils.enrichment_ui import parse_index_selection, clear_enrichment_context
 
 
 def create_review_and_proceed_page(daemon) -> Page:
@@ -238,6 +239,184 @@ def create_review_and_proceed_page(daemon) -> Page:
         default='y',
         back_page=None,  # Top level
         quit_action=quit_action
+    )
+
+
+def create_enrichment_review_auto_page(daemon) -> Page:
+    """Auto-accept enrichment review page (timeout defaults to apply)."""
+    from shared_tools.daemon.enrichment_display import display_enrichment_summary
+    from shared_tools.ui.colors import Colors, ColorScheme
+
+    def content(ctx):
+        enrich = ctx.get('enrichment') or {}
+        status = enrich.get('status')
+        reason = enrich.get('reason')
+        lines = [
+            "Online enrichment was found and auto-accepted by match policy.",
+            f"Status: {status or '(unknown)'}" + (f" | reason: {reason}" if reason else ""),
+            "",
+            "  (y/Enter) Apply enrichment and continue",
+            "  (n) Skip enrichment and continue",
+            f"  (timeout) Defaults to apply after {daemon.prompt_timeout}s",
+        ]
+        # Print diff summary (side-effect is acceptable here for clarity)
+        zotero_metadata = enrich.get('zotero_metadata') or {}
+        candidate = enrich.get('candidate') or {}
+        plan = enrich.get('plan') or {}
+        display_enrichment_summary(zotero_metadata, candidate, plan, heading="ENRICHMENT REVIEW (AUTO-ACCEPT)")
+        return lines
+
+    def handler_y(ctx):
+        enrich = ctx.get('enrichment') or {}
+        item_key = ctx.get('item_key')
+        plan = enrich.get('plan') or {}
+        candidate = enrich.get('candidate') or {}
+        if item_key and plan:
+            result = daemon.enrichment_workflow.apply_plan(
+                daemon.zotero_processor,
+                item_key,
+                plan,
+                candidate_metadata=candidate,
+            )
+            applied = result.get('applied', [])
+            failed = result.get('failed', [])
+            if applied:
+                print(Colors.colorize(f"✅ Enrichment applied to Zotero ({item_key}): {', '.join(applied)}", ColorScheme.SUCCESS))
+            if failed:
+                print(Colors.colorize(f"⚠️  Enrichment failed for fields: {', '.join(failed)}", ColorScheme.ERROR))
+        # Prevent stale reuse / re-apply if navigating again
+        clear_enrichment_context(ctx)
+        return NavigationResult.show_page('review_and_proceed')
+
+    def handler_n(ctx):
+        clear_enrichment_context(ctx)
+        return NavigationResult.show_page('review_and_proceed')
+
+    return Page(
+        page_id='enrichment_review_auto',
+        title='ENRICHMENT REVIEW',
+        content=content,
+        prompt='\nApply enrichment? [y/n]: ',
+        valid_inputs=['y', 'n'],
+        handlers={'y': handler_y, 'n': handler_n},
+        default='y',
+        timeout_seconds=daemon.prompt_timeout,
+        back_page=None,
+        quit_action=None,
+    )
+
+
+def create_enrichment_review_manual_page(daemon) -> Page:
+    """Manual-review enrichment page (timeout defaults to reject/skip)."""
+    from shared_tools.daemon.enrichment_display import display_enrichment_summary
+    from shared_tools.ui.colors import Colors, ColorScheme
+
+    def content(ctx):
+        enrich = ctx.get('enrichment') or {}
+        status = enrich.get('status')
+        reason = enrich.get('reason')
+        lines = [
+            "Online enrichment was found but requires manual review.",
+            f"Status: {status or '(unknown)'}" + (f" | reason: {reason}" if reason else ""),
+            "",
+            "  (a) Apply all suggested fields (fillable + overwrite manual/conflicts)",
+            "  (s) Select which fields to apply",
+            "  (n/Enter) Skip enrichment",
+            f"  (timeout) Defaults to skip after {daemon.prompt_timeout * 2}s",
+        ]
+        zotero_metadata = enrich.get('zotero_metadata') or {}
+        candidate = enrich.get('candidate') or {}
+        plan = enrich.get('plan') or {}
+        display_enrichment_summary(zotero_metadata, candidate, plan, heading="ENRICHMENT REVIEW (MANUAL)")
+        return lines
+
+    def _apply(ctx, *, selected_fill: List[str], selected_overwrite: List[str]):
+        enrich = ctx.get('enrichment') or {}
+        item_key = ctx.get('item_key')
+        plan = enrich.get('plan') or {}
+        candidate = enrich.get('candidate') or {}
+        if not item_key or not plan:
+            return {"applied": [], "failed": []}
+
+        updates = plan.get('updates') or {}
+        subset_plan = {**plan, "updates": {k: updates[k] for k in selected_fill if k in updates}}
+        overwrite_set = set(selected_overwrite)
+        return daemon.enrichment_workflow.apply_plan(
+            daemon.zotero_processor,
+            item_key,
+            subset_plan,
+            overwrite_fields=overwrite_set,
+            candidate_metadata=candidate,
+        )
+
+    def handler_a(ctx):
+        enrich = ctx.get('enrichment') or {}
+        plan = enrich.get('plan') or {}
+        updates = plan.get('updates') or {}
+        manual_fields = plan.get('manual_fields') or []
+        result = _apply(ctx, selected_fill=list(updates.keys()), selected_overwrite=list(manual_fields))
+        item_key = ctx.get('item_key')
+        applied = result.get('applied', [])
+        failed = result.get('failed', [])
+        if item_key and applied:
+            print(Colors.colorize(f"✅ Enrichment applied to Zotero ({item_key}): {', '.join(applied)}", ColorScheme.SUCCESS))
+        if item_key and failed:
+            print(Colors.colorize(f"⚠️  Enrichment failed for fields: {', '.join(failed)}", ColorScheme.ERROR))
+        clear_enrichment_context(ctx)
+        return NavigationResult.show_page('review_and_proceed')
+
+    def handler_s(ctx):
+        enrich = ctx.get('enrichment') or {}
+        plan = enrich.get('plan') or {}
+        updates = plan.get('updates') or {}
+        manual_fields = plan.get('manual_fields') or []
+        fields = list(updates.keys()) + list(manual_fields)
+        if not fields:
+            print("No selectable enrichment fields.")
+            clear_enrichment_context(ctx)
+            return NavigationResult.show_page('review_and_proceed')
+
+        print("\nSelectable fields:")
+        for i, f in enumerate(fields, start=1):
+            kind = "fill" if f in updates else "manual"
+            print(f"  [{i}] ({kind}) {f}")
+        sel = input("Select fields to apply (e.g., 1,3-4) or Enter to cancel: ").strip()
+        idxs = parse_index_selection(sel, len(fields))
+        if not idxs:
+            print("Skipped applying enrichment.")
+            clear_enrichment_context(ctx)
+            return NavigationResult.show_page('review_and_proceed')
+
+        chosen = [fields[i - 1] for i in idxs]
+        chosen_fill = [f for f in chosen if f in updates]
+        chosen_manual = [f for f in chosen if f in manual_fields]
+        result = _apply(ctx, selected_fill=chosen_fill, selected_overwrite=chosen_manual)
+
+        item_key = ctx.get('item_key')
+        applied = result.get('applied', [])
+        failed = result.get('failed', [])
+        if item_key and applied:
+            print(Colors.colorize(f"✅ Enrichment applied to Zotero ({item_key}): {', '.join(applied)}", ColorScheme.SUCCESS))
+        if item_key and failed:
+            print(Colors.colorize(f"⚠️  Enrichment failed for fields: {', '.join(failed)}", ColorScheme.ERROR))
+        clear_enrichment_context(ctx)
+        return NavigationResult.show_page('review_and_proceed')
+
+    def handler_n(ctx):
+        clear_enrichment_context(ctx)
+        return NavigationResult.show_page('review_and_proceed')
+
+    return Page(
+        page_id='enrichment_review_manual',
+        title='ENRICHMENT REVIEW',
+        content=content,
+        prompt='\nApply enrichment? [a/s/n]: ',
+        valid_inputs=['a', 's', 'n'],
+        handlers={'a': handler_a, 's': handler_s, 'n': handler_n},
+        default='n',
+        timeout_seconds=daemon.prompt_timeout * 2,
+        back_page=None,
+        quit_action=None,
     )
 
 
@@ -1391,6 +1570,8 @@ def create_all_pages(daemon) -> Dict[str, Page]:
         Dictionary mapping page_id to Page objects
     """
     return {
+        'enrichment_review_auto': create_enrichment_review_auto_page(daemon),
+        'enrichment_review_manual': create_enrichment_review_manual_page(daemon),
         'review_and_proceed': create_review_and_proceed_page(daemon),
         'edit_tags': create_edit_tags_page(daemon),
         'proceed_after_edit': create_proceed_after_edit_page(daemon),

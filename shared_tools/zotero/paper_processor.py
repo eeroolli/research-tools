@@ -485,6 +485,8 @@ class ZoteroPaperProcessor:
             True if successful, False otherwise
         """
         try:
+            normalized_field = self._normalize_field_name(field_name)
+
             # Get current item
             response = requests.get(
                 f"{self.base_url}/items/{item_key}",
@@ -498,13 +500,13 @@ class ZoteroPaperProcessor:
             item_data = response.json().get('data', {})
             
             # Check if field is empty/missing
-            current_value = item_data.get(field_name, '').strip()
+            current_value = str(item_data.get(normalized_field, '') or '').strip()
             if current_value:
                 # Field already has a value, don't update
                 return True
             
             # Update field with new value
-            item_data[field_name] = field_value
+            item_data[normalized_field] = field_value
             
             # Write changes back
             response = requests.patch(
@@ -519,6 +521,101 @@ class ZoteroPaperProcessor:
         except Exception as e:
             print(f"Error updating item field: {e}")
             return False
+
+    def update_item_field(self, item_key: str, field_name: str, field_value) -> bool:
+        """Update (overwrite) a Zotero item field regardless of existing value.
+
+        This is used for explicitly user-approved enrichment overwrites.
+
+        Args:
+            item_key: Zotero item key
+            field_name: Field name (Zotero API key or normalized metadata key)
+            field_value: Value to set
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            normalized_field = self._normalize_field_name(field_name)
+
+            # Get current item (need version for safe patch)
+            response = requests.get(
+                f"{self.base_url}/items/{item_key}",
+                headers=self.headers,
+                timeout=10
+            )
+            if response.status_code != 200:
+                return False
+
+            item_json = response.json()
+            item_data = item_json.get('data', {})
+            version = item_json.get('version')
+            if not version:
+                # Fallback: try header-based version if present
+                version = response.headers.get('Last-Modified-Version')
+
+            item_data[normalized_field] = field_value
+
+            update_headers = {**self.headers}
+            if version is not None:
+                update_headers['If-Unmodified-Since-Version'] = str(version)
+
+            # Patch only the fields we intend to update plus key/version if available
+            patch_data = {'key': item_key, normalized_field: field_value}
+            if version is not None:
+                patch_data['version'] = int(version) if str(version).isdigit() else version
+
+            update_response = requests.patch(
+                f"{self.base_url}/items/{item_key}",
+                headers=update_headers,
+                json=patch_data,
+                timeout=10
+            )
+            # Zotero returns 204 No Content on success for key-based writes
+            return update_response.status_code in (200, 204)
+        except Exception as e:
+            print(f"Error overwriting item field: {e}")
+            return False
+
+    def _normalize_field_name(self, field_name: str) -> str:
+        """Map common metadata field names to Zotero API item data keys.
+
+        Accepts either already-correct Zotero keys (e.g., 'DOI', 'abstractNote')
+        or normalized metadata keys (e.g., 'doi', 'abstract', 'journal').
+        """
+        if not field_name:
+            return field_name
+
+        # Preserve exact Zotero keys commonly used elsewhere in this repo
+        passthrough = {
+            'url',
+            'abstractNote',
+            'publicationTitle',
+            'DOI',
+            'ISBN',
+            'ISSN',
+            'language',
+            'title',
+            'date',
+            'volume',
+            'issue',
+            'pages',
+            'publisher',
+        }
+        if field_name in passthrough:
+            return field_name
+
+        key = str(field_name)
+        lower = key.lower()
+        mapping = {
+            'doi': 'DOI',
+            'isbn': 'ISBN',
+            'issn': 'ISSN',
+            'journal': 'publicationTitle',
+            'abstract': 'abstractNote',
+            'year': 'date',
+        }
+        return mapping.get(lower, field_name)
     
     def update_item_tags(self, item_key: str, add_tags: list = None, remove_tags: list = None) -> bool:
         """Update tags on an existing Zotero item.

@@ -56,6 +56,7 @@ For detailed development status, technical architecture, and upcoming features, 
 - ✅ Interactive review and approval with 3-step workflow
 - ✅ Local Zotero database search with enhanced UX
 - ✅ Metadata comparison and field-by-field merging
+- ✅ **Online enrichment (auto)** - When you pick an existing Zotero item, the daemon auto-runs online search and shows an Enrichment Review page (auto-accept applies fill-only updates by default; manual-review supports explicit choices)
 - ✅ Duplicate detection and conflict resolution
 - ✅ Smart filename generation
 - ✅ Manual processing option for ambiguous cases
@@ -150,6 +151,15 @@ When a Zotero match is found, users get a sophisticated 3-step process:
 - Conflict resolution with filename editing (when file exists)
 - Smart filename generation and duplicate handling
 - Complete file management and cleanup
+
+### Enrichment behavior (existing items)
+- After selecting an existing Zotero item, the daemon automatically:
+  - Searches online (CrossRef/arXiv/etc.), evaluates with a match policy
+  - Shows an **ENRICHMENT REVIEW** page before proceeding
+    - Auto-accept: defaults to apply after timeout (or Enter)
+    - Manual review: defaults to skip after timeout; allows applying all or selecting fields (including explicit overwrites)
+
+Configuration: `config.conf [ENRICHMENT]` controls thresholds, weights, and field policy for what can be auto-filled vs manual.
 
 ### PDF Splitting Notes
 - Two-up splits use content-based gutter detection with an outer-edge fallback for skewed scans

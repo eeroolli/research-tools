@@ -25,8 +25,11 @@ def display_enrichment_summary(
             current = zotero_metadata.get(field, "")
             source = online_metadata.get(field, val)
             print(f"  {field}:")
-            print(Colors.colorize(f"    Zotero: {current or '(empty)'}", ColorScheme.MUTED))
-            print(Colors.colorize(f"    Online: {source}", ColorScheme.SUCCESS))
+            # Source coloring:
+            # - Zotero values: green
+            # - Auto-enriched online values: turquoise
+            print(Colors.colorize(f"    Zotero: {current or '(empty)'}", ColorScheme.ENRICH_ZOTERO))
+            print(Colors.colorize(f"    Online: {source}", ColorScheme.ENRICH_AUTO))
     else:
         print(Colors.colorize("\nNo fillable fields detected.", ColorScheme.MUTED))
 
@@ -36,5 +39,8 @@ def display_enrichment_summary(
             z_val = zotero_metadata.get(field, "")
             o_val = online_metadata.get(field, "")
             print(f"  {field}:")
-            print(Colors.colorize(f"    Zotero: {z_val or '(empty)'}", ColorScheme.MUTED))
-            print(Colors.colorize(f"    Online: {o_val or '(empty)'}", ColorScheme.MUTED))
+            # Source coloring:
+            # - Zotero values: green
+            # - Manual-choice online values: orange
+            print(Colors.colorize(f"    Zotero: {z_val or '(empty)'}", ColorScheme.ENRICH_ZOTERO))
+            print(Colors.colorize(f"    Online: {o_val or '(empty)'}", ColorScheme.ENRICH_MANUAL))

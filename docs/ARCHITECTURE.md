@@ -27,6 +27,7 @@ shared_tools/daemon/
 ├── metadata_workflow.py  # Metadata extraction orchestration
 ├── zotero_workflow.py    # Zotero search, matching, attachment
 ├── enrichment_workflow.py# Online enrichment orchestration (match policy + planner)
+├── enrichment_display.py # Console rendering for enrichment summaries
 ├── user_interaction.py   # Menus, prompts, input handling
 ├── display.py            # Metadata formatting and display
 ├── exceptions.py         # Exception hierarchy
@@ -61,6 +62,13 @@ shared_tools/metadata/
 ├── enrichment_planner.py # Field-level update planning for enrichment
 └── ...                   # Other metadata modules
 ```
+
+### Enrichment Workflow (`enrichment_workflow.py`)
+
+- Evaluates online candidates (CrossRef/arXiv/etc.) with a match policy
+- Builds a fill-only update plan (field policy-driven)
+- Applies safe fields to Zotero on auto-accept and logs applied/failed fields
+- Provides summary rendering via `enrichment_display.py`
 
 ## Key Modules
 
@@ -174,6 +182,10 @@ Paper Processor (paper_processor.py)
     └── Ollama Extraction → AI-based extraction (final fallback)
     ↓
 Zotero Search (zotero_workflow.py)
+    ↓
+Online Enrichment (enrichment_workflow.py)
+    ├── Auto-accept: when an existing Zotero item is selected, best candidate is evaluated and shown in an ENRICHMENT REVIEW page; defaults to apply fill-only updates on timeout/Enter
+    └── Manual review: ENRICHMENT REVIEW page defaults to skip on timeout; user can apply all or select fields (including explicit overwrites)
     ↓
 User Interaction (user_interaction.py)
     ↓

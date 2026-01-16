@@ -77,9 +77,23 @@ class ColorScheme:
     
     # Timeout messages (low contrast - low information value)
     TIMEOUT = Colors.BRIGHT_BLACK
+
+    # Muted/low-contrast secondary text
+    MUTED = Colors.BRIGHT_BLACK
     
     # Success/Error
     SUCCESS = Colors.BRIGHT_GREEN
     ERROR = Colors.BRIGHT_RED
     WARNING = Colors.BRIGHT_YELLOW
+
+    # Alias (some modules use WARN)
+    WARN = WARNING
+
+    # Enrichment diff colors (source-based)
+    # - Zotero values (already present)
+    ENRICH_ZOTERO = Colors.BRIGHT_GREEN
+    # - Online values that will be auto-enriched (fillable)
+    ENRICH_AUTO = Colors.BRIGHT_CYAN
+    # - Online values requiring user choice / manual review
+    ENRICH_MANUAL = Colors.BRIGHT_YELLOW
 

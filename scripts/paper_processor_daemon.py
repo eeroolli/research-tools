@@ -11298,9 +11298,6 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         # Show detailed metadata and give option to review/edit before proceeding
         self._display_zotero_item_details(selected_item)
-
-        # Auto-enrichment attempt (non-blocking)
-        self._auto_enrich_selected_item(metadata, selected_item)
         
         # Create context
         context = ItemSelectedContext(
@@ -11314,13 +11311,24 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         # Add daemon instance to context dict for page handlers
         ctx_dict = context.to_dict()
         ctx_dict['daemon'] = self
+
+        # Enrichment evaluation (store in context; apply via page). Clear any stale data first.
+        ctx_dict.pop('enrichment', None)
+        enrichment_bundle = self._auto_enrich_selected_item(metadata, selected_item)
+        start_page = 'review_and_proceed'
+        if enrichment_bundle and enrichment_bundle.get('status') != 'reject':
+            ctx_dict['enrichment'] = enrichment_bundle
+            if enrichment_bundle.get('status') == 'auto_accept':
+                start_page = 'enrichment_review_auto'
+            else:
+                start_page = 'enrichment_review_manual'
         
         # Create pages and navigation engine
         pages = create_all_pages(self)
         engine = NavigationEngine(pages, timeout_seconds=self.prompt_timeout)
         
-        # Run page flow starting from REVIEW & PROCEED
-        result = engine.run_page_flow('review_and_proceed', ctx_dict)
+        # Run page flow starting from enrichment review (if any) or REVIEW & PROCEED
+        result = engine.run_page_flow(start_page, ctx_dict)
         
         # Handle navigation results
         if result.type == result.Type.RETURN_TO_CALLER:
@@ -11369,12 +11377,16 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         print("⚠️  Unexpected navigation result")
         return
 
-    def _auto_enrich_selected_item(self, extracted_metadata: dict, zotero_item: dict) -> None:
-        """Automatically attempt online enrichment for an existing Zotero item."""
+    def _auto_enrich_selected_item(self, extracted_metadata: dict, zotero_item: dict) -> dict | None:
+        """Evaluate online enrichment for an existing Zotero item.
+
+        Returns an enrichment bundle (decision+plan+candidate) or None if no candidates.
+        Does NOT apply any updates; application is handled by the enrichment review page.
+        """
         try:
             item_key = zotero_item.get('key') or zotero_item.get('item_key')
             if not item_key:
-                return
+                return None
 
             zotero_metadata = self.convert_zotero_item_to_metadata(zotero_item) or {}
             # Use Zotero metadata as base; supplement with extracted fields if missing
@@ -11398,40 +11410,30 @@ if ($hwnd -ne [IntPtr]::Zero) {{
 
             candidates = self.enrichment_workflow.search_online(search_base, additional_candidates=additional_candidates)
             if not candidates:
-                return
+                return None
 
             summary = self.enrichment_workflow.evaluate_and_plan(zotero_metadata, candidates)
             decision = summary.get("decision")
             plan = summary.get("plan")
             candidate = summary.get("candidate")
             if not decision or not plan or not candidate:
-                return
+                return None
 
             status = decision.get("status")
             reason = decision.get("reason")
 
-            if status == "auto_accept":
-                display_enrichment_summary(zotero_metadata, candidate, plan, heading="AUTO ENRICHMENT (ONLINE)")
-                apply_result = self.enrichment_workflow.apply_plan(
-                    self.zotero_processor, item_key, plan
-                )
-                applied = apply_result.get("applied", [])
-                failed = apply_result.get("failed", [])
-                if applied:
-                    print(Colors.colorize(f"Auto-applied enrichment fields to Zotero ({item_key}): {', '.join(applied)}", ColorScheme.SUCCESS))
-                if failed:
-                    print(Colors.colorize(f"Failed to apply fields: {', '.join(failed)}", ColorScheme.ERROR))
-                self.logger.info(
-                    "Auto-enrichment applied",
-                    extra={"item_key": item_key, "applied": applied, "failed": failed},
-                )
-            elif status == "manual_review":
-                print(Colors.colorize(f"\nEnrichment available but requires manual review (reason: {reason}). Use option [5] to review/apply.", ColorScheme.WARN))
-            else:
-                # reject or weak match; do nothing
-                self.logger.debug("Auto-enrichment skipped", extra={"item_key": item_key, "status": status, "reason": reason})
+            return {
+                "status": status,
+                "reason": reason,
+                "item_key": item_key,
+                "zotero_metadata": zotero_metadata,
+                "candidate": candidate,
+                "decision": decision,
+                "plan": plan,
+            }
         except Exception as e:
             self.logger.warning(f"Auto-enrichment failed: {e}")
+            return None
     
     def _process_selected_item(self, pdf_path: Path, zotero_item: dict, target_filename: str, metadata: dict = None, preprocessed_pdf: Path = None, preprocessing_state: dict = None):
         """Process selected Zotero item: copy PDF and attach.

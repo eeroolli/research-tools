@@ -22,13 +22,29 @@ class EnrichmentWorkflow:
         self.planner = planner or EnrichmentPlanner()
         self.logger = logger or logging.getLogger(__name__)
 
-    def search_online(self, metadata: Dict, max_results: int = 5) -> List[Dict]:
-        """Perform online search using available API clients in metadata_processor."""
+    def search_online(self, metadata: Dict, max_results: int = 5, additional_candidates: List[Dict] = None) -> List[Dict]:
+        """Perform online search using available API clients in metadata_processor.
+        
+        Args:
+            metadata: Base metadata for search queries
+            max_results: Maximum results per API source
+            additional_candidates: Optional list of pre-fetched candidates (e.g., national-library metadata)
+                                  These are included in the candidate pool for evaluation.
+        
+        Returns:
+            List of candidate metadata dicts from all sources
+        """
         results = []
         title = metadata.get("title")
         authors = metadata.get("authors", [])
         year = metadata.get("year")
         journal = metadata.get("journal")
+
+        # Include additional candidates first (e.g., national-library metadata)
+        if additional_candidates:
+            for cand in additional_candidates:
+                if cand and isinstance(cand, dict):
+                    results.append(cand)
 
         try:
             if hasattr(self.metadata_processor, "crossref"):
@@ -95,11 +111,32 @@ class EnrichmentWorkflow:
             plan = None
         return {"candidate": best, "decision": decision, "plan": plan}
 
-    def apply_plan(self, zotero_processor, item_key: str, plan: Dict) -> Dict:
-        """Apply plan updates to Zotero via the provided processor."""
+    def apply_plan(
+        self,
+        zotero_processor,
+        item_key: str,
+        plan: Dict,
+        *,
+        overwrite_fields: Optional[set] = None,
+        candidate_metadata: Optional[Dict] = None,
+    ) -> Dict:
+        """Apply plan updates to Zotero via the provided processor.
+
+        By default, applies only fill-only updates (Zotero empty -> online value).
+
+        Args:
+            zotero_processor: Zotero API processor
+            item_key: Zotero item key
+            plan: Enrichment plan dict (must include 'updates')
+            overwrite_fields: Optional set of fields to overwrite regardless of current Zotero value.
+                             These are assumed to be explicitly user-approved.
+            candidate_metadata: Candidate metadata dict providing values for overwrite_fields.
+        """
         updates = plan.get("updates", {}) if plan else {}
         applied = []
         failed = []
+
+        # Apply fill-only updates
         for field, value in updates.items():
             ok = False
             try:
@@ -110,10 +147,60 @@ class EnrichmentWorkflow:
                 applied.append(field)
             else:
                 failed.append(field)
+
+        # Apply explicit overwrites (user-approved conflicts)
+        if overwrite_fields:
+            cand = candidate_metadata or {}
+            for field in overwrite_fields:
+                # Skip fields already attempted via fill-only path
+                if field in updates:
+                    continue
+                if field == "tags":
+                    # Safe behavior: add candidate tags (do not remove existing tags)
+                    try:
+                        raw_tags = cand.get("tags") or []
+                        # Accept list[str] or list[{'tag':...}]
+                        tag_names = []
+                        for t in raw_tags:
+                            if isinstance(t, dict):
+                                name = t.get("tag", "")
+                            else:
+                                name = str(t)
+                            name = (name or "").strip()
+                            if name:
+                                tag_names.append(name)
+                        ok = zotero_processor.update_item_tags(item_key, add_tags=tag_names, remove_tags=None)
+                    except Exception:
+                        ok = False
+                    if ok:
+                        applied.append(field)
+                    else:
+                        failed.append(field)
+                    continue
+
+                value = cand.get(field)
+                if value is None or value == "":
+                    failed.append(field)
+                    continue
+                ok = False
+                try:
+                    ok = zotero_processor.update_item_field(item_key, field, value)
+                except Exception:
+                    ok = False
+                if ok:
+                    applied.append(field)
+                else:
+                    failed.append(field)
+
         if applied or failed:
             self.logger.info(
                 "Enrichment apply results",
-                extra={"item_key": item_key, "applied": applied, "failed": failed},
+                extra={
+                    "item_key": item_key,
+                    "applied": applied,
+                    "failed": failed,
+                    "overwrite_fields": sorted(list(overwrite_fields)) if overwrite_fields else [],
+                },
             )
         return {"applied": applied, "failed": failed}
 
