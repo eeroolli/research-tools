@@ -21,12 +21,18 @@ import shutil
 import configparser
 import os
 import json
+import io
 from typing import Optional, Tuple, List, Dict
 import subprocess
 import socket
 import threading
 import re
 from pathlib import Path
+try:
+    import select
+    HAS_SELECT = True
+except ImportError:
+    HAS_SELECT = False
 from watchdog.observers.polling import PollingObserver as Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -47,6 +53,9 @@ from shared_tools.utils.isbn_matcher import ISBNMatcher
 # Import border remover for scanned documents
 from shared_tools.pdf.border_remover import BorderRemover
 
+# Import color utilities
+from shared_tools.ui.colors import ColorScheme, Colors
+
 
 class PaperProcessorDaemon:
     """Main daemon class."""
@@ -60,6 +69,8 @@ class PaperProcessorDaemon:
         """
         self.watch_dir = Path(watch_dir)
         self.pid_file = self.watch_dir / ".daemon.pid"
+        self.publications_cache_file = self.watch_dir / ".publications_cache.json"
+        self.publications_copy_count = 0  # Track PDF copies for cache refresh
         self.debug = debug
         
         # Load configuration for publications directory
@@ -86,6 +97,9 @@ class PaperProcessorDaemon:
         self.ollama_process = None
         self.ollama_ready = False
         self.grobid_ready = False
+        
+        # Window management
+        self._terminal_window_handle = None  # Store terminal window handle for positioning
         
         print("🚀 Initializing services...")
         self._initialize_services()
@@ -153,15 +167,23 @@ class PaperProcessorDaemon:
         self.ollama_port = self.config.getint('OLLAMA', 'port', fallback=11434)
         self.ollama_base_url = self.config.get('OLLAMA', 'base_url', fallback='http://localhost:11434')
         
+        # Get DAEMON configuration
+        self.remote_check_host = self.config.get('DAEMON', 'remote_check_host', fallback='').strip()
+        
         # Get GROBID configuration
+        self.grobid_host = self.config.get('GROBID', 'host', fallback='localhost').strip()
+        self.grobid_port = self.config.getint('GROBID', 'port', fallback=8070)
         self.grobid_auto_start = self.config.getboolean('GROBID', 'auto_start', fallback=True)
         self.grobid_auto_stop = self.config.getboolean('GROBID', 'auto_stop', fallback=True)
         self.grobid_container_name = self.config.get('GROBID', 'container_name', fallback='grobid')
-        self.grobid_port = self.config.getint('GROBID', 'port', fallback=8070)
         self.grobid_max_pages = self.config.getint('GROBID', 'max_pages', fallback=2)
         
         # Get border detection configuration
         self.border_max_width = self.config.getint('BORDER', 'max_border_width', fallback=600)
+        
+        # Get UX configuration
+        self.page_offset_timeout = self.config.getint('UX', 'page_offset_timeout', fallback=10)
+        self.prompt_timeout = self.config.getint('UX', 'prompt_timeout', fallback=10)
         
         # Check if publications directory is accessible
         self._validate_publications_directory()
@@ -391,14 +413,27 @@ class PaperProcessorDaemon:
             'tesseract_path': self.config.get('PROCESSING', 'tesseract_path', fallback=None)
         }
         
-        self.grobid_client = GrobidClient(f"http://localhost:{self.grobid_port}", config=grobid_config)
+        # Construct GROBID URL from config
+        grobid_url = f"http://{self.grobid_host}:{self.grobid_port}"
+        self.grobid_client = GrobidClient(grobid_url, config=grobid_config)
         
+        # Check if GROBID is local or remote
+        is_local_grobid = (self.grobid_host == 'localhost' or 
+                          self.grobid_host == '127.0.0.1' or 
+                          self.grobid_host == '::1')
+        
+        if is_local_grobid:
+            print(f"    📍 GROBID: Local (localhost:{self.grobid_port})")
+        else:
+            print(f"    📍 GROBID: Remote ({self.grobid_host}:{self.grobid_port})")
+        
+        # Test connectivity to GROBID
         if self.grobid_client.is_available(verbose=False):
             self.grobid_ready = True
             print("    ✅ GROBID: Available")
         else:
-            # Try to start GROBID container
-            if self.grobid_auto_start:
+            # Only try to start Docker container if GROBID is local
+            if is_local_grobid and self.grobid_auto_start:
                 print("    🐳 GROBID: Starting Docker container...")
                 if self._start_grobid_container():
                     self.grobid_ready = True
@@ -409,7 +444,11 @@ class PaperProcessorDaemon:
                     print("      💡 Tip: Check if Docker is running and port 8070 is free")
             else:
                 self.grobid_ready = False
-                print("    ❌ GROBID: Not available (will use fallback methods)")
+                if is_local_grobid:
+                    print("    ❌ GROBID: Not available (will use fallback methods)")
+                else:
+                    print(f"    ❌ GROBID: Cannot reach {grobid_url} (will use fallback methods)")
+                    print(f"      💡 Tip: Check network connectivity and ensure GROBID is running on {self.grobid_host}")
         
         # Don't start Ollama yet - only when needed
         print("    ⏭️  Ollama: Will start when needed")
@@ -445,11 +484,16 @@ class PaperProcessorDaemon:
         return False
     
     def _start_grobid_container(self) -> bool:
-        """Start GROBID Docker container.
+        """Start GROBID Docker container (only for local GROBID).
         
         Returns:
             True if started successfully
         """
+        # Only manage Docker containers for local GROBID
+        if self.grobid_host != 'localhost' and self.grobid_host != '127.0.0.1' and self.grobid_host != '::1':
+            self.logger.info("Skipping Docker container management for remote GROBID")
+            return False
+        
         try:
             # Check if container already exists
             result = subprocess.run(['docker', 'ps', '-a', '--filter', f'name={self.grobid_container_name}', '--format', '{{.Names}}'], 
@@ -510,7 +554,12 @@ class PaperProcessorDaemon:
             return False
     
     def _stop_grobid_container(self):
-        """Stop GROBID Docker container if we started it."""
+        """Stop GROBID Docker container if we started it (only for local GROBID)."""
+        # Only manage Docker containers for local GROBID
+        if self.grobid_host != 'localhost' and self.grobid_host != '127.0.0.1' and self.grobid_host != '::1':
+            self.logger.info("Skipping Docker container stop for remote GROBID")
+            return
+        
         if not self.grobid_auto_stop:
             self.logger.info("⏭️  GROBID auto-stop disabled - leaving container running")
             return
@@ -759,28 +808,39 @@ class PaperProcessorDaemon:
         self._display_metadata_universal(metadata)
         
         print("-" * 40)
+        print("💡 Tip: You can edit any field (including year) by choosing option [2] Edit metadata")
     
-    def prompt_for_year(self, metadata: dict, allow_back: bool = False) -> dict:
+    def prompt_for_year(self, metadata: dict, allow_back: bool = False, force_prompt: bool = False) -> dict:
         """Prompt user for publication year if missing.
         
         Args:
             metadata: Metadata dict
             allow_back: If True, allows 'z' to go back
+            force_prompt: If True, prompts even if year is already set (allows changing)
             
         Returns:
             Updated metadata with year, or special string 'BACK'/'RESTART'
         """
-        # Skip if already confirmed earlier in this session
-        if metadata.get('_year_confirmed'):
+        # Skip if already confirmed earlier in this session (unless forcing)
+        if not force_prompt and metadata.get('_year_confirmed'):
             return metadata
-        if metadata.get('year'):
+        
+        current_year = metadata.get('year', '')
+        if current_year and not force_prompt:
             metadata['_year_confirmed'] = True
             return metadata
         
-        print("\n📅 Publication year not found in scan")
-        hint = "(or press Enter to skip"
+        if current_year:
+            print(f"\n📅 Current publication year: {current_year}")
+            hint = "(Enter to keep current"
+        else:
+            print("\n📅 Publication year not found in scan")
+            hint = "(or press Enter to skip"
+        
         if allow_back:
             hint += ", 'z' to back, 'r' to restart"
+        if current_year:
+            hint += ", or enter new year to change"
         hint += ")"
         
         try:
@@ -793,15 +853,26 @@ class PaperProcessorDaemon:
             return 'BACK'
         elif year_input == 'r':
             return 'RESTART'
+        elif year_input == '':
+            # Enter pressed - keep current or skip
+            if current_year:
+                print(f"✅ Keeping current year: {current_year}")
+                metadata['_year_confirmed'] = True
+            return metadata
         elif year_input and year_input != '':
             # Validate year format
             if year_input.isdigit() and len(year_input) == 4:
                 metadata['year'] = year_input
                 metadata['_year_confirmed'] = True
-                print(f"User provided year: {year_input}")
+                if current_year:
+                    print(f"✅ Year changed from {current_year} to {year_input}")
+                else:
+                    print(f"✅ Year set to: {year_input}")
                 self.logger.info(f"User provided year: {year_input}")
             else:
-                print("⚠️  Invalid year format (expected 4 digits)")
+                print("⚠️  Invalid year format (expected 4 digits, e.g., '2024')")
+                if current_year:
+                    print(f"   Keeping current year: {current_year}")
         
         return metadata
     
@@ -906,9 +977,9 @@ class PaperProcessorDaemon:
                               if typ == current_type)
             print(f"📄 Detected type: {current_name}")
             print()
-            print("[Enter] = Keep this type")
-            print("[1-9] = Change to a different type")
-            print("[q] = Cancel and skip this document")
+            print(Colors.colorize("[Enter] = Keep this type", ColorScheme.LIST))
+            print(Colors.colorize("[1-9] = Change to a different type", ColorScheme.LIST))
+            print(Colors.colorize("[q] = Cancel and skip this document", ColorScheme.LIST))
             print()
             
             print("Document types:")
@@ -943,17 +1014,17 @@ class PaperProcessorDaemon:
                 return None
         else:
             # No type detected - ask user to select
-            print("No document type detected. Please select:")
+            print(Colors.colorize("No document type detected. Please select:", ColorScheme.ACTION))
             print()
-            print("[1] Journal Article")
-            print("[2] Book Chapter")
-            print("[3] Conference Paper")
-            print("[4] Book")
-            print("[5] Thesis/Dissertation")
-            print("[6] Report")
-            print("[7] News Article")
-            print("[8] Working Paper/preprint")
-            print("[9] Other")
+            print(Colors.colorize("[1] Journal Article", ColorScheme.LIST))
+            print(Colors.colorize("[2] Book Chapter", ColorScheme.LIST))
+            print(Colors.colorize("[3] Conference Paper", ColorScheme.LIST))
+            print(Colors.colorize("[4] Book", ColorScheme.LIST))
+            print(Colors.colorize("[5] Thesis/Dissertation", ColorScheme.LIST))
+            print(Colors.colorize("[6] Report", ColorScheme.LIST))
+            print(Colors.colorize("[7] News Article", ColorScheme.LIST))
+            print(Colors.colorize("[8] Working Paper/preprint", ColorScheme.LIST))
+            print(Colors.colorize("[9] Other", ColorScheme.LIST))
             print()
             
             try:
@@ -990,13 +1061,16 @@ class PaperProcessorDaemon:
             ('TECHNICAL INFO', self._get_technical_fields())
         ]
         
+        # Check if metadata is confirmed (from Zotero or has item_key)
+        is_confirmed = metadata.get('item_key') or metadata.get('from_zotero', False)
+        
         # Display each group if it has non-empty fields
         for group_name, field_mapping in field_groups:
             group_fields = self._extract_group_fields(metadata, field_mapping)
             if group_fields:
-                print(f"\n{group_name}:")
+                print(Colors.colorize(f"\n{group_name}:", ColorScheme.PAGE_TITLE))
                 for field_name, field_value in group_fields.items():
-                    self._display_field(field_name, field_value)
+                    self._display_field(field_name, field_value, metadata, is_confirmed)
     
     def _get_basic_info_fields(self) -> dict:
         """Get field mapping for basic information."""
@@ -1119,36 +1193,62 @@ class PaperProcessorDaemon:
             return True  # Always show numeric values
         return True  # Default to showing other types
     
-    def _display_field(self, field_name: str, field_value):
-        """Display a single field with appropriate formatting.
+    def _display_field(self, field_name: str, field_value, metadata: dict = None, is_confirmed: bool = False):
+        """Display a single field with appropriate formatting and colors.
         
         Args:
             field_name: Display name for the field
             field_value: Value to display
+            metadata: Full metadata dict (for checking confirmation status)
+            is_confirmed: Whether metadata is confirmed (from Zotero)
         """
+        # Determine color for main metadata fields (Title, Authors, Year)
+        if field_name in ['Title', 'Authors', 'Year']:
+            if is_confirmed:
+                color = ColorScheme.METADATA_CONFIRMED
+            else:
+                color = ColorScheme.METADATA_UNCONFIRMED
+        else:
+            color = None
+        
         if field_name == 'Authors':
+            field_label = Colors.colorize(f"  {field_name}:", color) if color else f"  {field_name}:"
             if isinstance(field_value, list):
                 # Validate authors against Zotero if validator available
                 if self.author_validator:
                     validation = self.author_validator.validate_authors(field_value)
-                    print(f"  {field_name}:")
+                    print(field_label)
                     for author_info in validation['known_authors']:
                         author_name = author_info['name']
-                        print(f"    ✅ {author_name} (in Zotero)")
+                        author_display = Colors.colorize(author_name, color) if color else author_name
+                        print(f"    ✅ {author_display} (in Zotero)")
                         if author_info.get('alternatives'):
                             alts = ', '.join(author_info['alternatives'][:2])
                             print(f"       Other options: {alts}")
                     for author_info in validation['unknown_authors']:
-                        print(f"    🆕 {author_info['name']} (new author)")
+                        author_display = Colors.colorize(author_info['name'], color) if color else author_info['name']
+                        print(f"    🆕 {author_display} (new author)")
                 else:
                     # Fallback if validator not available
                     if len(field_value) > 3:
                         author_str = ', '.join(field_value[:3]) + f" (+{len(field_value)-3} more)"
                     else:
                         author_str = ', '.join(field_value)
-                    print(f"  {field_name}: {author_str}")
+                    author_display = Colors.colorize(author_str, color) if color else author_str
+                    print(f"{field_label} {author_display}")
             else:
-                print(f"  {field_name}: {field_value}")
+                value_display = Colors.colorize(str(field_value), color) if color else str(field_value)
+                print(f"{field_label} {value_display}")
+        
+        elif field_name == 'Title':
+            field_label = Colors.colorize(f"  {field_name}:", color) if color else f"  {field_name}:"
+            value_display = Colors.colorize(str(field_value), color) if color else str(field_value)
+            print(f"{field_label} {value_display}")
+        
+        elif field_name == 'Year':
+            field_label = Colors.colorize(f"  {field_name}:", color) if color else f"  {field_name}:"
+            value_display = Colors.colorize(str(field_value), color) if color else str(field_value)
+            print(f"{field_label} {value_display}")
         
         elif field_name == 'Abstract':
             if isinstance(field_value, str):
@@ -1212,12 +1312,12 @@ class PaperProcessorDaemon:
         print("\n🎯 ZOTERO MATCH FOUND!")
         print("What would you like to do with the scanned PDF?")
         print()
-        print("[1] 📎 Attach PDF to existing Zotero item")
-        print("[2] ✏️  Edit metadata before attaching")
-        print("[3] 🔍 Search Zotero again with different info")
-        print("[4] 📄 Create new Zotero item (ignore match)")
-        print("[5] ❌ Skip document")
-        print("  (q) Quit daemon")
+        print(Colors.colorize("[1] 📎 Attach PDF to existing Zotero item", ColorScheme.LIST))
+        print(Colors.colorize("[2] ✏️  Edit metadata before attaching", ColorScheme.LIST))
+        print(Colors.colorize("[3] 🔍 Search Zotero again with different info", ColorScheme.LIST))
+        print(Colors.colorize("[4] 📄 Create new Zotero item (ignore match)", ColorScheme.LIST))
+        print(Colors.colorize("[5] ❌ Skip document", ColorScheme.LIST))
+        print(Colors.colorize("  (q) Quit daemon", ColorScheme.LIST))
         print()
         
         while True:
@@ -1235,12 +1335,12 @@ class PaperProcessorDaemon:
         """
         print("\nWHAT WOULD YOU LIKE TO DO?")
         print()
-        print("[1] 📄 Create new Zotero item with extracted metadata")
-        print("[2] ✏️  Edit metadata before creating item")
-        print("[3] 🔍 Search Zotero with additional info")
-        print("[4] ❌ Skip document (not academic)")
-        print("[5] 📝 Manual processing later")
-        print("  (q) Quit daemon")
+        print(Colors.colorize("[1] 📄 Create new Zotero item with extracted metadata", ColorScheme.LIST))
+        print(Colors.colorize("[2] ✏️  Edit metadata before creating item", ColorScheme.LIST))
+        print(Colors.colorize("[3] 🔍 Search Zotero with additional info", ColorScheme.LIST))
+        print(Colors.colorize("[4] ❌ Skip document (not academic)", ColorScheme.LIST))
+        print(Colors.colorize("[5] 📝 Manual processing later", ColorScheme.LIST))
+        print(Colors.colorize("  (q) Quit daemon", ColorScheme.LIST))
         print()
         
         while True:
@@ -1260,7 +1360,7 @@ class PaperProcessorDaemon:
         1. Prompt for year if missing
         2. Let user select which authors to search by (and in what order)
         3. Search Zotero with ordered author search + year filter
-        4. Display matches with letter labels (A-Z)
+        4. Display matches with number labels (1-N)
         5. Let user select item or take action
         
         Args:
@@ -1436,11 +1536,11 @@ class PaperProcessorDaemon:
             # No matches after all fallbacks
             print(f"\n❌ No matches found in Zotero after trying relaxed filters for: {author_display}")
             print()
-            print("Options:")
-            print("[1] Enter a different year and search again")
-            print("[2] Proceed to create new Zotero item")
-            print("[3] Move to manual review")
-            print("  (z) Back to previous step")
+            print(Colors.colorize("Options:", ColorScheme.ACTION))
+            print(Colors.colorize("[1] Enter a different year and search again", ColorScheme.LIST))
+            print(Colors.colorize("[2] Proceed to create new Zotero item", ColorScheme.LIST))
+            print(Colors.colorize("[3] Move to manual review", ColorScheme.LIST))
+            print(Colors.colorize("  (z) Back to previous step", ColorScheme.LIST))
             print()
             
             while True:
@@ -1943,6 +2043,11 @@ class PaperProcessorDaemon:
         success, error_msg = self._copy_file_universal(pdf_path, target_path, replace_existing)
         
         if success:
+            # Increment copy counter and refresh cache after every 10 copies
+            self.publications_copy_count += 1
+            if self.publications_copy_count >= 10:
+                self._refresh_publications_cache()
+                self.publications_copy_count = 0
             return (True, target_path, None)
         else:
             return (False, None, error_msg)
@@ -1962,17 +2067,17 @@ class PaperProcessorDaemon:
         
         # Step 1: Document type selection
         # TODO: later to maximize portability this could be moved to a config file       
-        print("📚 What type of document is this?")
+        print(Colors.colorize("📚 What type of document is this?", ColorScheme.ACTION))
         print()
-        print("[1] Journal Article")
-        print("[2] Book Chapter")
-        print("[3] Conference Paper")
-        print("[4] Book")
-        print("[5] Thesis/Dissertation")
-        print("[6] Report")
-        print("[7] News Article")
-        print("[8] Working Paper/preprint")
-        print("[9] Other")
+        print(Colors.colorize("[1] Journal Article", ColorScheme.LIST))
+        print(Colors.colorize("[2] Book Chapter", ColorScheme.LIST))
+        print(Colors.colorize("[3] Conference Paper", ColorScheme.LIST))
+        print(Colors.colorize("[4] Book", ColorScheme.LIST))
+        print(Colors.colorize("[5] Thesis/Dissertation", ColorScheme.LIST))
+        print(Colors.colorize("[6] Report", ColorScheme.LIST))
+        print(Colors.colorize("[7] News Article", ColorScheme.LIST))
+        print(Colors.colorize("[8] Working Paper/preprint", ColorScheme.LIST))
+        print(Colors.colorize("[9] Other", ColorScheme.LIST))
         print()
         
         doc_type_map = {
@@ -2042,15 +2147,21 @@ class PaperProcessorDaemon:
         Returns:
             Complete metadata dict
         """
-        print("\n📝 MANUAL METADATA ENTRY")
+        print(Colors.colorize("\n📝 MANUAL METADATA ENTRY", ColorScheme.PAGE_TITLE))
         print("We'll search local Zotero as you type to help find matches.")
         print()
         
         metadata = partial_metadata.copy()
         
         # Get author
-        author = input("First author's last name: ").strip()
-        if author:
+        author = input("First author's last name (or 'z' to skip, 'r' to restart): ").strip()
+        if author.lower() == 'z':
+            # Skip author entry
+            pass
+        elif author.lower() == 'r':
+            # Restart - return special marker
+            return {'_restart': True}
+        elif author:
             metadata['authors'] = [author]
             
             # Search local Zotero by author
@@ -2081,18 +2192,24 @@ class PaperProcessorDaemon:
                         return self.convert_zotero_item_to_metadata(selected)
         
         # Continue with manual entry
-        title = input("\nPaper title: ").strip()
-        if title:
+        title = input("\nPaper title (or 'z' to skip, 'r' to restart): ").strip()
+        if title.lower() == 'r':
+            return {'_restart': True}
+        elif title and title.lower() != 'z':
             metadata['title'] = title
         
-        year = input("Publication year: ").strip()
-        if year:
+        year = input("Publication year (or 'z' to skip, 'r' to restart): ").strip()
+        if year.lower() == 'r':
+            return {'_restart': True}
+        elif year and year.lower() != 'z':
             metadata['year'] = year
         
         # Type-specific fields
         if doc_type in ['journal_article', 'conference_paper']:
-            journal = input("Journal/Conference name: ").strip()
-            if journal:
+            journal = input("Journal/Conference name (or 'z' to skip, 'r' to restart): ").strip()
+            if journal.lower() == 'r':
+                return {'_restart': True}
+            elif journal and journal.lower() != 'z':
                 metadata['journal'] = journal
         
         elif doc_type == 'book_chapter':
@@ -2436,14 +2553,30 @@ class PaperProcessorDaemon:
             online_metadata.get('year') if online_metadata else None,
             local_metadata.get('year') if local_metadata else None
         )
-        new_value = input("New year (or Enter to keep current): ").strip()
+        current_year = edited.get('year', '')
+        if current_year:
+            prompt_text = f"New year (current: {current_year}, Enter to keep, or 'clear' to remove): "
+        else:
+            prompt_text = "New year (Enter to skip, or 'clear' to remove): "
+        new_value = input(prompt_text).strip()
         if new_value:
-            edited['year'] = new_value
+            if new_value.lower() == 'clear':
+                edited['year'] = ''
+                edited.pop('_year_confirmed', None)  # Clear confirmation flag if year is cleared
+                print("✅ Year cleared")
+            elif new_value.isdigit() and len(new_value) == 4:
+                edited['year'] = new_value
+                edited.pop('_year_confirmed', None)  # Clear confirmation flag to allow re-editing
+                print(f"✅ Year updated to: {new_value}")
+            else:
+                print("⚠️  Invalid year format (expected 4 digits, e.g., '2024'). Year not changed.")
         elif online_metadata and online_metadata.get('year') and not edited.get('year'):
             edited['year'] = online_metadata['year']
+            edited.pop('_year_confirmed', None)  # Clear confirmation flag
             print(f"✅ Auto-filled from online: {online_metadata['year']}")
         elif local_metadata and local_metadata.get('year') and not edited.get('year'):
             edited['year'] = local_metadata['year']
+            edited.pop('_year_confirmed', None)  # Clear confirmation flag
             print(f"✅ Auto-filled from local: {local_metadata['year']}")
         
         # Journal/Source
@@ -2607,11 +2740,11 @@ class PaperProcessorDaemon:
         if suggestions:
             print(f"  💡 Suggestions: {' | '.join(suggestions)}")
         
-        print("Options:")
-        print("[Enter] Keep current")
-        print("[o] Use online abstract")
-        print("[l] Use local abstract")
-        print("[e] Edit manually")
+        print(Colors.colorize("Options:", ColorScheme.ACTION))
+        print(Colors.colorize("[Enter] Keep current", ColorScheme.LIST))
+        print(Colors.colorize("[o] Use online abstract", ColorScheme.LIST))
+        print(Colors.colorize("[l] Use local abstract", ColorScheme.LIST))
+        print(Colors.colorize("[e] Edit manually", ColorScheme.LIST))
         
         abstract_choice = input("Abstract choice: ").strip().lower()
         
@@ -2689,9 +2822,9 @@ class PaperProcessorDaemon:
             if local_tags_list:
                 print(f"  [Local]   {', '.join(local_tags_list)}")
             
-            print("\nTag editing options:")
-            print("  [Enter] = Keep current tags (or none)")
-            print("  [t]     = Edit tags interactively")
+            print(Colors.colorize("\nTag editing options:", ColorScheme.ACTION))
+            print(Colors.colorize("  [Enter] = Keep current tags (or none)", ColorScheme.LIST))
+            print(Colors.colorize("  [t]     = Edit tags interactively", ColorScheme.LIST))
             
             tag_choice = input("Choice: ").strip().lower()
             if tag_choice == 't':
@@ -2719,11 +2852,11 @@ class PaperProcessorDaemon:
                 display_note = local_note[:200] + "..." if len(local_note) > 200 else local_note
                 print(f"  [Local]   {display_note}")
             
-            print("\nNote editing options:")
-            print("  [Enter] = Keep current note (or none)")
-            print("  [o]     = Use online note")
-            print("  [l]     = Use local note")
-            print("  [e]     = Edit note manually")
+            print(Colors.colorize("\nNote editing options:", ColorScheme.ACTION))
+            print(Colors.colorize("  [Enter] = Keep current note (or none)", ColorScheme.LIST))
+            print(Colors.colorize("  [o]     = Use online note", ColorScheme.LIST))
+            print(Colors.colorize("  [l]     = Use local note", ColorScheme.LIST))
+            print(Colors.colorize("  [e]     = Edit note manually", ColorScheme.LIST))
             
             note_choice = input("Choice: ").strip().lower()
             
@@ -2771,7 +2904,7 @@ class PaperProcessorDaemon:
     
     def _display_numbered_field_comparison(self, current: dict, online: dict, local: dict, online_source: str = None):
         """Display numbered field comparison for bulk operations."""
-        print("\n📋 FIELD COMPARISON:")
+        print(Colors.colorize("\n📋 FIELD COMPARISON:", ColorScheme.PAGE_TITLE))
         print("=" * 80)
         
         # Map method names to display names
@@ -3123,7 +3256,7 @@ class PaperProcessorDaemon:
         local_tag_names = self._extract_tag_names(local_tags)
         
         # Show current tag sources
-        print("\n📋 CURRENT TAG SOURCES:")
+        print(Colors.colorize("\n📋 CURRENT TAG SOURCES:", ColorScheme.PAGE_TITLE))
         if current_tag_names:
             print(f"  {'Scan:':<12} {', '.join(current_tag_names)}")
         if online_tag_names:
@@ -3389,11 +3522,13 @@ class PaperProcessorDaemon:
         """Return True and exit gracefully if a running instance is detected.
         
         Behavior:
-        - If PID file exists and PID is alive, print message and exit(0)
-        - If PID file exists but PID is stale, remove PID file and continue
+        - If local PID file exists and PID is alive, print message and exit(0)
+        - If local PID file exists but PID is stale, remove PID file and continue
+        - If remote_check_host is configured, check for remote daemon
         - If no PID file, continue
         """
         try:
+            # Check local PID file
             if self.pid_file.exists():
                 try:
                     existing_pid_str = self.pid_file.read_text().strip()
@@ -3415,9 +3550,54 @@ class PaperProcessorDaemon:
                     self.logger.warning("Stale PID file found. Removing and starting new instance.")
                     self.pid_file.unlink(missing_ok=True)
                     return False
+            
+            # Check remote daemon if configured
+            if self.remote_check_host:
+                if self._check_remote_daemon():
+                    print(f"❌ Daemon already running on {self.remote_check_host}")
+                    print("   Please stop the remote daemon before starting a new instance.")
+                    sys.exit(1)
         except Exception:
             # On any unexpected error, continue without blocking startup
             return False
+        return False
+    
+    def _check_remote_daemon(self) -> bool:
+        """Check if daemon is running on remote machine.
+        
+        Returns:
+            True if remote daemon is running, False otherwise
+        """
+        try:
+            # Try to check remote PID file via SSH
+            # Format: ssh user@host "cat /path/to/.daemon.pid 2>/dev/null"
+            remote_pid_file_path = str(self.pid_file)
+            # Extract username from remote_check_host if format is user@host
+            if '@' in self.remote_check_host:
+                ssh_target = self.remote_check_host
+            else:
+                # Use default username (e.g., eero_22) or get from config
+                # For now, assume format is just hostname, user will configure as user@host if needed
+                ssh_target = self.remote_check_host
+            
+            # Try to read remote PID file
+            cmd = ['ssh', ssh_target, f'cat "{remote_pid_file_path}" 2>/dev/null']
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                try:
+                    remote_pid = int(result.stdout.strip())
+                    # Check if process is alive on remote machine
+                    check_cmd = ['ssh', ssh_target, f'kill -0 {remote_pid} 2>/dev/null']
+                    check_result = subprocess.run(check_cmd, capture_output=True, timeout=5)
+                    if check_result.returncode == 0:
+                        return True
+                except (ValueError, subprocess.TimeoutExpired):
+                    pass
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            # SSH not available or connection failed - assume no remote daemon
+            if self.debug:
+                self.logger.debug(f"Could not check remote daemon: {e}")
         return False
 
     def remove_pid_file(self):
@@ -3436,7 +3616,7 @@ class PaperProcessorDaemon:
             True if file should be processed (academic paper)
         """
         # Only process files with academic paper prefixes
-        prefixes = ['NO_', 'EN_', 'DE_', 'SE_', 'FI_']
+        prefixes = ['NO_', 'EN_', 'DE_', 'SV_', 'FI_', 'DA_']
         name_lower = filename.lower()
         # Ignore our own generated split artifacts to prevent double-processing
         if name_lower.endswith('_split.pdf'):
@@ -3455,6 +3635,17 @@ class PaperProcessorDaemon:
             return
         
         self.logger.info(f"New scan: {pdf_path.name}")
+        
+        # Close previous PDF file in viewer before opening new one
+        self._close_previous_pdf_file()
+        
+        # Open PDF in default viewer (non-blocking)
+        self._open_pdf_in_viewer(pdf_path)
+        
+        # Return focus to terminal after opening PDF
+        time.sleep(0.5)  # Small delay to ensure PDF viewer is ready
+        self._return_focus_to_terminal()
+        
         # Remember the original scan path for final move operations
         self._original_scan_path = Path(pdf_path)
         
@@ -3525,6 +3716,69 @@ class PaperProcessorDaemon:
                         'identifiers_found': identifiers_found  # Preserve GREP years
                     }
                     self.logger.info(f"✅ GROBID extracted: {len(metadata.get('authors', []))} authors")
+                    
+                    # If we have a JSTOR ID, try to fetch full metadata from CrossRef/OpenAlex
+                    jstor_ids = identifiers_found.get('jstor_ids', [])
+                    if jstor_ids and metadata.get('title'):
+                        jstor_id = jstor_ids[0]
+                        self.logger.info(f"JSTOR ID {jstor_id} found - trying to fetch metadata from CrossRef/OpenAlex")
+                        print(f"\n🔍 JSTOR ID found ({jstor_id}) - searching CrossRef/OpenAlex for full metadata...")
+                        
+                        # Try searching with extracted title and authors
+                        title = metadata.get('title', '')
+                        authors = metadata.get('authors', [])
+                        year = metadata.get('year') or identifiers_found.get('best_year')
+                        journal = metadata.get('journal', '')
+                        
+                        # Try CrossRef first
+                        try:
+                            crossref_results = self.metadata_processor.crossref.search_by_metadata(
+                                title=title,
+                                authors=authors,
+                                year=year,
+                                journal=journal,
+                                max_results=3
+                            )
+                            if crossref_results:
+                                # Use the first (most relevant) result
+                                api_metadata = crossref_results[0]
+                                # Merge with existing metadata (prefer API data)
+                                metadata.update(api_metadata)
+                                metadata['jstor_id'] = jstor_id  # Preserve JSTOR ID
+                                result['metadata'] = metadata
+                                result['method'] = 'grobid+crossref'
+                                print(f"  ✅ Found metadata in CrossRef - merged with GROBID extraction")
+                                self.logger.info("JSTOR article: Found metadata in CrossRef")
+                            else:
+                                # Try OpenAlex as fallback
+                                try:
+                                    openalex_results = self.metadata_processor.openalex.search_by_metadata(
+                                        title=title,
+                                        authors=authors,
+                                        year=year,
+                                        journal=journal,
+                                        max_results=3
+                                    )
+                                    if openalex_results:
+                                        api_metadata = openalex_results[0]
+                                        metadata.update(api_metadata)
+                                        metadata['jstor_id'] = jstor_id
+                                        result['metadata'] = metadata
+                                        result['method'] = 'grobid+openalex'
+                                        print(f"  ✅ Found metadata in OpenAlex - merged with GROBID extraction")
+                                        self.logger.info("JSTOR article: Found metadata in OpenAlex")
+                                    else:
+                                        print(f"  ⚠️  No metadata found in CrossRef/OpenAlex - using GROBID extraction only")
+                                        metadata['jstor_id'] = jstor_id
+                                        result['metadata'] = metadata
+                                except Exception as e:
+                                    self.logger.warning(f"OpenAlex search failed for JSTOR ID {jstor_id}: {e}")
+                                    metadata['jstor_id'] = jstor_id
+                                    result['metadata'] = metadata
+                        except Exception as e:
+                            self.logger.warning(f"CrossRef search failed for JSTOR ID {jstor_id}: {e}")
+                            metadata['jstor_id'] = jstor_id
+                            result['metadata'] = metadata
                 else:
                     self.logger.info("GROBID did not find authors")
             
@@ -3617,9 +3871,11 @@ class PaperProcessorDaemon:
                             print(f"\n📅 Year found by {suggested_source}: {suggested_year}")
                         
                         # Simple prompt: press Enter to confirm or type a different year
+                        print("💡 You can type a 4-digit year to change it, or press Enter to confirm")
                         while True:
                             try:
-                                year_input = input(f"Press Enter to confirm ({suggested_year}) or type a different year (or 'r' to restart): ").strip()
+                                prompt_text = Colors.colorize(f"Year [{suggested_year}] (Enter=confirm, type new year, 'm'=manual entry, or 'r'=restart): ", ColorScheme.ACTION)
+                                year_input = input(prompt_text).strip()
                             except (KeyboardInterrupt, EOFError):
                                 print("\n❌ Cancelled")
                                 self.move_to_failed(pdf_path)
@@ -3634,24 +3890,47 @@ class PaperProcessorDaemon:
                                 metadata['_year_confirmed'] = True
                                 break
                             elif year_input.lower() == 'r':
-                                # User wants to restart
+                                # User wants to restart - go back to beginning of process_paper
                                 print("🔄 Restarting from beginning...")
+                                print("   (This will re-extract metadata and prompt for year again)")
                                 self.process_paper(pdf_path)
                                 return
+                            elif year_input.lower() == 'm':
+                                # User wants manual entry - clear suggested year and use manual prompt
+                                print("📝 Manual year entry...")
+                                metadata.pop('year', None)
+                                # Fall through to manual entry prompt below
+                                break
                             elif year_input.isdigit() and len(year_input) == 4:
                                 # User entered a different year
                                 metadata['year'] = year_input
                                 metadata['_year_source'] = 'manual'
-                                print(f"✅ Using manual year: {year_input}")
+                                print(f"✅ Year changed to: {year_input}")
                                 self.logger.info(f"User entered manual year: {year_input}")
                                 metadata['_year_confirmed'] = True
                                 break
                             else:
-                                print("⚠️  Invalid year format (expected 4 digits, press Enter, or 'r' to restart)")
+                                print("⚠️  Invalid year format (expected 4 digits, e.g., '2024')")
+                                print("   Press Enter to confirm suggested year, type a 4-digit year to change it,")
+                                print("   'm' for manual entry prompt, or 'r' to restart from beginning")
                 
                 # Prompt for year BEFORE document type, so numeric input isn't misrouted
-                # (This will only prompt if no year was found by any source)
-                metadata = self.prompt_for_year(metadata)
+                # (This will only prompt if no year was found by any source, or if user chose 'm' for manual entry)
+                # Check if user requested manual entry (year was cleared above)
+                if not metadata.get('year') or not metadata.get('_year_confirmed'):
+                    year_result = self.prompt_for_year(metadata, allow_back=True)
+                    # Handle special return values
+                    if year_result == 'BACK':
+                        # User cancelled - return gracefully, daemon continues watching
+                        print("\n⏸️  Returning to watch mode - ready for next scan")
+                        return
+                    elif year_result == 'RESTART':
+                        # User wants to restart processing this file
+                        print("🔄 Restarting from beginning...")
+                        self.process_paper(pdf_path)
+                        return
+                    else:
+                        metadata = year_result  # Year was added/updated in metadata
                 
                 # Check if JSTOR ID was found - automatically set as journal article
                 if identifiers.get('jstor_ids') and not metadata.get('document_type'):
@@ -3671,6 +3950,12 @@ class PaperProcessorDaemon:
                 # Extraction failed - use guided workflow
                 self.logger.warning("Metadata extraction failed - starting guided workflow")
                 metadata = self.handle_failed_extraction(pdf_path)
+                
+                # Check for restart request
+                if metadata and metadata.get('_restart'):
+                    print("🔄 Restarting from beginning...")
+                    self.process_paper(pdf_path)
+                    return
                 
                 if metadata:
                     # Document type was already set during handle_failed_extraction
@@ -3695,14 +3980,15 @@ class PaperProcessorDaemon:
                     action, selected_item, updated_metadata = self.search_and_display_local_zotero(updated_metadata)
                     
                     # Handle back/restart actions - allow user to go back and restart
-                    if action == 'back' or action == 'restart':
-                        if action == 'restart':
-                            print("🔄 Restarting from beginning...")
-                            updated_metadata = metadata.copy()  # Reset to original
-                        else:
-                            print("⬅️  Going back to author selection...")
+                    if action == 'back':
+                        print("⬅️  Going back to author selection...")
                         # Loop will restart and prompt again
                         continue
+                    elif action == 'restart':
+                        # User wants to restart processing this file from the very beginning
+                        print("🔄 Restarting from beginning...")
+                        self.process_paper(pdf_path)
+                        return
                     
                     break
             
@@ -3780,6 +4066,9 @@ class PaperProcessorDaemon:
             self.logger.error(f"Processing error: {e}", exc_info=self.debug)
             self.move_to_failed(pdf_path)
         finally:
+            # Close PDF viewer when processing completes
+            self._close_pdf_viewer()
+            
             # Clean up temporary PDF if created
             temp_to_cleanup = temp_pdf_path if 'temp_pdf_path' in locals() else getattr(self, '_temp_pdf_path', None)
             if temp_to_cleanup and temp_to_cleanup.exists():
@@ -4053,6 +4342,11 @@ class PaperProcessorDaemon:
         success, error_msg = self._copy_file_universal(source, final_path, replace_existing=False)
         if success:
             self.logger.debug(f"Copied to: {final_path}")
+            # Increment copy counter and refresh cache after every 10 copies
+            self.publications_copy_count += 1
+            if self.publications_copy_count >= 10:
+                self._refresh_publications_cache()
+                self.publications_copy_count = 0
             return final_path
         else:
             self.logger.error(f"Copy failed: {error_msg}")
@@ -4243,11 +4537,284 @@ class PaperProcessorDaemon:
                 return (True, max(0.0, score), 'spine')
             return (False, 0.0, 'none')
     
-    def _split_with_mutool(self, pdf_path: Path, width: Optional[float] = None, height: Optional[float] = None) -> Optional[Path]:
-        """Split a two-up PDF using mutool poster and return path to the split file.
-        Creates split in temp directory to avoid cluttering watch directory.
+    def _find_gutter_position(self, pdf_path: Path, sample_pages: int = 3) -> Optional[float]:
+        """Find the actual gutter position between two pages using image analysis.
+        
+        Uses vertical projection profile to find the column with minimum content density.
+        Accounts for dark borders by detecting them first.
+        
+        Args:
+            pdf_path: Path to PDF file (should already have borders removed)
+            sample_pages: Number of pages to analyze for consistency
+            
+        Returns:
+            X coordinate of gutter in PDF points, or None if detection fails
         """
         try:
+            import fitz  # PyMuPDF
+            import numpy as np
+            import cv2
+        except ImportError:
+            self.logger.debug("PyMuPDF/numpy/cv2 not available for gutter detection")
+            return None
+        
+        try:
+            doc = fitz.open(str(pdf_path))
+            if len(doc) == 0:
+                doc.close()
+                return None
+            
+            # Analyze multiple pages for consistency
+            gutter_positions = []
+            pages_to_check = min(sample_pages, len(doc))
+            page_width = None
+            
+            for page_num in range(pages_to_check):
+                page = doc[page_num]
+                page_rect = page.rect
+                if page_width is None:
+                    page_width = page_rect.width
+                page_height = page_rect.height
+                
+                # Render page as image (use reasonable resolution)
+                zoom = 2.0
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                
+                # Convert to numpy array
+                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
+                
+                # Convert to grayscale
+                if len(img.shape) == 3:
+                    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                else:
+                    gray = img
+                
+                img_height, img_width = gray.shape
+                
+                # Detect borders to exclude them from gutter detection
+                borders = {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}
+                try:
+                    borders = self.border_remover.detect_borders(img)
+                except Exception:
+                    pass  # Continue without border detection if it fails
+                
+                # Calculate content area (excluding detected borders)
+                border_left_px = borders.get('left', 0)
+                border_right_px = borders.get('right', 0)
+                content_left_px = border_left_px
+                content_right_px = img_width - border_right_px
+                content_width_px = content_right_px - content_left_px
+                
+                if content_width_px < img_width * 0.3:
+                    # Content area too small, skip this page
+                    continue
+                
+                # Extract content region (middle 80% vertically to avoid headers/footers)
+                vertical_margin = int(img_height * 0.1)
+                content_region = gray[vertical_margin:img_height-vertical_margin, 
+                                     content_left_px:content_right_px]
+                
+                if content_region.size == 0:
+                    continue
+                
+                # Calculate vertical projection profile
+                # For physical book scans: look for darker spine area (gray/dark pixels)
+                # For printed articles: look for minimum content (white space)
+                # We'll check both and use whichever is more prominent
+                
+                # Method 1: Look for darker spine area (physical books)
+                # Average pixel intensity per column (lower = darker)
+                spine_projection = np.mean(content_region, axis=0)
+                
+                # Method 2: Look for minimum content density (printed articles)
+                # Invert so dark pixels (text) have higher values
+                inverted = 255 - content_region
+                content_projection = np.sum(inverted, axis=0)
+                
+                # Smooth both projections to reduce noise
+                kernel_size = max(5, int(content_width_px * 0.02))
+                if kernel_size % 2 == 0:
+                    kernel_size += 1
+                if kernel_size > 1:
+                    spine_projection = cv2.GaussianBlur(spine_projection.reshape(1, -1), (1, kernel_size), 0).flatten()
+                    content_projection = cv2.GaussianBlur(content_projection.reshape(1, -1), (1, kernel_size), 0).flatten()
+                
+                # Search in the middle 60% of content area (avoid edges)
+                search_start = int(len(spine_projection) * 0.2)
+                search_end = int(len(spine_projection) * 0.8)
+                search_region_spine = spine_projection[search_start:search_end]
+                search_region_content = content_projection[search_start:search_end]
+                
+                if len(search_region_spine) == 0:
+                    continue
+                
+                # Find gutter using both methods
+                window_size = max(5, int(len(search_region_spine) * 0.05))
+                
+                # Method 1: Find darkest area (spine marker for physical books)
+                # Lower values = darker pixels
+                min_spine_val = float('inf')
+                min_spine_idx = search_start
+                for i in range(len(search_region_spine) - window_size):
+                    window = search_region_spine[i:i+window_size]
+                    window_avg = np.mean(window)
+                    if window_avg < min_spine_val:
+                        min_spine_val = window_avg
+                        min_spine_idx = i + search_start
+                
+                # Method 2: Find minimum content (white space for printed articles)
+                # Lower values = less content
+                min_content_val = float('inf')
+                min_content_idx = search_start
+                for i in range(len(search_region_content) - window_size):
+                    window = search_region_content[i:i+window_size]
+                    window_avg = np.mean(window)
+                    if window_avg < min_content_val:
+                        min_content_val = window_avg
+                        min_content_idx = i + search_start
+                
+                # Choose method based on which shows a stronger signal
+                # Check if spine method found a significantly darker area (spine marker)
+                # Compare to average brightness in search region
+                avg_brightness = np.mean(search_region_spine)
+                spine_darkness = avg_brightness - min_spine_val
+                
+                # Check if content method found significantly less content
+                avg_content = np.mean(search_region_content)
+                content_reduction = avg_content - min_content_val
+                
+                # Normalize by average to compare relative strength
+                spine_signal = spine_darkness / (avg_brightness + 1e-6)  # Avoid division by zero
+                content_signal = content_reduction / (avg_content + 1e-6)
+                
+                # Use spine method if it shows a strong dark signal (physical book)
+                # Otherwise use content method (printed article)
+                if spine_signal > 0.15:  # At least 15% darker than average (spine marker)
+                    min_idx = min_spine_idx
+                else:
+                    min_idx = min_content_idx
+                
+                # Convert pixel position back to PDF coordinates
+                gutter_px = content_left_px + min_idx
+                gutter_pdf_points = (gutter_px / img_width) * page_width
+                
+                gutter_positions.append(gutter_pdf_points)
+            
+            doc.close()
+            
+            if not gutter_positions:
+                return None
+            
+            # Use median for robustness against outliers
+            median_gutter = np.median(gutter_positions)
+            
+            if page_width is None:
+                return None
+            
+            # Validate: gutter should be roughly in the middle (30-70% of page width)
+            if median_gutter < page_width * 0.3 or median_gutter > page_width * 0.7:
+                self.logger.debug(f"Gutter position {median_gutter:.1f} seems invalid (page width: {page_width:.1f})")
+                return None
+            
+            # Check consistency across pages (std dev should be small)
+            if len(gutter_positions) > 1:
+                std_dev = np.std(gutter_positions)
+                if std_dev > page_width * 0.1:  # More than 10% variation
+                    self.logger.debug(f"Gutter positions inconsistent (std dev: {std_dev:.1f})")
+                    return None
+            
+            self.logger.info(f"Detected gutter at {median_gutter:.1f} points (from {len(gutter_positions)} pages)")
+            return float(median_gutter)
+            
+        except Exception as e:
+            self.logger.debug(f"Gutter detection failed: {e}")
+            return None
+    
+    def _split_with_custom_gutter(self, pdf_path: Path, gutter_x: float) -> Optional[Path]:
+        """Split a two-up PDF at a custom X coordinate using PyMuPDF.
+        
+        Args:
+            pdf_path: Path to input PDF
+            gutter_x: X coordinate in PDF points where to split
+            
+        Returns:
+            Path to split PDF or None if failed
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            self.logger.warning("PyMuPDF not available for custom split")
+            return None
+        
+        try:
+            doc = fitz.open(str(pdf_path))
+            if len(doc) == 0:
+                doc.close()
+                return None
+            
+            # Create new document for split pages
+            new_doc = fitz.open()
+            
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                page_rect = page.rect
+                page_width = page_rect.width
+                page_height = page_rect.height
+                
+                # Validate gutter position
+                if gutter_x <= 0 or gutter_x >= page_width:
+                    self.logger.warning(f"Invalid gutter position {gutter_x} for page width {page_width}")
+                    doc.close()
+                    new_doc.close()
+                    return None
+                
+                # Create left page (from 0 to gutter_x)
+                left_rect = fitz.Rect(0, 0, gutter_x, page_height)
+                left_page = new_doc.new_page(width=gutter_x, height=page_height)
+                left_page.show_pdf_page(left_rect, doc, page_num, clip=left_rect)
+                
+                # Create right page (from gutter_x to page_width)
+                right_rect = fitz.Rect(gutter_x, 0, page_width, page_height)
+                right_page = new_doc.new_page(width=page_width - gutter_x, height=page_height)
+                right_page.show_pdf_page(right_rect, doc, page_num, clip=right_rect)
+            
+            # Save to temp directory
+            import tempfile
+            temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            out_path = temp_dir / f"{pdf_path.stem}_split.pdf"
+            
+            new_doc.save(str(out_path))
+            new_doc.close()
+            doc.close()
+            
+            self.logger.info(f"Split PDF created with custom gutter: {out_path.name}")
+            return out_path
+            
+        except Exception as e:
+            self.logger.error(f"Custom split failed: {e}")
+            return None
+    
+    def _split_with_mutool(self, pdf_path: Path, width: Optional[float] = None, height: Optional[float] = None) -> Optional[Path]:
+        """Split a two-up PDF using intelligent gutter detection or mutool poster as fallback.
+        
+        First attempts to detect the actual gutter position using image analysis.
+        If detection fails, falls back to geometric split at 50% width.
+        Assumes borders have already been removed from the PDF.
+        """
+        try:
+            # Try to detect actual gutter position first
+            gutter_x = self._find_gutter_position(pdf_path)
+            
+            if gutter_x is not None:
+                # Use custom split at detected gutter
+                result = self._split_with_custom_gutter(pdf_path, gutter_x)
+                if result:
+                    return result
+                # If custom split failed, fall through to geometric split
+            
+            # Fallback to geometric split with mutool
             if width is None or height is None:
                 try:
                     import pdfplumber
@@ -4256,6 +4823,7 @@ class PaperProcessorDaemon:
                             width, height = pdf.pages[0].width, pdf.pages[0].height
                 except Exception:
                     width = height = 0
+            
             x, y = (2, 1) if (width and height and width > height) else (1, 2)
             # Create split in temp directory to avoid cluttering watch directory
             import tempfile
@@ -4271,13 +4839,58 @@ class PaperProcessorDaemon:
                 self.logger.error(f"mutool poster failed: {result.stderr.strip()}")
                 return None
             # Use split file for downstream processing
-            self.logger.info(f"Split PDF created: {out_path.name}")
+            self.logger.info(f"Split PDF created (geometric): {out_path.name}")
             return out_path
         except FileNotFoundError:
             self.logger.warning("mutool not found; skipping two-up split")
             return None
         except Exception as e:
             self.logger.error(f"Split failed: {e}")
+            return None
+    
+    def _input_with_timeout(self, prompt: str, timeout_seconds: int = None, 
+                           default: str = None) -> Optional[str]:
+        """Get user input with optional timeout.
+        
+        Args:
+            prompt: Prompt text to display
+            timeout_seconds: Timeout in seconds (None = use config default, 0 = no timeout)
+            default: Default value to return on timeout (None = return None)
+            
+        Returns:
+            User input string, default value on timeout, or None if cancelled
+        """
+        if timeout_seconds is None:
+            timeout_seconds = self.prompt_timeout
+        
+        # Silent timeout - no warning message (only show message when timeout occurs)
+        try:
+            if timeout_seconds > 0 and HAS_SELECT:
+                # Use select-based timeout for Unix/WSL
+                print(prompt, end='', flush=True)
+                
+                # Wait for input with timeout using select
+                ready, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
+                if ready:
+                    # Input is available - read it
+                    user_input = sys.stdin.readline().strip()
+                    return user_input if user_input else default
+                else:
+                    # Timeout - use default (low-contrast message)
+                    if default is not None:
+                        timeout_msg = Colors.colorize("⏱️  Timeout reached - proceeding with default", ColorScheme.TIMEOUT)
+                        print(f"\n{timeout_msg}")
+                        return default
+                    else:
+                        timeout_msg = Colors.colorize("⏱️  Timeout reached", ColorScheme.TIMEOUT)
+                        print(f"\n{timeout_msg}")
+                        return None
+            else:
+                # No timeout or select not available - use regular input
+                user_input = input(prompt).strip()
+                return user_input if user_input else default
+        except (KeyboardInterrupt, EOFError):
+            print("\n❌ Cancelled")
             return None
     
     def _prompt_for_page_offset(self, pdf_path: Path) -> Optional[int]:
@@ -4312,9 +4925,21 @@ class PaperProcessorDaemon:
         print("If your document starts on scan page 2, 3, 4, etc., enter that number now.")
         print()
         
+        # Use timeout if configured
+        timeout_seconds = self.page_offset_timeout
+        
         while True:
             try:
-                user_input = input("Enter starting scan page number (1-{}) or press Enter for page 1: ".format(total_pages if total_pages else "N")).strip()
+                prompt_text = "Enter starting scan page number (1-{}) or press Enter for page 1: ".format(total_pages if total_pages else "N")
+                user_input = self._input_with_timeout(
+                    prompt_text,
+                    timeout_seconds=timeout_seconds,
+                    default=""
+                )
+                if user_input is None:
+                    print("\n❌ Cancelled")
+                    return None
+                user_input = user_input.strip()
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Cancelled")
                 return None
@@ -4446,30 +5071,155 @@ class PaperProcessorDaemon:
             self.logger.debug(f"Failed to extract preview text for page {page_offset + 1}: {e}")
             return None, None
     
+    def _extract_trailing_preview_text(self, pdf_path: Path, pages_to_drop: int, max_chars: int = 180) -> Optional[str]:
+        """Extract a short preview of text from the last page that will remain after trimming trailing pages.
+        
+        Args:
+            pdf_path: Path to PDF file
+            pages_to_drop: Number of trailing pages to drop
+            max_chars: Maximum characters to include in preview
+        
+        Returns:
+            Preview text from the last remaining page, or None if text unavailable.
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            self.logger.warning("PyMuPDF (fitz) not available - cannot preview trailing page text")
+            return None
+        
+        try:
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+            if pages_to_drop >= total_pages:
+                doc.close()
+                return None
+            
+            # Get the last page that will remain (total_pages - pages_to_drop - 1, 0-indexed)
+            last_remaining_page_idx = total_pages - pages_to_drop - 1
+            if last_remaining_page_idx < 0:
+                doc.close()
+                return None
+            
+            page = doc[last_remaining_page_idx]
+            raw_text = page.get_text("text") or ""
+            doc.close()
+            
+            # Get the end of the text (last part of the page)
+            preview = " ".join(raw_text.split())
+            if preview and len(preview) > max_chars:
+                # Take the last max_chars characters
+                preview = "..." + preview[-(max_chars - 3):].lstrip()
+            return preview or None
+        except Exception as e:
+            self.logger.debug(f"Failed to extract trailing preview text: {e}")
+            return None
+    
+    def _create_pdf_without_trailing_pages(self, pdf_path: Path, pages_to_drop: int) -> Optional[Path]:
+        """Create a temporary PDF without the last N pages.
+        
+        Args:
+            pdf_path: Path to original PDF file
+            pages_to_drop: Number of trailing pages to drop
+        
+        Returns:
+            Path to temporary PDF without trailing pages, or None if failed
+        """
+        if pages_to_drop < 1:
+            return None
+        
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            self.logger.error("PyMuPDF (fitz) not available - cannot create PDF without trailing pages")
+            return None
+        
+        doc = None
+        new_doc = None
+        try:
+            # Open the PDF
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+            
+            # Check if PDF has enough pages
+            if pages_to_drop >= total_pages:
+                self.logger.warning(f"PDF has only {total_pages} page(s) - cannot drop {pages_to_drop} trailing pages")
+                doc.close()
+                return None
+            
+            # Create new PDF without trailing pages
+            new_doc = fitz.open()
+            
+            # Copy all pages except the last N pages
+            pages_to_keep = total_pages - pages_to_drop
+            for page_num in range(pages_to_keep):
+                page = doc[page_num]
+                new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
+                new_page.show_pdf_page(new_page.rect, doc, page_num)
+            
+            # Save to a temporary file
+            import tempfile
+            temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            out_path = temp_dir / f"{pdf_path.stem}_trimmed_end_{pages_to_drop}.pdf"
+            
+            new_doc.save(str(out_path))
+            new_doc.close()
+            doc.close()
+            
+            self.logger.info(f"Created PDF without last {pages_to_drop} page(s): {out_path.name}")
+            return out_path
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create PDF without trailing pages: {e}")
+            # Ensure both documents are closed to prevent resource leaks
+            if new_doc is not None:
+                try:
+                    new_doc.close()
+                except Exception:
+                    pass  # Ignore errors during cleanup
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass  # Ignore errors during cleanup
+            return None
+    
     def _prompt_trim_leading_pages_for_attachment(self, pdf_path: Path) -> Tuple[Path, bool]:
-        """Prompt user to optionally trim leading pages before attachment.
+        """Prompt user to optionally trim leading or trailing pages before attachment.
+        
+        Supports both positive numbers (trim from start) and negative numbers (trim from end).
+        Example: "3" trims first 3 pages, "-2" trims last 2 pages.
         
         Args:
             pdf_path: Current working PDF path (after any splitting)
         
         Returns:
             Tuple of (path_to_use, trimmed_flag). If trimmed_flag is True, path_to_use
-            points to a temporary PDF starting from the desired page.
+            points to a temporary PDF with pages trimmed.
         """
         if not pdf_path.exists():
             return pdf_path, False
         
         print("\n" + "=" * 70)
-        print("OPTIONAL: TRIM LEADING PAGES")
+        print("OPTIONAL: TRIM PAGES")
         print("=" * 70)
         print("Press Enter to keep the PDF exactly as it is.")
-        print("Enter a number to drop that many leading scan page(s) after split.")
-        print("We'll show you the first page of the trimmed PDF before anything is changed.")
+        print("Enter a positive number to drop that many leading pages (e.g., '3' = drop first 3 pages).")
+        print("Enter a negative number to drop that many trailing pages (e.g., '-2' = drop last 2 pages).")
+        print("We'll show you a preview of the trimmed PDF before anything is changed.")
         print("=" * 70)
         
         while True:
             try:
-                response = input("Trim leading pages? [Enter=keep all / number=pages to drop]: ").strip().lower()
+                response = self._input_with_timeout(
+                    "Trim pages? [Enter=keep all / number=pages to drop from start / -number=pages to drop from end]: ",
+                    default=""
+                )
+                if response is None:
+                    print("\n❌ Trim cancelled - keeping all pages")
+                    return pdf_path, False
+                response = response.strip().lower()
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Trim cancelled - keeping all pages")
                 return pdf_path, False
@@ -4478,45 +5228,94 @@ class PaperProcessorDaemon:
                 print("ℹ️  Keeping all pages.")
                 return pdf_path, False
             
-            if not response.isdigit():
-                print("⚠️  Please enter a whole number or press Enter to keep everything.")
-                continue
-            
-            pages_to_drop = int(response)
-            if pages_to_drop <= 0:
-                print("ℹ️  Keeping all pages.")
-                return pdf_path, False
-            
-            preview_text, total_pages = self._extract_page_preview_text(pdf_path, pages_to_drop)
-            if total_pages is not None and pages_to_drop >= total_pages:
-                print(f"⚠️  This PDF has {total_pages} page(s); you cannot drop {pages_to_drop}.")
-                continue
-            
-            print("\nThe first page in your new PDF will start with:")
-            if preview_text:
-                print(f'  "{preview_text}"')
-            else:
-                print("  [No text detected on that page]")
-            print()
-            
+            # Check if it's a valid number (positive or negative)
             try:
-                confirm = input(f"Type 'trim' to drop the first {pages_to_drop} page(s), or press Enter to keep everything: ").strip().lower()
-            except (KeyboardInterrupt, EOFError):
-                print("\n❌ Trim cancelled - keeping all pages")
-                return pdf_path, False
+                pages_to_drop = int(response)
+            except ValueError:
+                print("⚠️  Please enter a whole number (positive for leading pages, negative for trailing pages) or press Enter to keep everything.")
+                continue
             
-            if confirm != "trim":
+            if pages_to_drop == 0:
                 print("ℹ️  Keeping all pages.")
                 return pdf_path, False
             
-            trimmed_pdf = self._create_pdf_from_page_offset(pdf_path, pages_to_drop)
-            if not trimmed_pdf:
-                print("⚠️  Failed to create trimmed PDF. Keeping original pages.")
-                return pdf_path, False
+            # Get total pages for validation
+            try:
+                import fitz  # PyMuPDF
+                doc = fitz.open(pdf_path)
+                total_pages = len(doc)
+                doc.close()
+            except Exception:
+                print("⚠️  Could not read PDF to get page count.")
+                continue
             
-            print(f"✅ Trimmed first {pages_to_drop} page(s) for Zotero attachment")
-            self.logger.info(f"Trimmed first {pages_to_drop} page(s) before attachment: {trimmed_pdf.name}")
-            return trimmed_pdf, True
+            # Handle negative numbers (trim from end)
+            if pages_to_drop < 0:
+                pages_to_drop_abs = abs(pages_to_drop)
+                if pages_to_drop_abs >= total_pages:
+                    print(f"⚠️  This PDF has {total_pages} page(s); you cannot drop {pages_to_drop_abs} trailing pages.")
+                    continue
+                
+                # Show preview of last page that will remain
+                preview_text = self._extract_trailing_preview_text(pdf_path, pages_to_drop_abs)
+                print(f"\nThe last page in your new PDF (page {total_pages - pages_to_drop_abs}) will end with:")
+                if preview_text:
+                    print(f'  "...{preview_text}"')
+                else:
+                    print("  [No text detected on that page]")
+                print()
+                
+                try:
+                    confirm = input(f"Type 'trim' to drop the last {pages_to_drop_abs} page(s), or press Enter to keep everything: ").strip().lower()
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Trim cancelled - keeping all pages")
+                    return pdf_path, False
+                
+                if confirm != "trim":
+                    print("ℹ️  Keeping all pages.")
+                    return pdf_path, False
+                
+                trimmed_pdf = self._create_pdf_without_trailing_pages(pdf_path, pages_to_drop_abs)
+                if not trimmed_pdf:
+                    print("⚠️  Failed to create trimmed PDF. Keeping original pages.")
+                    return pdf_path, False
+                
+                print(f"✅ Trimmed last {pages_to_drop_abs} page(s) for Zotero attachment")
+                self.logger.info(f"Trimmed last {pages_to_drop_abs} page(s) before attachment: {trimmed_pdf.name}")
+                return trimmed_pdf, True
+            
+            # Handle positive numbers (trim from start)
+            else:
+                if pages_to_drop >= total_pages:
+                    print(f"⚠️  This PDF has {total_pages} page(s); you cannot drop {pages_to_drop} leading pages.")
+                    continue
+                
+                preview_text, _ = self._extract_page_preview_text(pdf_path, pages_to_drop)
+                print("\nThe first page in your new PDF will start with:")
+                if preview_text:
+                    print(f'  "{preview_text}"')
+                else:
+                    print("  [No text detected on that page]")
+                print()
+                
+                try:
+                    confirm = input(f"Type 'trim' to drop the first {pages_to_drop} page(s), or press Enter to keep everything: ").strip().lower()
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Trim cancelled - keeping all pages")
+                    return pdf_path, False
+                
+                if confirm != "trim":
+                    print("ℹ️  Keeping all pages.")
+                    return pdf_path, False
+                
+                trimmed_pdf = self._create_pdf_from_page_offset(pdf_path, pages_to_drop)
+                if not trimmed_pdf:
+                    print("⚠️  Failed to create trimmed PDF. Keeping original pages.")
+                    return pdf_path, False
+                
+                print(f"✅ Trimmed first {pages_to_drop} page(s) for Zotero attachment")
+                self.logger.info(f"Trimmed first {pages_to_drop} page(s) before attachment: {trimmed_pdf.name}")
+                return trimmed_pdf, True
     
     def _delete_first_page_from_pdf(self, pdf_path: Path) -> Optional[Path]:
         """Delete the first page from a PDF and return path to the modified file.
@@ -4715,8 +5514,20 @@ class PaperProcessorDaemon:
         self.logger.info(f"Publications: {self.publications_dir}")
         self.logger.info("="*60)
         
+        # Position terminal window on right half of screen using Windows Snap
+        # Wait for terminal window to be ready
+        time.sleep(2.0)  # Give terminal window time to be fully ready
+        self._position_terminal_window()
+        
+        # Retry positioning after a bit more time (in case window wasn't ready yet)
+        time.sleep(1.0)
+        self._position_terminal_window()
+        
         # Process existing files in the directory
         self.process_existing_files()
+        
+        # Refresh publications cache on startup
+        self._refresh_publications_cache()
         
         self.logger.info("Ready for scans!")
         self.logger.info("="*60)
@@ -4727,9 +5538,633 @@ class PaperProcessorDaemon:
         except KeyboardInterrupt:
             self.shutdown(None, None)
     
+    def _open_pdf_in_viewer(self, pdf_path: Path) -> bool:
+        """Open PDF in default system viewer (non-blocking) and position window.
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            True if opened successfully, False otherwise
+        """
+        try:
+            # Convert to Windows path if needed for WSL
+            if sys.platform != 'win32':
+                # Try to convert WSL path to Windows path
+                windows_path = self._to_windows_path(pdf_path)
+                if windows_path:
+                    self.logger.info(f"Opening PDF in viewer: {windows_path}")
+                    
+                    # Try PowerShell to open file (works from WSL)
+                    try:
+                        ps_command = f'Start-Process "{windows_path}"'
+                        proc = subprocess.Popen(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_command],
+                                                stdout=subprocess.DEVNULL, 
+                                                stderr=subprocess.DEVNULL)
+                        # Store process for later closing
+                        self._pdf_viewer_process = proc
+                        self._pdf_viewer_path = pdf_path
+                        
+                        # Wait a moment for window to open, then position it
+                        time.sleep(1.5)
+                        self._position_pdf_window(pdf_path)
+                        self.logger.info("PDF viewer opened successfully")
+                        return True
+                    except Exception as e:
+                        self.logger.warning(f"Failed to open PDF with PowerShell: {e}")
+                    
+                    # Fallback: try wslview if available
+                    try:
+                        proc = subprocess.Popen(['wslview', str(windows_path)], 
+                                                stdout=subprocess.DEVNULL, 
+                                                stderr=subprocess.DEVNULL)
+                        self._pdf_viewer_process = proc
+                        self._pdf_viewer_path = pdf_path
+                        time.sleep(1.5)
+                        self._position_pdf_window(pdf_path)
+                        return True
+                    except FileNotFoundError:
+                        self.logger.warning("wslview not found")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to open PDF with wslview: {e}")
+                else:
+                    self.logger.warning(f"Could not convert path to Windows format: {pdf_path}")
+                
+                # Last fallback: try xdg-open for Linux
+                try:
+                    self.logger.info(f"Trying xdg-open as fallback: {pdf_path}")
+                    proc = subprocess.Popen(['xdg-open', str(pdf_path)], 
+                                           stdout=subprocess.DEVNULL, 
+                                           stderr=subprocess.DEVNULL)
+                    self._pdf_viewer_process = proc
+                    self._pdf_viewer_path = pdf_path
+                    return True
+                except FileNotFoundError:
+                    self.logger.warning("xdg-open not found")
+            else:
+                # Windows: use startfile (non-blocking)
+                self.logger.info(f"Opening PDF in viewer: {pdf_path}")
+                os.startfile(str(pdf_path))
+                self._pdf_viewer_path = pdf_path
+                
+                # Wait a moment for window to open, then position it
+                time.sleep(1)
+                self._position_pdf_window(pdf_path)
+                self.logger.info("PDF viewer opened successfully")
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Could not open PDF in viewer: {e}")
+            return False
+        
+        self.logger.warning("All methods to open PDF viewer failed")
+        return False
+    
+    def _store_terminal_window_handle(self):
+        """Store terminal window handle at startup for later use."""
+        self.logger.info("Storing terminal window handle...")
+        try:
+            # Use PowerShell to find terminal window by process tree
+            # Get current Python process, find parent (WSL/bash), then find its parent (cmd.exe)
+            ps_script = '''
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+}
+public struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+}
+"@
+
+$found = $false
+
+# Strategy 1: Find by process tree - get cmd.exe that launched WSL
+$cmdProcesses = Get-Process -Name "cmd" -ErrorAction SilentlyContinue | Where-Object { 
+    $_.MainWindowHandle -ne [IntPtr]::Zero 
+} | Sort-Object StartTime -Descending
+
+Write-Host "Checking $($cmdProcesses.Count) cmd.exe processes..."
+foreach ($proc in $cmdProcesses) {
+    try {
+        $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($proc.Id)" -ErrorAction SilentlyContinue).CommandLine
+        Write-Host "Process $($proc.Id): $($proc.MainWindowTitle) - CmdLine: $cmdLine"
+        if ($cmdLine) {
+            $hasWsl = $cmdLine -like "*wsl*"
+            $hasDaemon = $cmdLine -like "*paper_processor_daemon*"
+            $notStatus = $cmdLine -notlike "*--status*"
+            Write-Host "  Has WSL: $hasWsl, Has daemon: $hasDaemon, Not status: $notStatus"
+            
+            if ($hasWsl -and $hasDaemon -and $notStatus) {
+                $hwnd = $proc.MainWindowHandle
+                $rect = New-Object RECT
+                if ([Win32]::GetWindowRect($hwnd, [ref]$rect)) {
+                    $width = $rect.Right - $rect.Left
+                    $height = $rect.Bottom - $rect.Top
+                    Write-Host "  Window size: ${width}x${height}"
+                    # Only use if reasonably sized
+                    if ($width -gt 100 -and $height -gt 100) {
+                        Write-Host "FOUND: $($hwnd.ToString())"
+                        $found = $true
+                        break
+                    }
+                }
+            }
+        }
+    } catch {
+        Write-Host "  Error: $_"
+        continue
+    }
+}
+
+# Strategy 2: Find console window by class name
+if (!$found) {
+    Write-Host "Trying console window class name..."
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32Find {
+    [DllImport("user32.dll")]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+}
+public struct RECT2 {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+}
+"@
+    $hwnd = [Win32Find]::FindWindow("ConsoleWindowClass", $null)
+    if ($hwnd -ne [IntPtr]::Zero) {
+        $rect = New-Object RECT2
+        if ([Win32Find]::GetWindowRect($hwnd, [ref]$rect)) {
+            $width = $rect.Right - $rect.Left
+            $height = $rect.Bottom - $rect.Top
+            Write-Host "Console window size: ${width}x${height}"
+            if ($width -gt 100 -and $height -gt 100) {
+                Write-Host "FOUND: $($hwnd.ToString())"
+                $found = $true
+            }
+        }
+    }
+}
+
+if (!$found) {
+    Write-Host "NOTFOUND"
+}
+'''
+            
+            result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, text=True)
+            
+            if result.stdout:
+                output = result.stdout.strip()
+                # Always log the output for debugging
+                self.logger.info(f"Terminal handle search output: {output}")
+                # Look for "FOUND: <handle>" in output
+                match = re.search(r'FOUND:\s*(\d+)', output)
+                if match:
+                    handle_str = match.group(1)
+                    self._terminal_window_handle = handle_str
+                    self.logger.info(f"Stored terminal window handle: {handle_str}")
+                elif "NOTFOUND" in output:
+                    self.logger.warning("Terminal window handle not found (NOTFOUND)")
+                else:
+                    # If we got output but no FOUND, log it for debugging
+                    self.logger.warning(f"Terminal handle search completed but no handle found. Output: {output[:500]}")
+            else:
+                self.logger.warning("Could not find terminal window handle (no output from script)")
+            if result.stderr:
+                self.logger.warning(f"Terminal handle search errors: {result.stderr.strip()}")
+            if result.returncode != 0:
+                self.logger.warning(f"Terminal handle search script exited with code: {result.returncode}")
+                
+        except Exception as e:
+            self.logger.warning(f"Could not store terminal window handle: {e}")
+    
+    def _position_terminal_window(self):
+        """Position terminal window on the right half of the screen using Windows Snap.
+        
+        Uses Windows keyboard shortcut (Win+Right) to snap window to right half.
+        This is more reliable than manual positioning and can create snap groups.
+        """
+        self.logger.info("Positioning terminal window to right half using Windows Snap...")
+        try:
+            # Use Windows keyboard shortcut to snap window to right half
+            # This uses Windows' native snap functionality which is more reliable
+            ps_script = '''
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+}
+"@
+
+# Find console window - try multiple strategies
+$hwnd = [IntPtr]::Zero
+
+# Strategy 1: Find console window by class name (most reliable)
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32Find {
+    [DllImport("user32.dll")]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+}
+"@
+$hwnd = [Win32Find]::FindWindow("ConsoleWindowClass", $null)
+if ($hwnd -ne [IntPtr]::Zero) {
+    Write-Host "Found console window by class name"
+}
+
+# Strategy 2: Find most recent cmd.exe window
+if ($hwnd -eq [IntPtr]::Zero) {
+    $cmdProcesses = Get-Process -Name "cmd" -ErrorAction SilentlyContinue | Where-Object { 
+        $_.MainWindowHandle -ne [IntPtr]::Zero 
+    } | Sort-Object StartTime -Descending | Select-Object -First 1
+    
+    if ($cmdProcesses) {
+        $hwnd = $cmdProcesses.MainWindowHandle
+        Write-Host "Found most recent cmd.exe window (PID: $($cmdProcesses.Id))"
+    }
+}
+
+# Strategy 3: Use foreground window if no console found (fallback)
+if ($hwnd -eq [IntPtr]::Zero) {
+    $hwnd = [Win32]::GetForegroundWindow()
+    if ($hwnd -ne [IntPtr]::Zero) {
+        Write-Host "Using foreground window as fallback"
+    }
+}
+
+if ($hwnd -ne [IntPtr]::Zero) {
+    # Bring window to foreground (if not already)
+    [Win32]::SetForegroundWindow($hwnd)
+    Start-Sleep -Milliseconds 150
+    
+    # Send Win+Right Arrow to snap to right half
+    # VK_LWIN = 0x5B, VK_RIGHT = 0x27
+    # KEYEVENTF_KEYUP = 0x0002
+    [Win32]::keybd_event(0x5B, 0, 0, 0)  # Win key down
+    Start-Sleep -Milliseconds 50
+    [Win32]::keybd_event(0x27, 0, 0, 0)  # Right arrow down
+    Start-Sleep -Milliseconds 50
+    [Win32]::keybd_event(0x27, 0, 0x0002, 0)  # Right arrow up
+    [Win32]::keybd_event(0x5B, 0, 0x0002, 0)  # Win key up
+    
+    Write-Host "SUCCESS"
+} else {
+    Write-Host "Could not find terminal window"
+}
+'''
+            
+            result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
+            
+            if result.stdout:
+                output = result.stdout.strip()
+                if "SUCCESS" in output:
+                    self.logger.info("Terminal window snapped to right half successfully")
+                else:
+                    self.logger.info(f"Terminal snap output: {output}")
+            if result.stderr:
+                self.logger.warning(f"Terminal snap errors: {result.stderr.strip()}")
+                
+        except subprocess.TimeoutExpired:
+            self.logger.warning("Terminal snap script timed out")
+        except Exception as e:
+            self.logger.warning(f"Could not snap terminal window: {e}")
+    
+    def _position_pdf_window(self, pdf_path: Path):
+        """Position PDF viewer window on the left half of the screen.
+        
+        Args:
+            pdf_path: Path to PDF file (used to find window by title)
+        """
+        # Retry logic: Sumatra may take a moment to open
+        max_retries = 3
+        retry_delay = 0.5
+        
+        for attempt in range(max_retries):
+            try:
+                if sys.platform != 'win32':
+                    windows_path = self._to_windows_path(pdf_path)
+                    if not windows_path:
+                        return
+                    filename = Path(windows_path).name
+                else:
+                    filename = pdf_path.name
+                
+                # PowerShell script to find and snap Sumatra PDF window to left half using Windows Snap
+                ps_script = f'''
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {{
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+}}
+"@
+
+$filename = "{filename}"
+
+# Find Sumatra PDF process specifically
+$sumatraProcesses = Get-Process -Name "SumatraPDF" -ErrorAction SilentlyContinue | Where-Object {{
+    $_.MainWindowHandle -ne [IntPtr]::Zero
+}}
+
+$hwnd = [IntPtr]::Zero
+foreach ($proc in $sumatraProcesses) {{
+    $title = $proc.MainWindowTitle
+    # Match by filename in title or just use first Sumatra window
+    if ($title -like "*$filename*" -or $sumatraProcesses.Count -eq 1) {{
+        $hwnd = $proc.MainWindowHandle
+        Write-Host "Found Sumatra PDF window: $title"
+        break
+    }}
+}}
+
+# Fallback: find any PDF viewer with filename in title
+if ($hwnd -eq [IntPtr]::Zero) {{
+    $processes = Get-Process | Where-Object {{
+        $_.MainWindowHandle -ne [IntPtr]::Zero -and
+        ($_.MainWindowTitle -like "*$filename*" -or $_.MainWindowTitle -like "*PDF*")
+    }} | Select-Object -First 1
+    
+    if ($processes) {{
+        $hwnd = $processes.MainWindowHandle
+        Write-Host "Found PDF viewer window: $($processes.ProcessName) - $($processes.MainWindowTitle)"
+    }}
+}}
+
+if ($hwnd -ne [IntPtr]::Zero) {{
+    # Bring window to foreground
+    [Win32]::SetForegroundWindow($hwnd)
+    Start-Sleep -Milliseconds 150
+    
+    # Send Win+Left Arrow to snap to left half
+    # VK_LWIN = 0x5B, VK_LEFT = 0x25
+    # KEYEVENTF_KEYUP = 0x0002
+    [Win32]::keybd_event(0x5B, 0, 0, 0)  # Win key down
+    Start-Sleep -Milliseconds 50
+    [Win32]::keybd_event(0x25, 0, 0, 0)  # Left arrow down
+    Start-Sleep -Milliseconds 50
+    [Win32]::keybd_event(0x25, 0, 0x0002, 0)  # Left arrow up
+    [Win32]::keybd_event(0x5B, 0, 0x0002, 0)  # Win key up
+    
+    Write-Host "SUCCESS"
+}} else {{
+    Write-Host "PDF viewer window not found"
+}}
+'''
+                
+                result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
+                
+                if result.stdout and "SUCCESS" in result.stdout:
+                    self.logger.info(f"PDF viewer positioned successfully (attempt {attempt + 1})")
+                    if result.stdout.strip():
+                        self.logger.debug(f"Positioning output: {result.stdout.strip()}")
+                    return
+                elif attempt < max_retries - 1:
+                    self.logger.debug(f"PDF viewer not found yet, retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                else:
+                    if result.stdout:
+                        self.logger.warning(f"PDF viewer positioning failed: {result.stdout.strip()}")
+                    if result.stderr:
+                        self.logger.warning(f"PDF viewer positioning errors: {result.stderr.strip()}")
+                        
+            except subprocess.TimeoutExpired:
+                self.logger.warning("PDF viewer positioning script timed out")
+            except Exception as e:
+                self.logger.debug(f"Could not position PDF window (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+    
+    def _close_previous_pdf_file(self):
+        """Close previous PDF file in Sumatra PDF before opening new one.
+        
+        This closes just the file (not the entire viewer) so only one file is open at a time.
+        """
+        if not hasattr(self, '_pdf_viewer_path') or not self._pdf_viewer_path:
+            return
+        
+        previous_path = self._pdf_viewer_path
+        self.logger.info(f"Closing previous PDF file in viewer: {previous_path.name}")
+        
+        try:
+            if sys.platform != 'win32':
+                windows_path = self._to_windows_path(previous_path)
+                if not windows_path:
+                    return
+                filename = Path(windows_path).name
+            else:
+                filename = previous_path.name
+            
+            # PowerShell script to close specific file in Sumatra PDF
+            ps_script = f'''
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {{
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+}}
+"@
+
+$filename = "{filename}"
+$WM_CLOSE = 0x0010
+
+# Find Sumatra PDF process with the specific file
+$sumatraProcesses = Get-Process -Name "SumatraPDF" -ErrorAction SilentlyContinue | Where-Object {{
+    $_.MainWindowHandle -ne [IntPtr]::Zero
+}}
+
+$closed = $false
+foreach ($proc in $sumatraProcesses) {{
+    $title = $proc.MainWindowTitle
+    # Check if this window has the filename in title
+    if ($title -like "*$filename*") {{
+        $hwnd = $proc.MainWindowHandle
+        Write-Host "Closing Sumatra PDF window: $title"
+        # Send WM_CLOSE to close just this file/tab
+        [Win32]::SendMessage($hwnd, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+        $closed = $true
+        Start-Sleep -Milliseconds 300
+        break
+    }}
+}}
+
+# If not found by title, try closing the most recent Sumatra window
+if (!$closed -and $sumatraProcesses.Count -gt 0) {{
+    $proc = $sumatraProcesses | Sort-Object StartTime -Descending | Select-Object -First 1
+    $hwnd = $proc.MainWindowHandle
+    Write-Host "Closing most recent Sumatra PDF window: $($proc.MainWindowTitle)"
+    [Win32]::SendMessage($hwnd, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+    $closed = $true
+}}
+
+if ($closed) {{
+    Write-Host "SUCCESS"
+}} else {{
+    Write-Host "No Sumatra PDF window found to close"
+}}
+'''
+            
+            result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
+            
+            if result.stdout and "SUCCESS" in result.stdout:
+                self.logger.info("Previous PDF file closed successfully")
+                # Wait a moment for file to close
+                time.sleep(0.3)
+            else:
+                if result.stdout:
+                    self.logger.debug(f"Close previous PDF output: {result.stdout.strip()}")
+                    
+        except Exception as e:
+            self.logger.debug(f"Could not close previous PDF file: {e}")
+    
+    def _return_focus_to_terminal(self):
+        """Return focus to terminal window after PDF viewer opens."""
+        self.logger.info("Returning focus to terminal window...")
+        try:
+            handle_arg = self._terminal_window_handle if self._terminal_window_handle else ""
+            ps_script = f'''
+param([string]$StoredHandle = "{handle_arg}")
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {{
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+}}
+"@
+
+$hwnd = [IntPtr]::Zero
+
+# Try stored handle first
+if ($StoredHandle -and $StoredHandle -ne "") {{
+    try {{
+        $hwnd = [IntPtr]::new([int64]$StoredHandle)
+        Write-Host "Using stored handle for focus: $StoredHandle"
+    }} catch {{
+        Write-Host "Invalid stored handle, finding window..."
+    }}
+}}
+
+# If no stored handle, find window
+if ($hwnd -eq [IntPtr]::Zero) {{
+    # Strategy 1: Find console window by class name
+    $hwnd = [Win32]::FindWindow("ConsoleWindowClass", $null)
+    if ($hwnd -ne [IntPtr]::Zero) {{
+        Write-Host "Found console window by class name"
+    }}
+}}
+
+# Strategy 2: Find cmd.exe with WSL
+if ($hwnd -eq [IntPtr]::Zero) {{
+    $cmdProcesses = Get-Process -Name "cmd" -ErrorAction SilentlyContinue | Where-Object {{ 
+        $_.MainWindowHandle -ne [IntPtr]::Zero 
+    }} | Sort-Object StartTime -Descending
+    
+    foreach ($proc in $cmdProcesses) {{
+        try {{
+            $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($proc.Id)" -ErrorAction SilentlyContinue).CommandLine
+            if ($cmdLine -and $cmdLine -like "*wsl*" -and $cmdLine -notlike "*--status*") {{
+                $hwnd = $proc.MainWindowHandle
+                Write-Host "Found cmd.exe window (PID: $($proc.Id))"
+                break
+            }}
+        }} catch {{
+            continue
+        }}
+    }}
+}}
+
+# Set focus
+if ($hwnd -ne [IntPtr]::Zero) {{
+    $result = [Win32]::SetForegroundWindow($hwnd)
+    if ($result) {{
+        Write-Host "SUCCESS"
+    }} else {{
+        Write-Host "SetForegroundWindow returned false"
+    }}
+}} else {{
+    Write-Host "Could not find terminal window"
+}}
+'''
+            
+            result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
+            
+            if result.stdout and "SUCCESS" in result.stdout:
+                self.logger.info("Focus returned to terminal successfully")
+            else:
+                if result.stdout:
+                    self.logger.debug(f"Focus management output: {result.stdout.strip()}")
+                    
+        except Exception as e:
+            self.logger.debug(f"Could not return focus to terminal: {e}")
+    
+    def _close_pdf_viewer(self):
+        """Close PDF viewer window when processing completes."""
+        try:
+            if not hasattr(self, '_pdf_viewer_path') or not self._pdf_viewer_path:
+                return
+            
+            pdf_path = self._pdf_viewer_path
+            
+            if sys.platform != 'win32':
+                # For WSL, close Windows viewer using PowerShell
+                windows_path = self._to_windows_path(pdf_path)
+                if not windows_path:
+                    return
+                
+                filename = Path(windows_path).name
+                ps_script = f'''$filename = "{filename}"; $processes = Get-Process | Where-Object {{ $_.MainWindowTitle -like "*$filename*" -or ($_.MainWindowTitle -like "*PDF*" -and ($_.Path -like "*Acrobat*" -or $_.Path -like "*Sumatra*" -or $_.Path -like "*Edge*")) }}; foreach ($proc in $processes) {{ if ($proc.MainWindowHandle -ne [IntPtr]::Zero) {{ $proc.CloseMainWindow(); Start-Sleep -Milliseconds 500; if (!$proc.HasExited) {{ $proc.Kill() }} }} }}'''
+                subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            else:
+                # Windows: close using PowerShell
+                filename = pdf_path.name
+                ps_script = f'''$filename = "{filename}"; $processes = Get-Process | Where-Object {{ $_.MainWindowTitle -like "*$filename*" -or ($_.MainWindowTitle -like "*PDF*" -and ($_.Path -like "*Acrobat*" -or $_.Path -like "*Sumatra*" -or $_.Path -like "*Edge*")) }}; foreach ($proc in $processes) {{ if ($proc.MainWindowHandle -ne [IntPtr]::Zero) {{ $proc.CloseMainWindow(); Start-Sleep -Milliseconds 500; if (!$proc.HasExited) {{ $proc.Kill() }} }} }}'''
+                subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            
+            # Clear tracking
+            if hasattr(self, '_pdf_viewer_process'):
+                delattr(self, '_pdf_viewer_process')
+            if hasattr(self, '_pdf_viewer_path'):
+                delattr(self, '_pdf_viewer_path')
+                
+        except Exception as e:
+            self.logger.debug(f"Could not close PDF viewer: {e}")
+    
     def process_existing_files(self):
         """Process existing PDF files in the watch directory."""
-        self.logger.info("🔍 Checking for existing PDF files to process...")
+        self.logger.info("Checking for existing PDF files to process...")
         
         existing_files = []
         for file_path in self.watch_dir.glob("*.pdf"):
@@ -4740,9 +6175,12 @@ class PaperProcessorDaemon:
             self.logger.info("No existing PDF files found to process.")
             return
         
-        self.logger.info(f"Found {len(existing_files)} existing PDF file(s) to process:")
+        # Sort by creation time (oldest first = scanning order)
+        existing_files.sort(key=lambda p: p.stat().st_ctime)
+        
+        self.logger.info(f"Found {len(existing_files)} existing PDF file(s) to process (ordered by scan time):")
         for i, file_path in enumerate(existing_files, 1):
-            self.logger.info(f"  {i}. {file_path.name}")
+            print(f"  {i}. {file_path.name}")
         
         choice = input(f"\nProcess existing files? [Y/n]: ").strip().lower()
         if choice and choice != 'y':
@@ -4760,7 +6198,7 @@ class PaperProcessorDaemon:
                 self.process_paper(file_path)
             except Exception as e:
                 self.logger.error(f"Error processing {file_path.name}: {e}")
-                print(f"❌ Error processing {file_path.name}: {e}")
+                print(f"Error processing {file_path.name}: {e}")
             
             self.logger.info("-"*60)
             self.logger.info("Ready for next scan")
@@ -4802,7 +6240,7 @@ class PaperProcessorDaemon:
             Final metadata dict to use for Zotero update
         """
         print("\n" + "="*60)
-        print("📋 METADATA COMPARISON")
+        print(Colors.colorize("📋 METADATA COMPARISON", ColorScheme.PAGE_TITLE))
         print("="*60)
         
         # Display comparison
@@ -4965,7 +6403,7 @@ class PaperProcessorDaemon:
         
         # Show comparison between all three sources
         print("\n" + "="*60)
-        print("🌐 ONLINE METADATA FOUND")
+        print(Colors.colorize("🌐 ONLINE METADATA FOUND", ColorScheme.PAGE_TITLE))
         print("="*60)
         
         print("\nExtracted (from scan):")
@@ -5028,7 +6466,7 @@ class PaperProcessorDaemon:
         print("=" * 60)
         
         # STEP 1: Metadata Comparison
-        print("\n🔄 Step 1: Metadata Comparison")
+        print(Colors.colorize("\n🔄 Step 1: Metadata Comparison", ColorScheme.PAGE_TITLE))
         zotero_metadata = self.convert_zotero_item_to_metadata(zotero_item)
         final_metadata = self.compare_metadata_step(metadata, zotero_metadata)
         
@@ -5048,7 +6486,7 @@ class PaperProcessorDaemon:
                     self.zotero_processor.update_item_field_if_missing(item_key, 'language', detected_language)
         
         # STEP 2: Tags Comparison
-        print("\n🔄 Step 2: Tags Comparison")
+        print(Colors.colorize("\n🔄 Step 2: Tags Comparison", ColorScheme.PAGE_TITLE))
         # Get current tags from Zotero item (local search returns tags as strings)
         current_tags_raw = zotero_item.get('tags', [])
         # Convert to dict format for edit_tags_interactively
@@ -5084,15 +6522,10 @@ class PaperProcessorDaemon:
                 print("ℹ️  No tag changes to save")
         
         # STEP 3: PDF Attachment (from Task 7 specification)
-        print("\n🔄 Step 3: PDF Attachment")
+        print(Colors.colorize("\n🔄 Step 3: PDF Attachment", ColorScheme.PAGE_TITLE))
         return self._handle_pdf_attachment_step(pdf_path, zotero_item, final_metadata)
     
-    def _extract_zotero_tags(self, zotero_item: dict) -> list:
-        """Extract tags from Zotero item for comparison."""
-        # This would need to be implemented to get tags from Zotero item
-        # For now, return empty list
-        return []
-    
+
     def _handle_pdf_attachment_step(self, pdf_path: Path, zotero_item: dict, metadata: dict) -> bool:
         """Handle PDF attachment step (from Task 7 specification)."""
         item_title = zotero_item.get('title', 'Unknown')
@@ -5317,25 +6750,38 @@ class PaperProcessorDaemon:
         for author in authors:
             info = {'name': author, 'paper_count': 0, 'recognized': False, 'recognized_as': None}
             if self.author_validator:
+                # Try exact match first
                 author_data = self.author_validator.get_author_info(author)
                 if author_data:
                     info['paper_count'] = author_data.get('paper_count', 0)
                     info['recognized'] = True
                     info['recognized_as'] = author_data.get('name')
                 else:
-                    # Try OCR correction / alternatives match
-                    try:
-                        suggestion = self.author_validator.suggest_ocr_correction(author)
-                        if suggestion:
-                            info['recognized'] = True
-                            info['recognized_as'] = suggestion.get('corrected_name')
-                            info['paper_count'] = suggestion.get('paper_count', 0)
-                    except Exception:
-                        pass
+                    # Try lastname matching (for cases like "Sicakkan" matching "Hakan Gürcan Sicakkan")
+                    # Use validate_authors which does lastname matching
+                    validation_result = self.author_validator.validate_authors([author])
+                    if validation_result['known_authors']:
+                        # Found match via lastname
+                        known_author = validation_result['known_authors'][0]
+                        info['recognized'] = True
+                        info['recognized_as'] = known_author['name']
+                        # Get paper count for the matched full name
+                        full_name_data = self.author_validator.get_author_info(known_author['name'])
+                        if full_name_data:
+                            info['paper_count'] = full_name_data.get('paper_count', 0)
+                    else:
+                        # Try OCR correction / alternatives match
+                        try:
+                            suggestion = self.author_validator.suggest_ocr_correction(author)
+                            if suggestion:
+                                info['recognized'] = True
+                                info['recognized_as'] = suggestion.get('corrected_name')
+                                info['paper_count'] = suggestion.get('paper_count', 0)
+                        except Exception:
+                            pass
             author_info.append(info)
         
-        # Display authors with letter labels
-        letters = 'abcdefghijklmnopqrstuvwxyz'
+        # Display authors with number labels (1, 2, 3, ...)
         author_map = {}
         
         while True:
@@ -5345,9 +6791,9 @@ class PaperProcessorDaemon:
             # Rebuild author_map each iteration (in case authors were edited)
             author_map = {}
             if author_info:
-                for i, info in enumerate(author_info[:26]):  # Limit to 26 authors
-                    letter = letters[i]
-                    author_map[letter] = info['name']
+                for i, info in enumerate(author_info):
+                    author_num = str(i + 1)  # 1-indexed for display
+                    author_map[author_num] = info['name']
                     if info['paper_count'] > 0:
                         papers_str = f"(in Zotero: {info['paper_count']} publications)"
                     elif info['recognized']:
@@ -5357,23 +6803,23 @@ class PaperProcessorDaemon:
                             papers_str = "(in Zotero, 0 publications found)"
                     else:
                         papers_str = "(not in Zotero)"
-                    print(f"  [{letter}] {info['name']} {papers_str}")
+                    print(f"  [{author_num}] {info['name']} {papers_str}")
             else:
                 print("  (No authors - use 'n' to add a new author)")
             
-            print("\nSelection options:")
-            print("  'a'   = Search by first author only")
-            print("  'ab'  = Search where 1st=a, 2nd=b")
-            print("  'ba'  = Search where 1st=b, 2nd=a")
-            print("  'all' = Search by any author (no order)")
-            print("  ''    = Use all authors as extracted")
-            print("  'e'   = Edit an author name")
-            print("  'n'   = Add new author manually")
-            print("  '-a'  = Delete author 'a' from list")
-            print("  'z'   = Back to previous step")
-            print("  'r'   = Restart from beginning")
+            print(Colors.colorize("\nSelection options:", ColorScheme.ACTION))
+            print(Colors.colorize("  '1'   = Search by first author only", ColorScheme.LIST))
+            print(Colors.colorize("  '12'  = Search where 1st=1, 2nd=2", ColorScheme.LIST))
+            print(Colors.colorize("  '21'  = Search where 1st=2, 2nd=1", ColorScheme.LIST))
+            print(Colors.colorize("  'all' = Search by any author (no order)", ColorScheme.LIST))
+            print(Colors.colorize("  ''    = Use all authors as extracted", ColorScheme.LIST))
+            print(Colors.colorize("  'e'   = Edit an author name", ColorScheme.LIST))
+            print(Colors.colorize("  'n'   = Add new author manually", ColorScheme.LIST))
+            print(Colors.colorize("  '-1'  = Delete author 1 from list", ColorScheme.LIST))
+            print(Colors.colorize("  'z'   = Back to previous step", ColorScheme.LIST))
+            print(Colors.colorize("  'r'   = Restart from beginning", ColorScheme.LIST))
             
-            selection = input("\nYour selection (letters like 'a', 'ab', 'all', or commands e/n/-a/z/r): ").strip()
+            selection = input("\nYour selection (numbers like '1', '12', 'all', or commands e/n/-1/z/r): ").strip()
             selection_lower = selection.lower()
             
             if selection_lower == 'z':
@@ -5381,10 +6827,10 @@ class PaperProcessorDaemon:
             elif selection_lower == 'r':
                 return 'RESTART'
             elif selection_lower.startswith('-'):
-                # Delete an author by letter
-                letter_to_delete = selection_lower[1:]  # Remove the '-' prefix
-                if letter_to_delete in author_map:
-                    author_to_remove = author_map[letter_to_delete]
+                # Delete an author by number
+                num_to_delete = selection_lower[1:]  # Remove the '-' prefix
+                if num_to_delete in author_map:
+                    author_to_remove = author_map[num_to_delete]
                     # Remove from author_info
                     author_info = [info for info in author_info if info['name'] != author_to_remove]
                     # Remove from authors list
@@ -5395,7 +6841,7 @@ class PaperProcessorDaemon:
                     if not author_info:
                         print("⚠️  No authors remaining - you can add a new author with 'n'")
                 else:
-                    print(f"⚠️  Invalid author letter: '{letter_to_delete}'")
+                    print(f"⚠️  Invalid author number: '{num_to_delete}'")
                 print()  # Blank line before showing list again
                 continue
             elif selection_lower == 'e':
@@ -5404,7 +6850,8 @@ class PaperProcessorDaemon:
                     print("⚠️  No authors to edit")
                     continue
                 print("\nWhich author to edit?")
-                edit_choice = input(f"Enter letter (a-{letters[len(author_info)-1]}): ").strip().lower()
+                max_num = len(author_info)
+                edit_choice = input(f"Enter number (1-{max_num}): ").strip()
                 if edit_choice in author_map:
                     old_name = author_map[edit_choice]
                     new_name = input(f"Edit '{old_name}' to: ").strip()
@@ -5468,32 +6915,51 @@ class PaperProcessorDaemon:
                 all_authors = [info['name'] for info in author_info]
                 return all_authors
             else:
-                # Parse selection (e.g., "ab" or "bac")
+                # Parse selection (e.g., "12" or "21" for numbered authors)
                 selected_authors = []
-                # If user typed option digits here by mistake, guide them
-                if selection_lower.isdigit():
-                    print("⚠️  This menu uses letters (e.g., 'a' or 'ab'). For numeric options (1-4), respond in the previous options prompt.")
+                
                 # Support typing a last name directly (e.g., "Hochschild"): only for length >= 3
-                else:
+                # Check if it's not all digits (could be a name)
+                if not selection_lower.isdigit() and len(selection_lower) >= 3:
                     # Try to resolve direct text to an author by last name match
                     direct = selection_lower.strip()
-                    if direct and len(direct) >= 3:
-                        for info in author_info:
-                            last = info['name'].split(',')[0].split()[-1].lower()
-                            if last == direct or direct in last:
-                                return [info['name']]
+                    for info in author_info:
+                        last = info['name'].split(',')[0].split()[-1].lower()
+                        if last == direct or direct in last:
+                            return [info['name']]
+                
+                # Parse number sequence (e.g., "12" means author 1 then author 2)
+                # First check if the entire selection is a single valid author number
+                if selection in author_map:
+                    # Single author selection (e.g., "3" for author 3)
+                    selected_authors = [author_map[selection]]
+                    author_str = selected_authors[0]
+                    self.logger.info(f"User selected author: {author_str}")
+                    return selected_authors
+                
+                # Handle multi-digit numbers by parsing character by character (e.g., "12" means author 1 then author 2)
                 for char in selection:
-                    if char.lower() in author_map:
-                        selected_authors.append(author_map[char.lower()])
+                    if char in author_map:
+                        selected_authors.append(author_map[char])
+                    elif char.isdigit():
+                        # Valid digit but not in map (e.g., author number doesn't exist)
+                        available = ', '.join(sorted(author_map.keys())) if author_map else 'none'
+                        print(f"⚠️  Invalid author number: '{char}' (available: {available})")
                     else:
-                        print(f"⚠️  Ignoring invalid selection: '{char}'")
+                        # Non-digit, non-command character
+                        print(f"⚠️  Ignoring invalid character: '{char}'")
                 
                 if selected_authors:
                     author_str = ', '.join(selected_authors)
                     self.logger.info(f"User selected authors in order: {author_str}")
                     return selected_authors
                 else:
-                    print("⚠️  No valid selection, please try again")
+                    # Show helpful error with available options
+                    if author_map:
+                        available = ', '.join(sorted(author_map.keys()))
+                        print(f"⚠️  No valid selection. Available author numbers: {available}")
+                    else:
+                        print("⚠️  No authors available. Use 'n' to add a new author.")
                     print()  # Blank line before showing list again
                     continue
     
@@ -5517,20 +6983,20 @@ class PaperProcessorDaemon:
         print("These items exist in your Zotero library.")
         print()
         
-        # Display items with letter labels
-        letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        # Display items with number labels
         item_map = {}
+        max_items = min(len(matches), 99)  # Support up to 99 items
         
-        for i, match in enumerate(matches[:26]):  # Limit to 26 items
-            letter = letters[i]
-            item_map[letter] = match
+        for i, match in enumerate(matches[:max_items]):
+            item_num = i + 1
+            item_map[str(item_num)] = match
             
             title = match.get('title', 'Unknown title')
             # Truncate long titles
             if len(title) > 70:
                 title = title[:67] + "..."
             
-            print(f"  [{letter}] {title}")
+            print(f"  [{item_num}] {title}")
             
             # Show authors
             authors = match.get('authors', [])
@@ -5583,40 +7049,41 @@ class PaperProcessorDaemon:
         
         # Show action menu
         print("ACTIONS:")
-        print("  [A-Z] Select item from list above")
-        print("[1]   🔍 Change author/year search parameters")
-        print("[2]   🔍 Change all search parameters")
-        print("[3]   None of these items - create new")
-        print("[4]   ❌ Skip document")
+        print("  [1-N] Select item from list above")
+        print("[a]   🔍 Change author/year search parameters")
+        print("[b]   🔍 Change all search parameters")
+        print("[c]   None of these items - create new")
+        print("[d]   ❌ Skip document")
         print("  (z) ⬅️  Back to author selection")
         print("  (r) 🔄 Restart from beginning")
         print("  (q) Quit daemon")
         print()
         
         while True:
-            choice = input("Enter your choice: ").strip().upper()
+            choice = input("Enter your choice: ").strip().lower()
             
             if choice in item_map:
                 # User selected an item
                 selected_item = item_map[choice]
                 self.logger.info(f"User selected item: {selected_item.get('title', 'Unknown')}")
                 return ('select', selected_item)
-            elif choice == '1':
+            elif choice == 'a':
                 return ('search', None)
-            elif choice == '2':
+            elif choice == 'b':
                 return ('edit', None)
-            elif choice == '3':
+            elif choice == 'c':
                 return ('create', None)  # "None of these items"
-            elif choice == '4':
+            elif choice == 'd':
                 return ('skip', None)
-            elif choice == 'Z':
+            elif choice == 'z':
                 return ('back', None)
-            elif choice == 'R':
+            elif choice == 'r':
                 return ('restart', None)
-            elif choice == 'Q':
+            elif choice == 'q':
                 return ('quit', None)
             else:
-                print("⚠️  Invalid choice. Please select a letter A-Z, number 1-4, or 'z', 'r', 'q'.")
+                max_num = len(matches) if len(matches) <= 99 else 99
+                print(f"⚠️  Invalid choice. Please select a number 1-{max_num}, letter a-d, or 'z', 'r', 'q'.")
     
     def quick_manual_entry(self, extracted_metadata: dict) -> dict:
         """Allow user to quickly enter missing key fields manually.
@@ -5806,6 +7273,7 @@ class PaperProcessorDaemon:
         
         all_results = []
         source_name = None
+        checked_libraries = []  # Track which libraries were checked
         
         # Use document type to guide API selection
         doc_type = metadata.get('document_type', '').lower()
@@ -5817,6 +7285,8 @@ class PaperProcessorDaemon:
         ) and doc_type in ['journal_article', 'conference_paper', 'report', 'academic_paper', '']
         
         if should_try_crossref:
+            print("🔍 Checking CrossRef...")
+            checked_libraries.append("CrossRef")
             try:
                 # Access crossref client from metadata processor
                 crossref = self.metadata_processor.crossref
@@ -5831,10 +7301,15 @@ class PaperProcessorDaemon:
                 if results:
                     all_results = results
                     source_name = "CrossRef"
+                    print("   ✅ CrossRef: Found results")
+                else:
+                    print("   ⚠️  CrossRef: No results found")
                     
             except Exception as e:
                 self.logger.error(f"CrossRef search error: {e}")
-                print(f"⚠️  CrossRef search failed: {e}")
+                print(f"   ❌ CrossRef: Error - {e}")
+        else:
+            print("⏭️  Skipping CrossRef (document type: " + (doc_type if doc_type else "unknown") + ")")
         
         # Try arXiv for preprints and working papers (also try if no CrossRef result and no journal)
         should_try_arxiv = (
@@ -5843,6 +7318,8 @@ class PaperProcessorDaemon:
         )
         
         if should_try_arxiv:
+            print("🔍 Checking arXiv...")
+            checked_libraries.append("arXiv")
             try:
                 arxiv = self.metadata_processor.arxiv
                 results = arxiv.search_by_metadata(
@@ -5854,10 +7331,16 @@ class PaperProcessorDaemon:
                 if results:
                     all_results = results
                     source_name = "arXiv"
+                    print("   ✅ arXiv: Found results")
+                else:
+                    print("   ⚠️  arXiv: No results found")
                     
             except Exception as e:
                 self.logger.error(f"arXiv search error: {e}")
-                print(f"⚠️  arXiv search failed: {e}")
+                print(f"   ❌ arXiv: Error - {e}")
+        else:
+            if not all_results:
+                print("⏭️  Skipping arXiv (document type: " + (doc_type if doc_type else "unknown") + ")")
         
         # Try book lookup for book chapters (title + editor)
         should_try_book_lookup = doc_type == 'book_chapter'
@@ -5887,8 +7370,8 @@ class PaperProcessorDaemon:
                     print("\nEditor name (often one of the chapter authors):")
                     if editor_candidates:
                         print(f"Chapter authors found: {'; '.join(editor_candidates)}")
-                        print("[Enter] = Use first chapter author as editor")
-                        print("[Enter name] = Enter editor name manually")
+                        print(Colors.colorize("[Enter] = Use first chapter author as editor", ColorScheme.LIST))
+                        print(Colors.colorize("[Enter name] = Enter editor name manually", ColorScheme.LIST))
                         editor_input = input("Editor: ").strip()
                         if not editor_input and editor_candidates:
                             editor = editor_candidates[0]
@@ -5903,8 +7386,10 @@ class PaperProcessorDaemon:
             
             # Perform book lookup if we have book title
             if book_title:
+                print("🔍 Checking Google Books/OpenLibrary...")
+                checked_libraries.append("Google Books/OpenLibrary")
                 try:
-                    print(f"\n🔍 Searching for book: '{book_title}'" + (f" (editor: {editor})" if editor else " (no editor)"))
+                    print(f"   Searching for book: '{book_title}'" + (f" (editor: {editor})" if editor else " (no editor)"))
                     book_result = self.book_lookup_service.lookup_by_title_and_editor(book_title, editor)
                     
                     if book_result:
@@ -5914,9 +7399,9 @@ class PaperProcessorDaemon:
                         # Store as single result (books don't return multiple like CrossRef)
                         all_results = [normalized_book]
                         source_name = "Google Books/OpenLibrary"
-                        print("✅ Found book metadata")
+                        print("   ✅ Google Books/OpenLibrary: Found results")
                     else:
-                        print("❌ No book metadata found")
+                        print("   ⚠️  Google Books/OpenLibrary: No results found")
                         
                         # Try national library search as fallback
                         language = None
@@ -5925,24 +7410,28 @@ class PaperProcessorDaemon:
                         elif hasattr(self, '_original_scan_path') and self._original_scan_path:
                             language = self._detect_language_from_filename(self._original_scan_path)
                         if language and book_title:
+                            print(f"🔍 Checking National Libraries ({language})...")
+                            checked_libraries.append(f"National Libraries ({language})")
                             try:
-                                print(f"\n🔍 Trying national library search for {language}...")
+                                country_code = self._language_to_country_code(language)
                                 nat_lib_results = self._search_national_library_for_book(
                                     book_title=book_title, 
                                     editor=editor,
                                     language=language,
-                                    country_code=language
+                                    country_code=country_code
                                 )
                                 if nat_lib_results:
                                     all_results.extend(nat_lib_results)
                                     source_name = "Google Books/OpenLibrary + National Libraries"
-                                    print(f"✅ Found {len(nat_lib_results)} additional result(s) in national libraries")
+                                    print(f"   ✅ National Libraries: Found {len(nat_lib_results)} result(s)")
+                                else:
+                                    print(f"   ⚠️  National Libraries: No results found")
                             except Exception as e:
                                 self.logger.error(f"National library search error: {e}")
-                                print(f"⚠️  National library search failed: {e}")
+                                print(f"   ❌ National Libraries: Error - {e}")
                 except Exception as e:
                     self.logger.error(f"Book lookup error: {e}")
-                    print(f"⚠️  Book search failed: {e}")
+                    print(f"   ❌ Google Books/OpenLibrary: Error - {e}")
         
         # Also try national library search for books and theses
         if doc_type in ['book', 'thesis'] and not all_results:
@@ -5955,25 +7444,34 @@ class PaperProcessorDaemon:
                 language = self._detect_language_from_filename(self._original_scan_path)
             
             if title and language:
+                print(f"🔍 Checking National Libraries ({language})...")
+                checked_libraries.append(f"National Libraries ({language})")
                 try:
-                    print(f"\n🔍 Trying national library search for {doc_type} ({language})...")
+                    country_code = self._language_to_country_code(language)
                     nat_lib_results = self._search_national_library_for_book(
                         book_title=title,
                         authors=authors,
                         language=language,
-                        country_code=language,
+                        country_code=country_code,
                         item_type='books' if doc_type == 'book' else 'papers'
                     )
                     if nat_lib_results:
                         all_results.extend(nat_lib_results)
                         source_name = "National Libraries"
-                        print(f"✅ Found {len(nat_lib_results)} result(s) in national libraries")
+                        print(f"   ✅ National Libraries: Found {len(nat_lib_results)} result(s)")
+                    else:
+                        print(f"   ⚠️  National Libraries: No results found")
                 except Exception as e:
                     self.logger.error(f"National library search error: {e}")
-                    print(f"⚠️  National library search failed: {e}")
+                    print(f"   ❌ National Libraries: Error - {e}")
         
         if not all_results:
-            print("❌ No matches found in online libraries")
+            if checked_libraries:
+                print(f"\n❌ No matches found in online libraries")
+                print(f"   Checked: {', '.join(checked_libraries)}")
+            else:
+                print(f"\n❌ No matches found in online libraries")
+                print(f"   No libraries were checked (document type: {doc_type if doc_type else 'unknown'})")
             print()
             return None
         
@@ -6312,7 +7810,8 @@ class PaperProcessorDaemon:
         
         for isbn in possible_isbns:
             try:
-                print(f"\n📚 Step 3: Resolving ISBN {isbn} via configured lookup services...")
+                step_title = Colors.colorize(f"\n📚 Step 3: Resolving ISBN {isbn} via configured lookup services...", ColorScheme.PAGE_TITLE)
+                print(step_title)
                 lookup_result = self.book_lookup_service.lookup_isbn(isbn)
                 if lookup_result:
                     normalized_metadata = self._normalize_isbn_lookup_metadata(lookup_result, isbn)
@@ -6429,15 +7928,17 @@ class PaperProcessorDaemon:
             pdf_path: Path to PDF file
             
         Returns:
-            Language code (NO, EN, DE, FI, SE) or None if not detected
+            ISO 639-1 language code (no, en, de, fi, sv, da) for Zotero compatibility
         """
         filename = pdf_path.name.upper()
+        # Map filename prefixes to ISO 639-1 language codes (for Zotero compatibility)
         language_map = {
-            'NO_': 'NO',
-            'EN_': 'EN',
-            'DE_': 'DE',
-            'FI_': 'FI',
-            'SE_': 'SE'
+            'NO_': 'no',  # Norwegian
+            'EN_': 'en',  # English
+            'DE_': 'de',  # German
+            'FI_': 'fi',  # Finnish
+            'SV_': 'sv',  # Swedish (ISO code is 'sv')
+            'DA_': 'da'   # Danish
         }
         
         for prefix, lang_code in language_map.items():
@@ -6445,6 +7946,26 @@ class PaperProcessorDaemon:
                 return lang_code
         
         return None
+    
+    def _language_to_country_code(self, language_code: str) -> Optional[str]:
+        """Convert ISO 639-1 language code to country code for national library searches.
+        
+        Args:
+            language_code: ISO 639-1 language code (e.g., 'no', 'sv', 'da')
+            
+        Returns:
+            Country code (e.g., 'NO', 'SE', 'DK') or None
+        """
+        # Map ISO language codes to country codes for national library API
+        lang_to_country = {
+            'no': 'NO',  # Norwegian
+            'en': 'EN',  # English (no specific country)
+            'de': 'DE',  # German
+            'fi': 'FI',  # Finnish
+            'sv': 'SE',  # Swedish -> Sweden
+            'da': 'DK'   # Danish -> Denmark
+        }
+        return lang_to_country.get(language_code.lower())
     
     def _search_national_library_for_book(self, book_title: str, editor: str = None, 
                                          authors: list = None, language: str = None,
@@ -6455,8 +7976,8 @@ class PaperProcessorDaemon:
             book_title: Title to search for
             editor: Optional editor name (for book chapters)
             authors: Optional list of author names
-            language: Language code (NO, EN, DE, etc.)
-            country_code: Country code for library selection (defaults to language)
+            language: ISO 639-1 language code (no, en, de, etc.) - used as fallback
+            country_code: Country code (NO, SE, DK, etc.) for library selection (preferred)
             item_type: 'books' or 'papers' (theses are usually papers)
             
         Returns:
@@ -6603,7 +8124,7 @@ class PaperProcessorDaemon:
         print("="*60)
         
         # Step 1: Quick manual entry
-        print("\n📝 Step 1: Quick Manual Entry")
+        print(Colors.colorize("\n📝 Step 1: Quick Manual Entry", ColorScheme.PAGE_TITLE))
         combined_metadata = self.quick_manual_entry(extracted_metadata)
         if combined_metadata is None:
             # User cancelled during manual entry
@@ -6611,7 +8132,7 @@ class PaperProcessorDaemon:
             return False
         
         # Step 2: Search online libraries (optional)
-        print("\n🌐 Step 2: Online Library Search (Optional)")
+        print(Colors.colorize("\n🌐 Step 2: Online Library Search (Optional)", ColorScheme.PAGE_TITLE))
         print("This step searches CrossRef and arXiv to enrich metadata from online sources.")
         print("You can skip this if your manual entry is complete.")
         print()
@@ -6635,7 +8156,7 @@ class PaperProcessorDaemon:
                 return False
         
         # Step 3: Metadata selection
-        print("\n📋 Step 3: Metadata Selection")
+        print(Colors.colorize("\n📋 Step 3: Metadata Selection", ColorScheme.PAGE_TITLE))
         final_metadata = combined_metadata
         
         if online_metadata:
@@ -6671,13 +8192,20 @@ class PaperProcessorDaemon:
         else:
             # No online results - either none found or user skipped all
             print("\nUsing manual/extracted metadata (no online library metadata selected)")
-            confirm = input("Proceed with creation? [Y/n]: ").strip().lower()
+            confirm = self._input_with_timeout(
+                "Proceed with creation? [Y/n]: ",
+                default="y"
+            )
+            if confirm is None:
+                print("❌ Cancelled")
+                return False
+            confirm = confirm.strip().lower()
             if confirm and confirm != 'y':  # Enter or 'y' = proceed, anything else = cancel
                 print("❌ Cancelled")
                 return False
         
         # Step 4: Tag selection
-        print("\n🏷️  Step 4: Tag Selection")
+        print(Colors.colorize("\n🏷️  Step 4: Tag Selection", ColorScheme.PAGE_TITLE))
         
         # Get tags from online metadata if available
         online_tags = []
@@ -6699,7 +8227,7 @@ class PaperProcessorDaemon:
                 final_metadata['language'] = detected_language
         
         # Step 5: Create item and attach PDF
-        print("\n📖 Step 5: Creating Zotero Item")
+        print(Colors.colorize("\n📖 Step 5: Creating Zotero Item", ColorScheme.PAGE_TITLE))
 
         # Allow skipping attachment entirely
         try:
@@ -6906,15 +8434,22 @@ class PaperProcessorDaemon:
         print("="*70)
         print("You can add a sentence or two from your notes on the paper folder.")
         print("  (Enter) Skip - don't add a note")
-        print("  (n) Add a note")
+        print("  (a) Add a note")
         print("  (z) Cancel and go back")
         print("="*70)
-        note_choice = input("\nAdd a note? [Enter/n/z]: ").strip().lower()
+        note_choice = self._input_with_timeout(
+            "\nAdd a note? [Enter/a/z]: ",
+            default=""
+        )
+        if note_choice is None:
+            print("⬅️  Cancelling note addition")
+            return False
+        note_choice = note_choice.strip().lower()
         
         if note_choice == 'z':
             print("⬅️  Cancelling note addition")
             return False
-        elif note_choice == 'n':
+        elif note_choice == 'a':
             print("\n📝 Enter your note (press Enter on a blank line when finished):")
             note_lines = []
             while True:
@@ -6979,7 +8514,7 @@ class PaperProcessorDaemon:
         
         # Create pages and navigation engine
         pages = create_all_pages(self)
-        engine = NavigationEngine(pages)
+        engine = NavigationEngine(pages, timeout_seconds=self.prompt_timeout)
         
         # Run page flow starting from REVIEW & PROCEED
         result = engine.run_page_flow('review_and_proceed', ctx_dict)
@@ -7041,7 +8576,7 @@ class PaperProcessorDaemon:
         
         print("\n📋 Executing actions...")
         
-        # Step 1: Determine which PDF to use (original, page-offset temp, or split)
+        # Step 1: Determine which PDF to use (original or page-offset temp)
         # Check if there's a temporary PDF created from page offset
         pdf_to_copy = getattr(self, '_temp_pdf_path', None)
         if pdf_to_copy is None or not pdf_to_copy.exists():
@@ -7050,52 +8585,100 @@ class PaperProcessorDaemon:
         else:
             self.logger.info(f"Using temporary PDF from page offset: {pdf_to_copy.name}")
         
+        # Step 1a: Check for landscape/two-up pages BEFORE border removal
+        # This ensures detection works correctly even if border removal changes dimensions
         name_lower = pdf_to_copy.name.lower()
         split_attempted = False
         split_success = False
+        needs_split = False
+        landscape_width = None
+        landscape_height = None
+        landscape_is_two_up = False
+        landscape_score = 0.0
+        landscape_mode = 'none'
         
         if name_lower.endswith('_double.pdf'):
             # Always split on _double.pdf
-            print(f"1/4 Preparing split for two-up file...")
-            split_attempted = True
-            split_path = self._split_with_mutool(pdf_to_copy)
-            if split_path:
-                pdf_to_copy = split_path
-                name_lower = pdf_to_copy.name.lower()
-                self.logger.info(f"Using split version for Zotero: {pdf_to_copy.name}")
-                split_success = True
-            else:
-                print("⚠️  Splitting the PDF did fail. Using the original in landscape format.")
+            needs_split = True
+            self.logger.info("_double.pdf detected - will split after border removal")
         else:
-            # Check if we should prompt for split on wide pages
+            # Check if we should prompt for split on wide pages (before border removal)
             try:
                 import pdfplumber
                 with pdfplumber.open(str(pdf_to_copy)) as pdf:
                     if len(pdf.pages) > 0:
                         first = pdf.pages[0]
                         width, height = first.width, first.height
-                        if width and height and width / max(1.0, height) > 1.3:
-                            is_two_up, score, mode = self._detect_two_up_page(pdf_to_copy)
-                            if is_two_up:
-                                print("\nTwo-up candidate detected:")
-                                print(f"  Aspect ratio: {width/height:.2f}")
-                                print(f"  Center structure: {mode} score={score:.2f}")
-                                choice = input("Split this file into single pages before attaching to Zotero? [y/N]: ").strip().lower()
-                                if choice == 'y':
-                                    split_attempted = True
-                                    split_path = self._split_with_mutool(pdf_to_copy, width=width, height=height)
-                                    if split_path:
-                                        pdf_to_copy = split_path
-                                        name_lower = pdf_to_copy.name.lower()
-                                        self.logger.info(f"Using split version for Zotero: {pdf_to_copy.name}")
-                                        split_success = True
-                                    else:
-                                        print("⚠️  Splitting the PDF did fail. Using the original in landscape format.")
+                        if width and height:
+                            aspect_ratio = width / max(1.0, height)
+                            if aspect_ratio > 1.3:
+                                # Landscape detected - check if it's two-up
+                                is_two_up, score, mode = self._detect_two_up_page(pdf_to_copy)
+                                landscape_width = width
+                                landscape_height = height
+                                landscape_is_two_up = is_two_up
+                                landscape_score = score
+                                landscape_mode = mode
+                                
+                                if is_two_up:
+                                    self.logger.info(f"Landscape detected: {width:.1f}x{height:.1f} (ratio: {aspect_ratio:.2f})")
+                                    self.logger.info(f"Two-up candidate: {mode} score={score:.2f}")
+                                    needs_split = True
             except Exception as e:
-                self.logger.debug(f"Two-up detection skipped: {e}")
+                self.logger.debug(f"Landscape detection skipped: {e}")
                 pass
         
-        # Step 1b: Optional trimming of leading pages
+        # Step 1b: Remove borders (for both single and two-up pages - consistent UX)
+        border_removed_pdf = self._check_and_remove_dark_borders(pdf_to_copy)
+        if border_removed_pdf:
+            pdf_to_copy = border_removed_pdf
+            self.logger.debug(f"Using PDF without borders: {border_removed_pdf.name}")
+            name_lower = pdf_to_copy.name.lower()
+        
+        # Step 1c: Split two-up pages (if needed) - now works on cleaned PDF
+        if needs_split:
+            if name_lower.endswith('_double.pdf'):
+                # Always split on _double.pdf
+                print(f"1/4 Preparing split for two-up file...")
+                split_attempted = True
+                split_path = self._split_with_mutool(pdf_to_copy)
+                if split_path:
+                    pdf_to_copy = split_path
+                    name_lower = pdf_to_copy.name.lower()
+                    self.logger.info(f"Using split version for Zotero: {pdf_to_copy.name}")
+                    split_success = True
+                else:
+                    print("⚠️  Splitting the PDF did fail. Using the original in landscape format.")
+            elif landscape_is_two_up:
+                # Landscape page detected before border removal - prompt user
+                print("\nTwo-up candidate detected:")
+                print(f"  Aspect ratio: {landscape_width/landscape_height:.2f}")
+                print(f"  Center structure: {landscape_mode} score={landscape_score:.2f}")
+                choice = input("Split this file into single pages before attaching to Zotero? [y/N]: ").strip().lower()
+                if choice == 'y':
+                    split_attempted = True
+                    # Re-check dimensions after border removal in case they changed
+                    try:
+                        import pdfplumber
+                        with pdfplumber.open(str(pdf_to_copy)) as pdf:
+                            if len(pdf.pages) > 0:
+                                first = pdf.pages[0]
+                                width, height = first.width, first.height
+                                split_path = self._split_with_mutool(pdf_to_copy, width=width, height=height)
+                            else:
+                                split_path = self._split_with_mutool(pdf_to_copy, width=landscape_width, height=landscape_height)
+                    except Exception:
+                        split_path = self._split_with_mutool(pdf_to_copy, width=landscape_width, height=landscape_height)
+                    
+                    if split_path:
+                        pdf_to_copy = split_path
+                        name_lower = pdf_to_copy.name.lower()
+                        self.logger.info(f"Using split version for Zotero: {pdf_to_copy.name}")
+                        split_success = True
+                    else:
+                        print("⚠️  Splitting the PDF did fail. Using the original in landscape format.")
+        
+        # Step 1c: Optional trimming of leading pages
         if split_attempted and not split_success:
             print("ℹ️  Split failed; skipping trimming to avoid shifting the wrong pages.")
         else:
@@ -7103,12 +8686,6 @@ class PaperProcessorDaemon:
             if trimmed:
                 pdf_to_copy = trimmed_pdf
                 name_lower = pdf_to_copy.name.lower()
-        
-        # Step 1c: Check and optionally remove dark borders
-        border_removed_pdf = self._check_and_remove_dark_borders(pdf_to_copy)
-        if border_removed_pdf:
-            pdf_to_copy = border_removed_pdf
-            self.logger.debug(f"Using PDF without borders: {border_removed_pdf.name}")
         
         # Step 2: Check if target file exists and show comparison/choice if needed
         target_path_full = self.publications_dir / target_filename
@@ -7168,6 +8745,36 @@ class PaperProcessorDaemon:
                 suffix = target_path_full.suffix
                 target_filename = f"{stem}_scan{suffix}"
                 target_path_full = self.publications_dir / target_filename
+        
+        # Step 2: Verify and log target filename before copy
+        # Defensive check: ensure target_filename doesn't contain temp file patterns
+        temp_file_patterns = ['_no_borders', '_split', '_from_page', '_no_page1']
+        if target_filename and any(pattern in target_filename for pattern in temp_file_patterns):
+            self.logger.warning(f"Target filename contains temp file pattern: {target_filename}")
+            # ALWAYS regenerate filename from Zotero item (not from old metadata)
+            from shared_tools.utils.filename_generator import FilenameGenerator
+            filename_gen = FilenameGenerator()
+            zotero_authors = zotero_item.get('authors', [])
+            zotero_title = zotero_item.get('title', '')
+            zotero_year = zotero_item.get('year', zotero_item.get('date', ''))
+            zotero_item_type = zotero_item.get('itemType', 'journalArticle')
+            self.logger.info(f"Regenerating filename from Zotero item - Title: '{zotero_title}', Authors: {zotero_authors}, Year: {zotero_year}")
+            merged_metadata = {
+                'title': zotero_title,
+                'authors': zotero_authors,
+                'year': zotero_year if zotero_year else 'Unknown',
+                'document_type': zotero_item_type
+            }
+            target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
+            self.logger.info(f"Regenerated target filename: {target_filename}")
+        
+        # Log the filename being used for copy
+        # Verify we're using Zotero item data, not old metadata
+        zotero_title = zotero_item.get('title', '')
+        zotero_authors = zotero_item.get('authors', [])
+        self.logger.info(f"Copying PDF to publications with filename: {target_filename}")
+        self.logger.debug(f"Source PDF: {pdf_to_copy.name}, Target filename: {target_filename}")
+        self.logger.debug(f"Zotero item title: '{zotero_title}', authors: {zotero_authors}")
         
         # Step 2: Copy to publications directory via PowerShell
         print(f"2/4 Copying to publications directory...")
@@ -7353,25 +8960,77 @@ class PaperProcessorDaemon:
             year = item_metadata.get('year', '')
             
             if author_lastname and year:
-                # Look for files starting with Author_Year
+                # Look for files starting with Author_Year using cached list
                 search_pattern = f"{author_lastname}_{year}"
-                matching_files = list(self.publications_dir.glob(f"{search_pattern}*.pdf"))
+                cached_files = self._get_publications_cache()
                 
-                if matching_files:
+                # Filter cached filenames that match the pattern
+                matching_filenames = [f for f in cached_files if f.startswith(search_pattern)]
+                
+                if matching_filenames:
                     # Return the first match (most likely the same file)
-                    found_path = matching_files[0]
-                    stat = found_path.stat()
-                    return {
-                        'path': found_path,
-                        'size_mb': stat.st_size / 1024 / 1024,
-                        'modified': stat.st_mtime,
-                        'filename': found_path.name,
-                        'fuzzy_match': True  # Flag this as fuzzy match
-                    }
+                    found_filename = matching_filenames[0]
+                    found_path = self.publications_dir / found_filename
+                    
+                    # Verify file still exists (cache might be slightly stale)
+                    if found_path.exists():
+                        stat = found_path.stat()
+                        return {
+                            'path': found_path,
+                            'size_mb': stat.st_size / 1024 / 1024,
+                            'modified': stat.st_mtime,
+                            'filename': found_filename,
+                            'fuzzy_match': True  # Flag this as fuzzy match
+                        }
         except Exception as e:
             self.logger.debug(f"Could not locate existing PDF: {e}")
         
         return {}
+    
+    def _refresh_publications_cache(self):
+        """Refresh the publications directory cache by listing all PDF files.
+        
+        This is called on startup and periodically while daemon is idle to keep
+        the cache fresh for fast fuzzy matching.
+        """
+        try:
+            # List all PDF files in publications directory
+            pdf_files = []
+            if self.publications_dir.exists():
+                # Use glob to get all PDFs
+                pdf_paths = list(self.publications_dir.glob("*.pdf"))
+                pdf_files = [p.name for p in pdf_paths]
+            
+            # Save to cache file
+            cache_data = {
+                'pdf_files': pdf_files,
+                'timestamp': time.time(),
+                'count': len(pdf_files)
+            }
+            
+            with open(self.publications_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=2)
+            
+            self.logger.debug(f"Refreshed publications cache: {len(pdf_files)} PDFs")
+        except Exception as e:
+            self.logger.warning(f"Failed to refresh publications cache: {e}")
+    
+    def _get_publications_cache(self) -> list:
+        """Get cached list of PDF filenames from publications directory.
+        
+        Returns:
+            List of PDF filenames, or empty list if cache unavailable
+        """
+        try:
+            if not self.publications_cache_file.exists():
+                return []
+            
+            with open(self.publications_cache_file, 'r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+                return cache_data.get('pdf_files', [])
+        except Exception as e:
+            self.logger.debug(f"Could not load publications cache: {e}")
+            return []
     
     def _display_pdf_comparison(self, scan_path: Path, scan_size_mb: float, existing_pdf_info: dict):
         """Display comparison between scan and existing PDF.

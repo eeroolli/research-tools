@@ -94,6 +94,9 @@
 - Do not use icons except for error or success indicators in user messages
 - Keep communication clear and professional
 
+## Paths
+Many projects utilize both WSL and windows (Powershell, CMD, etc.). Every filename has to be in correct format for its inteded use (/mnt/f/prog or F:\prog).
+
 ## AI Assistant Workflow
 1. **Problem Analysis**
    - Analyze the issue thoroughly

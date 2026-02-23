@@ -353,19 +353,44 @@ class AuthorValidator:
         corrections = []
         
         for extracted_name in extracted_authors:
-            # Extract last name and look up in index
+            # Strategy 1: Try lastname matching first (fast, common case)
             lastname = self._extract_lastname(extracted_name)
+            matches = []
             
             if lastname in self.lastname_index:
                 # Found matching last name(s) in Zotero
                 matches = self.lastname_index[lastname]
+            
+            # Strategy 2: If no lastname match, try matching any part of the name
+            # This handles cases where first/last names are swapped or only part extracted
+            if not matches:
+                extracted_lower = extracted_name.lower()
+                # Extract all words from extracted name
+                extracted_words = [w.strip() for w in extracted_lower.replace(',', ' ').split() if len(w.strip()) >= 2]
                 
+                # Search for any Zotero author that contains any of these words
+                for author in self.zotero_authors:
+                    author_lower = author['name'].lower()
+                    # Check if any word from extracted name appears in Zotero author name
+                    if any(word in author_lower for word in extracted_words):
+                        matches.append(author['name'])
+                
+                # Remove duplicates while preserving order
+                seen = set()
+                unique_matches = []
+                for match in matches:
+                    if match not in seen:
+                        seen.add(match)
+                        unique_matches.append(match)
+                matches = unique_matches
+            
+            if matches:
                 if len(matches) == 1:
                     # Single match - use it
                     known.append({
                         'name': matches[0],
                         'original': extracted_name,
-                        'match_type': 'lastname',
+                        'match_type': 'lastname' if lastname in self.lastname_index else 'partial',
                         'alternatives': []
                     })
                 else:
@@ -373,11 +398,11 @@ class AuthorValidator:
                     known.append({
                         'name': matches[0],
                         'original': extracted_name,
-                        'match_type': 'lastname_multiple',
+                        'match_type': 'lastname_multiple' if lastname in self.lastname_index else 'partial_multiple',
                         'alternatives': matches[1:]  # Other options
                     })
             else:
-                # Last name not found - genuinely unknown
+                # No match found - genuinely unknown
                 unknown.append({
                     'name': extracted_name,
                     'suggestion': None

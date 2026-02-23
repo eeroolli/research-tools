@@ -6,7 +6,7 @@ Supports configurable patterns for different document types.
 
 import configparser
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 class FilenameGenerator:
@@ -49,6 +49,9 @@ class FilenameGenerator:
         self.title_max_length = config.getint('FILENAME_PATTERNS', 'title_max_length', fallback=100)
         self.title_clean_spaces = config.getboolean('FILENAME_PATTERNS', 'title_clean_spaces', fallback=True)
         self.title_clean_special_chars = config.getboolean('FILENAME_PATTERNS', 'title_clean_special_chars', fallback=True)
+        
+        # Get filename max length (without extension)
+        self.filename_max_length = config.getint('FILENAME_PATTERNS', 'filename_max_length', fallback=100)
     
     def format_authors(self, authors: List[str]) -> str:
         """Format authors for filename using configurable patterns.
@@ -210,7 +213,214 @@ class FilenameGenerator:
             filename = filename.replace('.', '_')
             filename += f'.{extension}'
         
+        # Check if filename (without extension) exceeds max length
+        filename = self._enforce_filename_length_limit(filename, metadata, title_part, author_part, year_part, doi_safe, isbn_safe, is_scan, extension)
+        
         return filename
+    
+    def _enforce_filename_length_limit(self, filename: str, metadata: Dict, title_part: str, 
+                                       author_part: str, year_part: str, doi_safe: str, 
+                                       isbn_safe: str, is_scan: bool, extension: str) -> str:
+        """Enforce filename length limit by shortening ONLY the title if needed.
+        
+        CRITICAL: Authors, year, DOI, and ISBN are NEVER shortened or modified.
+        These parts MUST remain correct and unchanged.
+        ONLY the title part is shortened to fit within the length limit.
+        
+        Args:
+            filename: Full filename with extension
+            metadata: Original metadata dictionary
+            title_part: Already cleaned title part (with underscores) - ONLY THIS IS SHORTENED
+            author_part: Formatted author part - NEVER SHORTENED (must remain correct)
+            year_part: Formatted year part - NEVER SHORTENED (must remain correct)
+            doi_safe: Formatted DOI part - NEVER SHORTENED (must remain correct)
+            isbn_safe: Formatted ISBN part - NEVER SHORTENED (must remain correct)
+            is_scan: Whether this is a scanned document
+            extension: File extension (without dot)
+            
+        Returns:
+            Filename that meets length requirements (with shortened title if needed)
+            Authors, year, DOI, and ISBN are always preserved exactly as provided.
+        """
+        # Split filename into base and extension
+        if '.' in filename:
+            base, ext = filename.rsplit('.', 1)
+            file_extension = f'.{ext}'
+        else:
+            base = filename
+            file_extension = f'.{extension}' if extension else ''
+        
+        # Check if base exceeds limit
+        if len(base) <= self.filename_max_length:
+            return filename
+        
+        # Need to shorten - ONLY shorten the title part
+        # CRITICAL: Authors, year, DOI, and ISBN are NEVER shortened - they must remain correct
+        # These are passed through unchanged to ensure accuracy
+        # Try Ollama shortening first (only on title_part, never on authors/year/DOI/ISBN)
+        shortened_title = self._shorten_title_with_ollama(title_part)
+        
+        if shortened_title:
+            # Get pattern template
+            if self.active_pattern not in self.pattern_templates:
+                pattern_template = "{authors}_{year}_{title}"
+            else:
+                pattern_template = self.pattern_templates[self.active_pattern]
+            
+            # Reconstruct filename with shortened title
+            # IMPORTANT: author_part, year_part, doi_safe, isbn_safe are passed unchanged
+            # Only shortened_title is modified
+            new_base = pattern_template.format(
+                authors=author_part,  # NEVER modified
+                year=year_part,       # NEVER modified
+                title=shortened_title, # Only this is shortened
+                doi_safe=doi_safe,     # NEVER modified
+                isbn_safe=isbn_safe    # NEVER modified
+            )
+            
+            # Add _scan suffix if this is a scanned document
+            if is_scan:
+                new_base += '_scan'
+            
+            # Verify it's within limit
+            if len(new_base) <= self.filename_max_length:
+                return new_base + file_extension
+            # Still too long, truncate ONLY the title part (preserve authors and year)
+            # Extract title from the new_base and truncate it, then reconstruct
+            return self._truncate_title_only(new_base, title_part, shortened_title, 
+                                            author_part, year_part, doi_safe, isbn_safe, 
+                                            is_scan, file_extension)
+        else:
+            # Ollama failed, truncate ONLY the title part (preserve authors and year)
+            return self._truncate_title_only(base, title_part, None,
+                                            author_part, year_part, doi_safe, isbn_safe,
+                                            is_scan, file_extension)
+    
+    def _shorten_title_with_ollama(self, title: str) -> Optional[str]:
+        """Shorten title using Ollama API.
+        
+        IMPORTANT: This method ONLY shortens the title.
+        Authors, year, DOI, and ISBN are NEVER passed to this method.
+        
+        Args:
+            title: Title to shorten (already in filename format with underscores)
+                  This is ONLY the title part, never includes authors/year/DOI/ISBN
+            
+        Returns:
+            Shortened title or None if Ollama unavailable/fails
+        """
+        try:
+            from shared_tools.ai.ollama_client import OllamaClient
+            client = OllamaClient()
+            shortened = client.shorten_title(title, preserve_first_n_words=4)
+            return shortened
+        except Exception:
+            # Any error means Ollama is unavailable
+            return None
+    
+    def _truncate_title_only(self, current_base: str, original_title: str, shortened_title: Optional[str],
+                            author_part: str, year_part: str, doi_safe: str, isbn_safe: str,
+                            is_scan: bool, extension: str) -> str:
+        """Truncate ONLY the title part while preserving authors, year, and other parts.
+        
+        IMPORTANT: Authors and year are NEVER truncated - only the title is truncated.
+        
+        Args:
+            current_base: Current filename base (may be too long)
+            original_title: Original title part
+            shortened_title: Shortened title from Ollama (if available, None otherwise)
+            author_part: Author part - NEVER TRUNCATED
+            year_part: Year part - NEVER TRUNCATED
+            doi_safe: DOI part - NEVER TRUNCATED
+            isbn_safe: ISBN part - NEVER TRUNCATED
+            is_scan: Whether this is a scanned document
+            extension: File extension
+            
+        Returns:
+            Filename with truncated title (authors and year preserved)
+        """
+        # Use shortened title if available, otherwise use original
+        title_to_truncate = shortened_title if shortened_title else original_title
+        
+        # Calculate length of non-title parts
+        # Get pattern template
+        if self.active_pattern not in self.pattern_templates:
+            pattern_template = "{authors}_{year}_{title}"
+        else:
+            pattern_template = self.pattern_templates[self.active_pattern]
+        
+        # Calculate fixed parts length (everything except title)
+        # Create a test filename with empty title to measure fixed parts
+        test_filename = pattern_template.format(
+            authors=author_part,
+            year=year_part,
+            title="",  # Empty to measure fixed parts
+            doi_safe=doi_safe,
+            isbn_safe=isbn_safe
+        )
+        if is_scan:
+            test_filename += '_scan'
+        
+        fixed_parts_length = len(test_filename)
+        
+        # Calculate available space for title
+        available_for_title = self.filename_max_length - fixed_parts_length
+        
+        # Truncate title to fit in available space
+        if len(title_to_truncate) <= available_for_title:
+            truncated_title = title_to_truncate
+        else:
+            # Truncate title at word boundary
+            truncated_title = title_to_truncate[:available_for_title]
+            # Find last underscore (word boundary)
+            last_underscore = truncated_title.rfind('_')
+            if last_underscore > available_for_title * 0.5:
+                # If we found an underscore in the second half, use it
+                truncated_title = truncated_title[:last_underscore]
+            else:
+                # Otherwise, just truncate and remove trailing underscore
+                truncated_title = truncated_title.rstrip('_')
+        
+        # Reconstruct filename with truncated title
+        final_base = pattern_template.format(
+            authors=author_part,
+            year=year_part,
+            title=truncated_title,
+            doi_safe=doi_safe,
+            isbn_safe=isbn_safe
+        )
+        if is_scan:
+            final_base += '_scan'
+        
+        return final_base + extension
+    
+    def _truncate_at_word_boundary(self, text: str) -> str:
+        """Truncate text at word boundary to fit within max length.
+        
+        NOTE: This method is deprecated in favor of _truncate_title_only which
+        preserves authors and year. This is kept for backward compatibility.
+        
+        Args:
+            text: Text to truncate
+            
+        Returns:
+            Truncated text ending at word boundary
+        """
+        if len(text) <= self.filename_max_length:
+            return text
+        
+        # Truncate to max length
+        truncated = text[:self.filename_max_length]
+        
+        # Find last underscore (word boundary)
+        last_underscore = truncated.rfind('_')
+        
+        if last_underscore > self.filename_max_length * 0.5:
+            # If we found an underscore in the second half, use it
+            return truncated[:last_underscore]
+        else:
+            # Otherwise, just truncate at max length and remove trailing underscore
+            return truncated.rstrip('_')
     
     def _get_file_extension(self, metadata: Dict, original_filename: str = None) -> str:
         """Determine appropriate file extension based on metadata and original filename.

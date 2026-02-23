@@ -40,6 +40,9 @@ def create_review_and_proceed_page(daemon) -> Page:
         zotero_year = selected_item.get('year', selected_item.get('date', ''))
         zotero_item_type = selected_item.get('itemType', 'journalArticle')
         
+        # Log extracted metadata for debugging
+        daemon.logger.debug(f"Extracting metadata from Zotero item - Title: '{zotero_title}' (length: {len(zotero_title)}), Authors: {zotero_authors}, Year: {zotero_year}")
+        
         # Validate critical fields
         missing_fields = []
         if not zotero_title:
@@ -71,8 +74,10 @@ def create_review_and_proceed_page(daemon) -> Page:
         }
         
         # Generate target filename with _scan suffix
+        daemon.logger.debug(f"Generating filename from metadata - Title: '{merged_metadata['title']}' (length: {len(merged_metadata['title'])})")
         filename_gen = FilenameGenerator()
         target_filename = filename_gen.generate(merged_metadata, is_scan=True) + '.pdf'
+        daemon.logger.debug(f"Generated filename: {target_filename}")
         
         # Store in context
         ctx['zotero_authors'] = zotero_authors
@@ -341,10 +346,13 @@ def create_proposed_actions_page(daemon) -> Page:
             f"Scan: {pdf_path.name} ({scan_size_mb:.1f} MB)",
             "",
             "Will perform:",
-            f"  1. Generate filename: {target_filename}",
-            f"  2. Copy to publications: {publications_dir}/",
-            f"  3. Attach as linked file in Zotero",
-            f"  4. Move scan to: done/",
+            f"  1. Check and remove dark borders (if detected)",
+            f"  2. Split landscape/two-up pages (if detected)",
+            f"  3. Trim leading pages (optional)",
+            f"  4. Generate filename: {target_filename}",
+            f"  5. Copy to publications: {publications_dir}/",
+            f"  6. Attach as linked file in Zotero",
+            f"  7. Move scan to: done/",
             "",
             "  (y/Enter) Proceed with all actions",
             "  (z) Go back to review",

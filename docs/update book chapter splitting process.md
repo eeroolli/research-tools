@@ -30,7 +30,7 @@ No linting errors. Verifying the logic flow and checking for edge cases:
 
 ## Summary
 
-Implemented page 1 deletion for book chapters after splitting.
+Implemented page 1 deletion for book chapters after splitting, and intelligent gutter detection for two-up page splitting.
 
 ### **Changes Made**
 
@@ -46,38 +46,91 @@ Implemented page 1 deletion for book chapters after splitting.
    - If confirmed, deletes page 1 and updates the PDF used for Zotero attachment
    - Falls back to original split PDF if deletion fails
 
+3. **Intelligent Gutter Detection** (January 2026)
+   - **New method: `_find_gutter_position()`** - Detects actual gutter position using image analysis
+   - **New method: `_split_with_custom_gutter()`** - Splits PDFs at detected gutter coordinate
+   - **Updated: `_split_with_mutool()`** - Now uses intelligent gutter detection before falling back to geometric split
+   - **Updated workflow:** Border removal happens first, then intelligent splitting
+
 ### **Features**
+
+#### Page 1 Deletion
 - Only triggers for book chapters after splitting
 - Requires user confirmation before deletion
 - Safe: only modifies temporary split files, preserves originals
 - Error handling: falls back to original split if deletion fails
 - Validates PDF has multiple pages before attempting deletion
 
+#### Intelligent Gutter Detection
+- **Dual detection methods:**
+  - **Spine detection** (physical books): Finds darker gray spine area in the middle
+  - **Content detection** (printed articles): Finds minimum content density (white space)
+- **Automatic method selection:** Chooses method based on signal strength (15% threshold)
+- **Multi-page validation:** Analyzes 3 pages for consistency
+- **Border-aware:** Accounts for dark borders when detecting gutter
+- **Fallback:** Uses geometric split (50%) if detection fails
+
 ### **Workflow**
-1. PDF is split (either via `_double.pdf` suffix or user prompt)
-2. If document type is `book_chapter`, user is prompted
-3. If confirmed, page 1 is deleted from the split PDF
-4. Modified PDF (or original if deletion skipped/failed) is used for Zotero attachment
 
-Ready for testing. The feature only activates for book chapters after splitting, with user confirmation required.
+#### Two-Up Pages (Updated January 2026)
+1. **Detect landscape/two-up pages** (BEFORE border removal to ensure accurate detection)
+   - Check for `_double.pdf` filename pattern
+   - For other files: Check aspect ratio and detect two-up layout using content analysis
+   - Store detection results (dimensions, two-up status, gutter position)
+2. **Remove borders** from entire PDF (consistent UX for all pages)
+3. **Split at detected gutter** (or geometric if detection failed):
+   - For physical books: Uses darker spine marker position
+   - For printed articles: Uses content gap position
+   - Falls back to 50% geometric split if detection failed
+4. If document type is `book_chapter`, user is prompted to delete page 1
+5. Modified PDF used for Zotero attachment
 
-## Future Enhancement: Black Border Removal (Low Priority)
+#### Single Pages (Updated January 2026)
+1. **Detect landscape pages** (BEFORE border removal - stored but not split)
+2. **Remove borders** from entire PDF (consistent UX)
+3. **Trim leading pages** (if needed)
 
-### Request
-Remove black borders from PDFs. This happens often if the paper being scanned is actually a copy made from a book.
+### **Technical Details**
+
+**Gutter Detection Algorithm:**
+- Renders pages as images (2x zoom)
+- Detects borders first to exclude from analysis
+- Calculates vertical projection profiles:
+  - Spine method: Average brightness per column (lower = darker spine)
+  - Content method: Content density per column (lower = less text)
+- Finds minimum in middle 60% of content area
+- Validates gutter is between 30-70% of page width
+- Checks consistency across pages (std dev < 10%)
+
+**Method Selection:**
+- If spine signal > 15% darker than average → Use spine method (physical book)
+- Otherwise → Use content method (printed article)
+
+Ready for testing. The intelligent gutter detection significantly improves splitting accuracy for physical book scans with visible spines.
+
+## Border Removal Integration (Completed January 2026)
 
 ### Status
-✅ Added to implementation plan as low priority item
+✅ **COMPLETE** - Border removal now integrated into splitting workflow
 
-### Implementation Options
-1. **Integrate into splitting workflow** - Offer black border removal after splitting book chapters (similar to page 1 deletion)
-2. **Separate batch tool** - Create standalone script to process all PDFs in `publications/` directory, detect files with black borders, and trim them
+### Implementation
+- **Landscape detection happens FIRST** (before border removal) to ensure accurate detection
+- Border removal happens **second** (after landscape detection, before splitting) for consistent UX
+- Works for both single and two-up pages
+- Uses existing `BorderRemover` class with projection profile analysis
+- Interactive detection and removal with user confirmation
+
+### Benefits
+- Landscape detection works correctly even if border removal changes dimensions
+- Cleaner pages for gutter detection
+- Consistent workflow for all document types
+- Borders removed before splitting prevents incorrect splits
+- No redundant operations
 
 ### Technology Stack
-- **PyMuPDF (fitz)** - PDF→image conversion and PDF reconstruction (already in use)
-- **OpenCV (cv2)** - Edge detection and border cropping (already in use)
-- **PIL/Pillow** - Image processing operations (already in use)
+- **PyMuPDF (fitz)** - PDF→image conversion and PDF reconstruction
+- **OpenCV (cv2)** - Edge detection and border cropping
+- **PIL/Pillow** - Image processing operations
+- **BorderRemover** - Projection profile analysis for border detection
 
-### Notes
-- Not needed immediately; can be implemented later as standalone tool or workflow enhancement
-- See `implementation-plan.md` Backlog section and Phase 4.4 for details 
+See `implementation-plan.md` Phase 4.4 for details. 

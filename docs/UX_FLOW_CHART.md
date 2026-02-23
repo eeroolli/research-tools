@@ -1,7 +1,7 @@
 # Paper Processor Daemon - UX Flow Chart
 
-**Last Updated:** January 2025  
-**Status:** Current implementation with path utilities refactoring
+**Last Updated:** January 2026  
+**Status:** Current implementation with color coding and timeout improvements
 
 ## Overview
 
@@ -20,7 +20,7 @@ This document describes the complete user experience flow for the paper processo
 ┌─────────────────────────────────────────────────────────────────┐
 │  1. File Detection (Watchdog)                                   │
 │     - PDF detected in watch directory                           │
-│     - Language prefix detected (NO_, EN_, DE_, FI_, SE_)        │
+│     - Language prefix detected (NO_, EN_, DE_, FI_, SV_, DA_)   │
 │     - File moved to processing queue                            │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -82,16 +82,16 @@ This document describes the complete user experience flow for the paper processo
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  ZOTERO MATCHES DISPLAYED                                       │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  [A-Z] Select item from list above                       │  │
-│  │  [1] 🔍 Change author/year search parameters              │  │
-│  │  [2] 🔍 Change all search parameters                      │  │
-│  │  [3] None of these items - create new                     │  │
-│  │  [4] ❌ Skip document                                     │  │
-│  │  (z) ⬅️  Back to author selection                         │  │
-│  │  (r) 🔄 Restart from beginning                            │  │
-│  │  (q) Quit daemon                                           │  │
-│  └───────────────────────────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  [A-Z] Select item from list above                         │ │
+│  │  [1] 🔍 Change author/year search parameters                │ │
+│  │  [2] 🔍 Change all search parameters                        │ │
+│  │  [3] None of these items - create new                       │ │
+│  │  [4] ❌ Skip document                                       │ │
+│  │  (z) ⬅️  Back to author selection                           │ │
+│  │  (r) 🔄 Restart from beginning                              │ │
+│  │  (q) Quit daemon                                             │ │
+│  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
                               │
         ┌─────────────────────┼─────────────────────┐
@@ -134,16 +134,18 @@ This document describes the complete user experience flow for the paper processo
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  STEP 1: Metadata Comparison                                    │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  EXTRACTED METADATA    │    ZOTERO ITEM METADATA         │  │
-│  │  ────────────────────  │    ─────────────────────        │  │
-│  │  Title: ...            │    Title: ...                   │  │
-│  │  Authors: ...          │    Authors: ...                 │  │
-│  │  Year: ...             │    Year: ...                    │  │
-│  │  Journal: ...           │    Journal: ...                 │  │
-│  └───────────────────────────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  EXTRACTED METADATA    │    ZOTERO ITEM METADATA           │ │
+│  │  ────────────────────  │    ─────────────────────          │ │
+│  │  Title: ... (Yellow)   │    Title: ... (Bright Green)     │ │
+│  │  Authors: ... (Yellow) │    Authors: ... (Bright Green)   │ │
+│  │  Year: ... (Yellow)    │    Year: ... (Bright Green)      │ │
+│  │  Journal: ...          │    Journal: ...                   │ │
+│  └─────────────────────────────────────────────────────────────┘ │
 │                                                                   │
-│  Options:                                                        │
+│  Options: (Cyan for lists, Bright Yellow for actions)           │
+│  ⏱️  Timeout: 10s (silent, low-contrast message if triggered)   │
+│                                                                   │
 │  [1] Use extracted metadata (Replace in Zotero)                 │
 │  [2] Use Zotero metadata as-is (Keep existing)                  │
 │  [3] Merge both (field-by-field comparison)                      │
@@ -156,21 +158,28 @@ This document describes the complete user experience flow for the paper processo
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  STEP 2: Tags Comparison                                        │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  Current tags: [tag1] [tag2] [tag3]                       │  │
-│  │  Options: Add, Remove, Edit tags interactively            │  │
-│  └───────────────────────────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  Current tags: [tag1] [tag2] [tag3]                         │ │
+│  │  Options: Add, Remove, Edit tags interactively              │ │
+│  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  STEP 3: PDF Attachment                                         │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  1/4 Preparing split for two-up file (if needed)           │  │
-│  │  2/4 Copying to publications directory                     │  │
-│  │  3/4 Attaching to Zotero item                              │  │
-│  │  4/4 Moving original to done/                              │  │
-│  └───────────────────────────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  1/5 Detect landscape/two-up pages (BEFORE border removal)  │ │
+│  │     ├─ Check for _double.pdf pattern                        │ │
+│  │     └─ Analyze aspect ratio and content for two-up layout   │ │
+│  │  2/5 Remove borders (consistent UX for all pages)            │ │
+│  │  3/5 Intelligent split for two-up files (if detected)       │ │
+│  │     ├─ Detect gutter position (spine or content gap)       │ │
+│  │     └─ Split at detected position                           │ │
+│  │  4/5 Trim leading pages (optional)                          │ │
+│  │  5/5 Copying to publications directory                      │ │
+│  │  6/5 Attaching to Zotero item                               │ │
+│  │  7/5 Moving original to done/                                │ │
+│  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -181,15 +190,15 @@ This document describes the complete user experience flow for the paper processo
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  NO MATCHES FOUND                                               │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  WHAT WOULD YOU LIKE TO DO?                               │  │
-│  │  [1] 📄 Create new Zotero item with extracted metadata    │  │
-│  │  [2] ✏️  Edit metadata before creating item               │  │
-│  │  [3] 🔍 Search Zotero with additional info                 │  │
-│  │  [4] ❌ Skip document (not academic)                       │  │
-│  │  [5] 📝 Manual processing later                            │  │
-│  │  (q) Quit daemon                                            │  │
-│  └───────────────────────────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  WHAT WOULD YOU LIKE TO DO?                                 │ │
+│  │  [1] 📄 Create new Zotero item with extracted metadata      │ │
+│  │  [2] ✏️  Edit metadata before creating item                 │ │
+│  │  [3] 🔍 Search Zotero with additional info                   │ │
+│  │  [4] ❌ Skip document (not academic)                         │ │
+│  │  [5] 📝 Manual processing later                              │ │
+│  │  (q) Quit daemon                                              │ │
+│  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
                               │
         ┌─────────────────────┼─────────────────────┐
@@ -225,29 +234,29 @@ This document describes the complete user experience flow for the paper processo
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  PDF COPY OPERATION                                             │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                                                             │  │
-│  │  1. Source Path Validation                                 │  │
-│  │     ├─ Check if file exists (WSL check)                   │  │
-│  │     └─ Validate via PowerShell if needed                   │  │
-│  │                                                             │  │
-│  │  2. Path Conversion                                         │  │
-│  │     ├─ Normalize to WSL format (_normalize_path)           │  │
-│  │     ├─ Convert to Windows (_convert_wsl_to_windows_path)   │  │
-│  │     └─ Uses path_utils.ps1 for robust conversion           │  │
-│  │                                                             │  │
-│  │  3. Copy Method Selection                                  │  │
-│  │     ├─ Try native Python copy first (shutil.copy2)        │  │
-│  │     │  └─ Fast, works for WSL-accessible paths            │  │
-│  │     └─ Fallback to PowerShell if needed                   │  │
-│  │        └─ Uses path_utils.ps1 copy-file command           │  │
-│  │           └─ Handles cloud drives (Google Drive, etc.)    │  │
-│  │                                                             │  │
-│  │  4. Verification                                            │  │
-│  │     ├─ File size check                                     │  │
-│  │     └─ Hash verification (if PowerShell copy)             │  │
-│  │                                                             │  │
-│  └───────────────────────────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                                                               │ │
+│  │  1. Source Path Validation                                   │ │
+│  │     ├─ Check if file exists (WSL check)                     │ │
+│  │     └─ Validate via PowerShell if needed                     │ │
+│  │                                                               │ │
+│  │  2. Path Conversion                                           │ │
+│  │     ├─ Normalize to WSL format (_normalize_path)             │ │
+│  │     ├─ Convert to Windows (_convert_wsl_to_windows_path)   │ │
+│  │     └─ Uses path_utils.ps1 for robust conversion             │ │
+│  │                                                               │ │
+│  │  3. Copy Method Selection                                    │ │
+│  │     ├─ Try native Python copy first (shutil.copy2)          │ │
+│  │     │  └─ Fast, works for WSL-accessible paths              │ │
+│  │     └─ Fallback to PowerShell if needed                      │ │
+│  │        └─ Uses path_utils.ps1 copy-file command             │ │
+│  │           └─ Handles cloud drives (Google Drive, etc.)      │ │
+│  │                                                               │ │
+│  │  4. Verification                                              │ │
+│  │     ├─ File size check                                       │ │
+│  │     └─ Hash verification (if PowerShell copy)               │ │
+│  │                                                               │ │
+│  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -256,56 +265,106 @@ This document describes the complete user experience flow for the paper processo
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  PATH UTILITIES SYSTEM                                          │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                                                             │  │
-│  │  Python Layer (paper_processor_daemon.py)                  │  │
-│  │  ├─ _normalize_path()          - WSL/Windows normalization │  │
-│  │  ├─ _get_path_utils_script_win() - Script path helper     │  │
-│  │  ├─ _convert_wsl_to_windows_path() - Path conversion     │  │
-│  │  ├─ _validate_path_via_powershell() - Path validation     │  │
-│  │  └─ _copy_file_universal()     - Universal copy method     │  │
-│  │                                                             │  │
-│  │  PowerShell Layer (path_utils.ps1)                         │  │
-│  │  ├─ convert-wsl-to-windows    - Path conversion           │  │
-│  │  ├─ convert-windows-to-wsl    - Reverse conversion        │  │
-│  │  ├─ test-path                  - File validation          │  │
-│  │  ├─ test-directory             - Directory validation      │  │
-│  │  ├─ ensure-directory           - Directory creation        │  │
-│  │  └─ copy-file                  - File copy with verify    │  │
-│  │                                                             │  │
-│  │  Benefits:                                                  │  │
-│  │  ✓ Works with cloud drives not accessible from WSL         │  │
-│  │  ✓ Intelligent fallback (native Python → PowerShell)       │  │
-│  │  ✓ JSON responses for programmatic use                     │  │
-│  │  ✓ Universal and reusable across projects                  │  │
-│  │                                                             │  │
-│  └───────────────────────────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                                                               │ │
+│  │  Python Layer (paper_processor_daemon.py)                    │ │
+│  │  ├─ _normalize_path()          - WSL/Windows normalization   │ │
+│  │  ├─ _get_path_utils_script_win() - Script path helper       │ │
+│  │  ├─ _convert_wsl_to_windows_path() - Path conversion         │ │
+│  │  ├─ _validate_path_via_powershell() - Path validation        │ │
+│  │  └─ _copy_file_universal()     - Universal copy method       │ │
+│  │                                                               │ │
+│  │  PowerShell Layer (path_utils.ps1)                            │ │
+│  │  ├─ convert-wsl-to-windows    - Path conversion               │ │
+│  │  ├─ convert-windows-to-wsl    - Reverse conversion           │ │
+│  │  ├─ test-path                  - File validation              │ │
+│  │  ├─ test-directory             - Directory validation        │ │
+│  │  ├─ ensure-directory           - Directory creation            │ │
+│  │  └─ copy-file                  - File copy with verify        │ │
+│  │                                                               │ │
+│  │  Benefits:                                                    │ │
+│  │  ✓ Works with cloud drives not accessible from WSL           │ │
+│  │  ✓ Intelligent fallback (native Python → PowerShell)         │ │
+│  │  ✓ JSON responses for programmatic use                       │ │
+│  │  ✓ Universal and reusable across projects                    │ │
+│  │                                                               │ │
+│  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Recent Improvements (January 2025)
+## Recent Improvements (January 2026)
 
-### 1. Menu Clarity Improvements
+### 1. Color Coding System
+- **Page Titles:** Bright Cyan - Clear visual hierarchy for navigation pages
+- **Lists:** Cyan - Menu items and option lists
+- **Action Items & Info:** Bright Yellow - Interactive elements and informational messages
+- **Metadata (Unconfirmed):** Yellow - Title, Authors, Year before confirmation
+- **Metadata (Confirmed):** Bright Green - Title, Authors, Year after confirmation (from Zotero)
+- **Timeout Messages:** Bright Black (low contrast) - Low information value, non-intrusive
+- **Benefit:** Improved visual scanning, clear status indication, reduced cognitive load
+
+### 2. Timeout Behavior
+- **Silent Timeout:** No warning message before timeout (reduces visual clutter)
+- **Timeout Message:** Only shown when timeout actually occurs (low-contrast gray)
+- **Default:** 10 seconds configurable via `config.conf` `[UX]` section
+- **Benefit:** Less distracting, allows automatic progression when user is away
+
+### 3. Menu Clarity Improvements
 - **Before:** "[2] ✏️ Edit metadata" (confusing - edits search params, not Zotero item)
 - **After:** "[2] 🔍 Change all search parameters" (clear distinction)
 - **Impact:** Users understand they're editing search parameters, not Zotero item metadata
 
-### 2. Universal Path Utilities
+### 4. Universal Path Utilities
 - **Created:** `path_utils.ps1` - Universal PowerShell utility for path operations
 - **Created:** Helper methods in Python for consistent path handling
 - **Benefit:** Works reliably with cloud drives (Google Drive, OneDrive) that aren't accessible from WSL
 
-### 3. Intelligent File Copy
+### 5. Intelligent File Copy
 - **Method:** `_copy_file_universal()` - Tries native Python first, falls back to PowerShell
 - **Benefit:** Fast for local paths, robust for cloud drives
+
+### 6. Intelligent Two-Up Page Splitting
+- **Landscape Detection:** Happens BEFORE border removal to ensure accurate detection even if border removal changes dimensions
+- **Detection Methods:**
+  - Checks for `_double.pdf` filename pattern (always split)
+  - For other files: Analyzes aspect ratio (>1.3) and content structure
+  - Stores detection results (dimensions, two-up status) before border removal
+- **Gutter Detection:** Image-based analysis to find actual gutter position (not just 50% split)
+- **Dual Methods:** 
+  - Spine detection for physical books (finds darker gray spine area)
+  - Content detection for printed articles (finds minimum content density)
+- **Automatic Selection:** Chooses method based on signal strength (15% threshold)
+- **Border-Aware:** Accounts for dark borders when detecting gutter
+- **Multi-Page Validation:** Analyzes 3 pages for consistency
+- **Workflow:** Landscape detection → Border removal → Intelligent splitting
+- **Fallback:** Uses geometric split (50%) if detection fails
+- **Benefit:** Significantly improves splitting accuracy for physical book scans with visible spines, works correctly even after border removal
 - **Handles:** `/tmp/` paths, cloud drive paths, path conversion failures
 
-### 4. Path Validation
+### 6. Path Validation
 - **Method:** `_validate_path_via_powershell()` - Validates paths from Windows perspective
 - **Benefit:** Catches path issues before attempting operations
 - **Use:** Validates source files exist before copying
+
+### 7. PROPOSED ACTIONS Page Update (January 2026)
+- **Enhanced Message:** Now shows all operations that will occur during PDF processing
+- **Operations Listed:**
+  1. Check and remove dark borders (if detected)
+  2. Split landscape/two-up pages (if detected)
+  3. Trim leading pages (optional)
+  4. Generate filename
+  5. Copy to publications directory
+  6. Attach as linked file in Zotero
+  7. Move scan to done/
+- **Benefit:** Users see complete workflow before confirming, reducing surprises during processing
+
+### 8. Filename Validation and Logging (January 2026)
+- **Defensive Checks:** Validates target filename doesn't contain temp file patterns (`_no_borders`, `_split`, etc.)
+- **Auto-Regeneration:** If temp patterns detected, regenerates filename from metadata
+- **Logging:** Logs source and target filenames before copy operation for debugging
+- **Benefit:** Prevents weird filenames from temp file operations, improves debugging
 
 ---
 
@@ -332,29 +391,29 @@ This document describes the complete user experience flow for the paper processo
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  ERROR HANDLING                                                 │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                                                             │  │
-│  │  Path Conversion Failure                                   │  │
-│  │  ├─ Try wslpath first                                      │  │
-│  │  ├─ Fallback to manual conversion                          │  │
-│  │  └─ Use path_utils.ps1 if available                         │  │
-│  │                                                             │  │
-│  │  File Copy Failure                                         │  │
-│  │  ├─ Native Python fails → Try PowerShell                    │  │
-│  │  ├─ PowerShell fails → Clear error message                  │  │
-│  │  └─ Move to manual_review/                                  │  │
-│  │                                                             │  │
-│  │  Source File Not Found                                     │  │
-│  │  ├─ Validate via PowerShell (Windows perspective)          │  │
-│  │  ├─ Check if path conversion issue                         │  │
-│  │  └─ Provide clear error message                            │  │
-│  │                                                             │  │
-│  │  Cloud Drive Not Accessible                                │  │
-│  │  ├─ Native Python copy fails                               │  │
-│  │  ├─ Automatically fallback to PowerShell                   │  │
-│  │  └─ PowerShell handles cloud drive access                  │  │
-│  │                                                             │  │
-│  └───────────────────────────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                                                             │ │
+│  │  Path Conversion Failure                                   │ │
+│  │  ├─ Try wslpath first                                      │ │
+│  │  ├─ Fallback to manual conversion                          │ │
+│  │  └─ Use path_utils.ps1 if available                         │ │
+│  │                                                             │ │
+│  │  File Copy Failure                                         │ │
+│  │  ├─ Native Python fails → Try PowerShell                    │ │
+│  │  ├─ PowerShell fails → Clear error message                  │ │
+│  │  └─ Move to manual_review/                                  │ │
+│  │                                                             │ │
+│  │  Source File Not Found                                     │ │
+│  │  ├─ Validate via PowerShell (Windows perspective)        │ │
+│  │  ├─ Check if path conversion issue                         │ │
+│  │  └─ Provide clear error message                            │ │
+│  │                                                             │ │
+│  │  Cloud Drive Not Accessible                                │ │
+│  │  ├─ Native Python copy fails                               │ │
+│  │  ├─ Automatically fallback to PowerShell                   │ │
+│  │  └─ PowerShell handles cloud drive access                  │ │
+│  │                                                             │ │
+│  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -398,11 +457,11 @@ These options are available at most decision points.
 
 ### Input
 - **Watch directory:** `/mnt/i/FraScanner/papers/` (or configured path)
-- **Language prefixes:** `NO_`, `EN_`, `DE_`, `FI_`, `SE_`
+- **Language prefixes:** `NO_`, `EN_`, `DE_`, `FI_`, `SV_`, `DA_`
 
 ### Processing
-- **Split PDFs:** System temp directory (e.g., `/tmp/pdf_splits/`)
-- **Border removal:** System temp directory (e.g., `/tmp/pdf_borders_removed/`)
+- **Border removal:** System temp directory (e.g., `/tmp/pdf_borders_removed/`) - Happens FIRST
+- **Split PDFs:** System temp directory (e.g., `/tmp/pdf_splits/`) - Uses intelligent gutter detection
 
 ### Output
 - **Publications:** Configured path (e.g., `/mnt/g/My Drive/publications/`)
@@ -429,4 +488,7 @@ These options are available at most decision points.
 - File operations are validated before execution
 - Clear error messages guide users when issues occur
 - Navigation is consistent throughout the workflow
+- Color coding provides visual hierarchy and status indication
+- Timeout behavior is silent (no warning) with low-contrast message when triggered
+- Metadata color changes from Yellow (unconfirmed) to Bright Green (confirmed from Zotero)
 

@@ -25,6 +25,60 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 class ZoteroPaperProcessor:
     """Zotero integration for academic papers."""
     
+    @staticmethod
+    def _sanitize_unicode(text: str) -> str:
+        """Sanitize Unicode string by removing invalid surrogates.
+        
+        Args:
+            text: Input string that may contain invalid Unicode surrogates
+            
+        Returns:
+            Cleaned string safe for UTF-8 encoding
+        """
+        if not isinstance(text, str):
+            return text
+        
+        # Remove UTF-16 surrogates (invalid in UTF-8)
+        # Surrogates are in range U+D800 to U+DFFF
+        # Use encode/decode with errors='replace' to handle any encoding issues
+        try:
+            # Try to encode to UTF-8 - this will fail if there are surrogates
+            text.encode('utf-8')
+            return text
+        except (UnicodeEncodeError, UnicodeDecodeError) as e:
+            # If encoding fails, log diagnostic info and sanitize
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Unicode encoding issue detected: {e}. "
+                f"Text length: {len(text)}, "
+                f"First 100 chars: {repr(text[:100])}"
+            )
+            # If encoding fails, use encode/decode with error handling
+            # This will replace invalid characters with replacement character
+            sanitized = text.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+            logger.info(f"Sanitized text (first 100 chars): {repr(sanitized[:100])}")
+            return sanitized
+    
+    @staticmethod
+    def _sanitize_dict(data: Dict) -> Dict:
+        """Recursively sanitize all string values in a dictionary.
+        
+        Args:
+            data: Dictionary that may contain strings with invalid Unicode
+            
+        Returns:
+            Dictionary with sanitized strings
+        """
+        if isinstance(data, dict):
+            return {k: ZoteroPaperProcessor._sanitize_dict(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [ZoteroPaperProcessor._sanitize_dict(item) for item in data]
+        elif isinstance(data, str):
+            return ZoteroPaperProcessor._sanitize_unicode(data)
+        else:
+            return data
+    
     def __init__(self, config_file: str = None):
         """Initialize processor.
         
@@ -231,9 +285,12 @@ class ZoteroPaperProcessor:
         
         # Add unique tags to item
         for tag_name in tags_to_add:
-            item['tags'].append({'tag': tag_name})
+            # Sanitize tag names to prevent encoding errors
+            sanitized_tag = self._sanitize_unicode(tag_name)
+            item['tags'].append({'tag': sanitized_tag})
         
-        return item
+        # Sanitize all string fields in the item to prevent UTF-8 encoding errors
+        return self._sanitize_dict(item)
     
     def determine_item_type(self, metadata: Dict) -> str:
         """Determine Zotero item type from metadata.
@@ -351,10 +408,13 @@ class ZoteroPaperProcessor:
             Item key or None
         """
         try:
+            # Sanitize Unicode to prevent encoding errors
+            sanitized_template = self._sanitize_dict(item_template)
+            
             response = requests.post(
                 f"{self.base_url}/items",
                 headers=self.headers,
-                json=[item_template],
+                json=[sanitized_template],
                 timeout=10
             )
             
@@ -385,6 +445,9 @@ class ZoteroPaperProcessor:
             
             filename = ntpath.basename(windows_path)
             attach_title = filename or (title or 'PDF')
+            
+            # Sanitize attachment title to prevent encoding errors
+            attach_title = self._sanitize_unicode(attach_title)
 
             # Create attachment item with Windows path
             attachment = {
@@ -394,6 +457,9 @@ class ZoteroPaperProcessor:
                 'path': windows_path,
                 'parentItem': item_key
             }
+            
+            # Sanitize entire attachment dict
+            attachment = self._sanitize_dict(attachment)
             
             response = requests.post(
                 f"{self.base_url}/items",
@@ -569,12 +635,18 @@ class ZoteroPaperProcessor:
             True if successful, False otherwise
         """
         try:
+            # Sanitize note text to prevent encoding errors
+            sanitized_note = self._sanitize_unicode(note_text)
+            
             # Create note item with parent reference
             note_item = {
                 'itemType': 'note',
                 'parentItem': item_key,
-                'note': note_text
+                'note': sanitized_note
             }
+            
+            # Sanitize entire note item dict
+            note_item = self._sanitize_dict(note_item)
             
             response = requests.post(
                 f"{self.base_url}/items",
@@ -614,6 +686,9 @@ class ZoteroPaperProcessor:
             
             filename = ntpath.basename(windows_path)
             title = filename.rsplit('.', 1)[0] if '.' in filename else filename
+            
+            # Sanitize attachment title to prevent encoding errors
+            title = self._sanitize_unicode(title)
 
             # Create attachment item with Windows path
             attachment = {
@@ -623,6 +698,9 @@ class ZoteroPaperProcessor:
                 'path': windows_path,
                 'parentItem': item_key
             }
+            
+            # Sanitize entire attachment dict
+            attachment = self._sanitize_dict(attachment)
             
             response = requests.post(
                 f"{self.base_url}/items",
