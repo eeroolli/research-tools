@@ -26,6 +26,80 @@
 
 Notes:
 - Start with CLI stop/status for immediate operability; others can follow incrementally.
+
+## Multi-Computer Optimization (p1 + blacktower)
+
+**Status:** 📋 **PLANNED** - Comprehensive analysis complete  
+**Related:** `docs/DISTRIBUTED_PROCESSING_OPTIMIZATION.md`, `archive/docs/ocr_testing/OCR_OPTIMIZATION_ANALYSIS.md`, `archive/docs/ocr_testing/OCR_IMPLEMENTATION_PLAN.md`
+
+### OCR Optimization Implementation
+
+**Status:** 🧪 **TESTING PHASE** - Proof of concept before implementation  
+**Branch:** `feature/gpu-ocr-optimization`  
+**Plan:** `docs/OCR_IMPLEMENTATION_PLAN.md`
+
+**Approach:**
+1. ✅ **Test first** - Verify EasyOCR GPU speedup (5-10x) before code changes
+2. ✅ **Keep daemon on blacktower** - No architecture changes
+3. ✅ **Configurable OCR** - Epson (default), GPU, CPU, or none
+4. ✅ **Lean code** - Minimal changes, no bloat
+5. ✅ **Proper testing** - Unit, integration, performance tests
+6. ✅ **Documentation** - User and developer docs
+
+**Implementation Phases:**
+- **Phase 1**: Proof of concept testing (EasyOCR speed verification) ✅ IN PROGRESS
+- **Phase 2**: Configuration design
+- **Phase 3**: Implementation (if tests confirm speedup)
+- **Phase 4**: Testing
+- **Phase 5**: Documentation
+- **Phase 6**: Environment cleanup and repository maintenance
+  - [ ] **Update environment.yml** - Add winning OCR solution to dependencies
+  - [ ] **Uninstall unused OCR engines** - Remove OCR packages not selected (keep only winner)
+  - [ ] **Clean repository** - Remove test files, temporary outputs, unused code
+  - [ ] **Update documentation** - Update all OCR-related docs with final solution
+  - [ ] **Verify dependencies** - Ensure all required packages are in environment.yml
+  - [ ] **Test clean environment** - Verify everything works with only selected OCR engine
+- **Phase 7**: Git workflow and merge
+  - [ ] **Create feature branch** - `feature/gpu-ocr-optimization` (if not exists)
+  - [ ] **Commit changes** - All OCR implementation, tests, documentation
+  - [ ] **Push to remote** - Share changes for review
+  - [ ] **Merge to main** - After testing and review
+
+**Key Features:**
+- Configurable OCR method (Epson/GPU/CPU/none)
+- GPU acceleration with EasyOCR (T1000 on p1)
+- Backward compatible (Epson OCR still works)
+- Lean implementation (minimal code changes)
+
+### Current Situation
+- Scanner on blacktower saves to network drive `I:\FraScanner\papers\`
+- p1 (ThinkPad P1) has better hardware: i7 10th gen, NVIDIA T1000 GPU, Intel UHD 640
+- Current bottlenecks: CPU-bound GROBID/Ollama, network file I/O, sequential processing
+
+### Recommended Optimization Strategy
+
+**Phase 1: Local File Copy (HIGH PRIORITY)**
+- Copy PDFs from network drive to local temp directory on p1 SSD
+- Process from local copy (10-20x faster I/O)
+- Expected: 20% performance improvement, minimal code changes
+
+**Phase 2: Parallel Processing (MEDIUM PRIORITY)**
+- Process multiple PDFs with GROBID in parallel (2-4 workers)
+- Better CPU utilization on p1
+- Expected: 30% overall improvement, 2-4x faster batch processing
+
+**Phase 3: GPU OCR (LOW PRIORITY - Optional)**
+- Use NVIDIA T1000 for OCR instead of Epson CPU OCR
+- Only if OCR becomes bottleneck or Epson OCR insufficient
+- Expected: 5-10x faster OCR, more CPU for GROBID/Ollama
+
+### Expected Performance Gains
+- **File I/O**: 10-20x faster (SSD vs network)
+- **GROBID**: 1.5-2x faster (better CPU + parallel)
+- **Overall**: 30-50% faster per paper, 2-4x faster batch processing
+
+### Implementation Plan
+See `docs/DISTRIBUTED_PROCESSING_OPTIMIZATION.md` for detailed analysis, pros/cons, and implementation steps.
 # Research-Tools Implementation Plan
 
 Last updated: 2025-11-03

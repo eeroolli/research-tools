@@ -42,6 +42,27 @@ fi
 
 echo "   OLLAMA URL: $OLLAMA_URL"
 
+# Ensure ollama-network exists and both containers are on it for hostname-based DNS resolution
+NETWORK_NAME="ollama-network"
+if ! docker network ls --format "{{.Name}}" | grep -q "^${NETWORK_NAME}$"; then
+    echo "📡 Creating ${NETWORK_NAME} for container DNS resolution..."
+    docker network create ${NETWORK_NAME}
+fi
+
+# Ensure WebUI container is on the network
+if ! docker inspect ${CONTAINER_NAME} 2>/dev/null | grep -q "\"${NETWORK_NAME}\""; then
+    echo "🔗 Connecting ${CONTAINER_NAME} to ${NETWORK_NAME} for hostname-based DNS resolution..."
+    docker network connect ${NETWORK_NAME} ${CONTAINER_NAME} 2>/dev/null || echo "   (Already connected or network issue)"
+fi
+
+# Ensure Ollama container is on the network (if it exists)
+if docker ps -a --format "{{.Names}}" | grep -q "^${OLLAMA_CONTAINER_NAME}$"; then
+    if ! docker inspect ${OLLAMA_CONTAINER_NAME} 2>/dev/null | grep -q "\"${NETWORK_NAME}\""; then
+        echo "🔗 Connecting ${OLLAMA_CONTAINER_NAME} to ${NETWORK_NAME} for hostname-based DNS resolution..."
+        docker network connect ${NETWORK_NAME} ${OLLAMA_CONTAINER_NAME} 2>/dev/null || echo "   (Already connected or network issue)"
+    fi
+fi
+
 # Check if container exists
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     echo "📦 Container $CONTAINER_NAME exists"

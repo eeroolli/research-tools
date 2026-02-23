@@ -69,3 +69,4 @@ echo ""
 echo "You can verify Docker OLLAMA is working:"
 echo "   curl http://localhost:11434/api/tags"
 
+

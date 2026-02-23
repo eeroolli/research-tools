@@ -16,3 +16,12 @@ config.personal.conf
 *_secrets.conf
 __pycache__/
 *.pyc
+
+# Stray pip install artifacts
+=2.6.0
+
+# Temporary test directory
+test_temp/
+
+# Cursor IDE plans
+.cursor/

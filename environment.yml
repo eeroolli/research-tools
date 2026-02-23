@@ -12,7 +12,7 @@ dependencies:
   - pyzbar  # Barcode detection
   - pillow  # Image processing
   - pyyaml  # Configuration files
-  - pytesseract  # OCR engine
+  - pytesseract  # OCR engine (used in scripts/ocr_pdf.py for Tesseract-based OCR)
   - requests  # API calls
   - configparser  # Configuration parsing
   - pdfplumber  # PDF text extraction
@@ -28,3 +28,9 @@ dependencies:
   - pip:
     - pyzotero  # Zotero API integration
     - psutil  # System and process monitoring for CPU throttling
+    # OCR engines (install via pip as needed):
+    # - easyocr  # Used in scripts/create_searchable_pdf.py (GPU-accelerated OCR)
+    # - paddlepaddle-gpu  # PaddleOCR framework (for Docker container, not local install)
+    # - paddleocr  # PaddleOCR (runs in Docker container on p1, not local install)
+    # Note: PaddleOCR runs in Docker container (paddleocr-gpu) on p1 with GPU support
+    # EasyOCR can be installed locally if needed for create_searchable_pdf.py

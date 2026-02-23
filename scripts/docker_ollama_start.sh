@@ -103,3 +103,16 @@ echo "To pull models (inside container or from host with ollama CLI):"
 echo "   docker exec $CONTAINER_NAME ollama pull llama2:7b"
 echo ""
 
+
+# Ensure container is on ollama-network for DNS resolution (hostname-based connection)
+NETWORK_NAME="ollama-network"
+if ! docker network ls --format '{{.Name}}' | grep -q "^${NETWORK_NAME}$"; then
+    echo "📡 Creating ${NETWORK_NAME} for container DNS resolution..."
+    docker network create ${NETWORK_NAME}
+fi
+
+# Check if container is on the network, connect if not
+if ! docker inspect ${CONTAINER_NAME} 2>/dev/null | grep -q "\"${NETWORK_NAME}\""; then
+    echo "🔗 Connecting ${CONTAINER_NAME} to ${NETWORK_NAME} for hostname-based DNS resolution..."
+    docker network connect ${NETWORK_NAME} ${CONTAINER_NAME} 2>/dev/null || echo "   (Already connected or network issue)"
+fi
