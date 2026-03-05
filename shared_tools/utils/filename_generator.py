@@ -419,6 +419,13 @@ class FilenameGenerator:
         # #endregion
         
         if shortened_title:
+            # Normalize the shortened title using the same cleaning rules
+            # used for the original title (collapses \"__\" to \"_\", etc.).
+            shortened_title = self.clean_title(shortened_title)
+            # Also strip leading underscores so joining into \"{authors}_{year}_{title}\"
+            # cannot create a double underscore at the boundary.
+            shortened_title = shortened_title.lstrip('_')
+            
             # Get pattern template
             if self.active_pattern not in self.pattern_templates:
                 pattern_template = "{authors}_{year}_{title}"
