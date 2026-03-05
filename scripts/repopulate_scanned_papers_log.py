@@ -2,6 +2,16 @@
 """
 Repopulate scanned papers CSV log from existing text logs and directory scans.
 
+This script is primarily designed to run in the **WSL workflow**, where scanner
+directories live under `/mnt/i/...` and other paths are normalized to WSL format
+via `normalize_path`. It reads directories and log locations from the main config
+files (`config.conf` and `config.personal.conf`), so paths can be configured for
+both WSL and Windows, but the typical usage is from a WSL shell.
+
+For the main Windows-native daemon workflow, log updates are handled automatically
+by `scripts/paper_processor_daemon.py`; use this script when you need to rebuild
+or repair the scanned_papers_log.csv file from historical data.
+
 This script rebuilds the scanned_papers_log.csv file by:
 1. Parsing existing text log files (processing_*.log)
 2. Scanning done/, failed/, skipped/, manual_review/ directories

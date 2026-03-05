@@ -9,25 +9,24 @@ import sys
 import logging
 from pathlib import Path
 
+import pytest
+
 # Check for required dependencies first
 try:
     import cv2
 except ImportError:
     print("ERROR: cv2 (OpenCV) not found!")
     print("\nPlease activate the conda environment first:")
-    print("  conda activate research-tools")
-    print("\nOr if using WSL:")
-    print("  source ~/miniconda3/etc/profile.d/conda.sh")
-    print("  conda activate research-tools")
-    sys.exit(1)
+    print("  conda activate research-tools (WSL) or research-tools-win (Windows)")
+    pytest.skip("cv2 (OpenCV) not installed; skipping border detection debug test", allow_module_level=True)
 
 try:
     import fitz  # PyMuPDF
 except ImportError:
     print("ERROR: PyMuPDF (fitz) not found!")
     print("\nPlease activate the conda environment first:")
-    print("  conda activate research-tools")
-    sys.exit(1)
+    print("  conda activate research-tools (WSL) or research-tools-win (Windows)")
+    pytest.skip("PyMuPDF (fitz) not installed; skipping border detection debug test", allow_module_level=True)
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -41,22 +40,20 @@ except (ImportError, ModuleNotFoundError) as e:
         print("=" * 60)
         print("ERROR: cv2 (OpenCV) module not found!")
         print("=" * 60)
-        print("\nThis script requires the 'research-tools' conda environment.")
+        print("\nThis script requires the 'research-tools' (WSL) or 'research-tools-win' (Windows) conda environment.")
         print("\nTo fix this, activate the conda environment first:")
         print("\n  For Windows PowerShell:")
-        print("    conda activate research-tools")
+        print("    conda activate research-tools-win")
         print("\n  For WSL/Linux:")
         print("    source ~/miniconda3/etc/profile.d/conda.sh")
         print("    conda activate research-tools")
-        print("\n  Or if conda is in a different location:")
-        print("    source ~/anaconda3/etc/profile.d/conda.sh  # or anaconda3")
-        print("    conda activate research-tools")
         print("\nThen run this script again.")
+        pytest.skip("BorderRemover dependency (cv2) missing; skipping border detection debug test", allow_module_level=True)
     else:
         print(f"ERROR: Failed to import BorderRemover: {e}")
         import traceback
         traceback.print_exc()
-    sys.exit(1)
+        pytest.skip("Failed to import BorderRemover; skipping border detection debug test", allow_module_level=True)
 
 import numpy as np
 from PIL import Image

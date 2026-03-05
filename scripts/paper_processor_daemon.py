@@ -85,6 +85,8 @@ class PaperProcessorDaemon:
         self.publications_cache_file = self.watch_dir / ".publications_cache.json"
         self.publications_copy_count = 0  # Track PDF copies for cache refresh
         self.debug = debug
+        # Platform flag: primary runtime is native Windows
+        self.is_windows = (sys.platform == 'win32')
         
         # Setup logging first (needed for config loading)
         self.setup_logging()
@@ -172,8 +174,11 @@ class PaperProcessorDaemon:
         signal.signal(signal.SIGINT, self.shutdown)
         signal.signal(signal.SIGTERM, self.shutdown)
         
-        # Store terminal window handle for PDF viewer positioning
-        self._store_terminal_window_handle()
+        # Store terminal window handle for PDF viewer positioning (Windows only)
+        if self.is_windows:
+            self._store_terminal_window_handle()
+        else:
+            self.logger.debug("Skipping terminal window handle storage on non-Windows platform")
         
         # Observer will be set in start()
         self.observer = None
@@ -280,11 +285,15 @@ class PaperProcessorDaemon:
 
     @staticmethod
     def _normalize_path(path_str: str) -> str:
-        """Normalize a path string to WSL format (static method).
+        """Normalize a path string according to the current platform.
         
-        Handles both WSL paths (/mnt/c/...) and Windows paths (C:\...)
-        - Windows paths like "G:\My Drive\publications" -> "/mnt/g/My Drive/publications"
+        On WSL/Linux:
+        - Windows paths like "G:\\My Drive\\publications" -> "/mnt/g/My Drive/publications"
         - WSL paths already in correct format are returned as-is
+        
+        On native Windows:
+        - WSL-style paths like "/mnt/g/My Drive/publications" -> "G:\\My Drive\\publications"
+        - Windows paths are returned as-is
         
         Args:
             path_str: Path string that may be in WSL or Windows format
@@ -298,6 +307,19 @@ class PaperProcessorDaemon:
         path_str = path_str.strip().strip('"\'')
         path_str = path_str.replace('"', '').replace("'", '')
         
+        # Native Windows runtime: keep Windows paths, optionally convert WSL-style /mnt paths
+        if sys.platform == 'win32':
+            # Convert WSL-style paths (/mnt/g/...) back to Windows drive paths
+            if path_str.startswith('/mnt/') and len(path_str) > 6:
+                # /mnt/g/My Drive/publications -> G:\My Drive\publications
+                drive_letter = path_str[5].upper()
+                remainder = path_str[7:]  # strip "/mnt/x/"
+                windows_path = f"{drive_letter}:\\" + remainder.replace('/', '\\')
+                return windows_path
+            # For other cases, return cleaned path as-is
+            return path_str
+        
+        # WSL/Linux runtime: normalize everything to WSL-style paths
         # If already a WSL path (starts with /), normalize duplicate slashes and return
         if path_str.startswith('/'):
             while '//' in path_str:
@@ -306,7 +328,7 @@ class PaperProcessorDaemon:
         
         # If Windows path (contains : or starts with letter), convert to WSL
         if ':' in path_str or (len(path_str) > 1 and path_str[1].isalpha() and path_str[1] != ':'):
-            # Handle Windows paths like "G:\My Drive\publications" or "G:/My Drive/publications"
+            # Handle Windows paths like "G:\\My Drive\\publications" or "G:/My Drive/publications"
             # Convert backslashes to forward slashes
             path_str = path_str.replace('\\', '/')
             
@@ -394,6 +416,10 @@ class PaperProcessorDaemon:
     
     def _get_file_info_via_powershell(self, path: Path, with_hash: bool = False) -> Optional[Dict]:
         """Get file info for a path using PowerShell (cloud-drive safe)."""
+        if sys.platform != 'win32':
+            # PowerShell-based file info is only available on native Windows
+            self.logger.debug("Skipping PowerShell file info lookup on non-Windows platform")
+            return None
         try:
             ps_script_win = self._get_path_utils_script_win()
         except Exception as e:
@@ -1913,6 +1939,11 @@ class PaperProcessorDaemon:
         Raises:
             Exception if conversion fails
         """
+        # Conversion helper is only meaningful on native Windows
+        if sys.platform != 'win32':
+            self.logger.debug("Skipping WSL-to-Windows path conversion via PowerShell on non-Windows platform")
+            return wsl_path
+        
         # Get script path
         ps_script_win = self._get_path_utils_script_win()
         # Use PowerShell to convert path
@@ -1940,6 +1971,10 @@ class PaperProcessorDaemon:
         Returns:
             Tuple of (is_valid: bool, error_message: Optional[str])
         """
+        
+        # Only supported on native Windows
+        if sys.platform != 'win32':
+            return (False, "PowerShell path validation is only available on Windows")
         
         # Get script path
         try:
@@ -2144,6 +2179,11 @@ class PaperProcessorDaemon:
         Returns:
             Tuple of (success: bool, error_msg: Optional[str])
         """
+        if sys.platform != 'win32':
+            # Copying via PowerShell is only supported on Windows
+            self.logger.debug("Skipping PowerShell-based copy on non-Windows platform")
+            return (False, "PowerShell copy is only available on Windows")
+        
         try:
             # Normalize source path to WSL format first
             source_str = str(source_path)
@@ -7907,139 +7947,50 @@ class PaperProcessorDaemon:
             True if opened successfully, False otherwise
         """
         try:
-            # Convert to Windows path if needed for WSL
+            # Non-Windows (e.g., WSL/Linux): avoid calling Windows executables directly
             if sys.platform != 'win32':
-                # Try to convert WSL path to Windows path
+                # Try to convert WSL path to Windows path for wslview integration
                 windows_path = self._to_windows_path(pdf_path)
-                # Validate that windows_path is actually a Windows path format (contains :\ or :/, or is UNC path starting with \\)
-                # If conversion failed and returned a WSL path, we can't use it with Windows programs
                 is_valid_windows_path = windows_path and ((":\\" in windows_path or ":/" in windows_path) or windows_path.startswith('\\\\'))
                 if is_valid_windows_path:
-                    self.logger.info(f"Opening PDF in viewer: {windows_path}")
-                    
-                    # Bring terminal to foreground first to ensure PDF opens on same desktop
-                    # This switches to the terminal's virtual desktop before opening PDF
-                    if hasattr(self, '_terminal_window_handle') and self._terminal_window_handle:
-                        try:
-                            ps_script = f'''
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32 {{
-    [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")]
-    public static extern bool IsWindowVisible(IntPtr hWnd);
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-}}
-"@
-$terminalHwnd = [IntPtr]{self._terminal_window_handle}
-if ([Win32]::IsWindowVisible($terminalHwnd)) {{
-    # Restore window if minimized, then bring to foreground
-    [Win32]::ShowWindow($terminalHwnd, 9)  # SW_RESTORE = 9
-    Start-Sleep -Milliseconds 100
-    [Win32]::SetForegroundWindow($terminalHwnd)
-    # Wait longer to ensure virtual desktop switch completes
-    Start-Sleep -Milliseconds 500
-}}
-'''
-                            subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
-                        except Exception as e:
-                            self.logger.debug(f"Could not bring terminal to foreground before opening PDF: {e}")
-                    
-                    # Try PowerShell to open file (works from WSL)
+                    # Preferred path: use wslview if available to open in Windows from WSL
                     try:
-                        ps_command = f'Start-Process "{windows_path}"'
-                        proc = subprocess.Popen(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_command],
-                                                stdout=subprocess.DEVNULL, 
-                                                stderr=subprocess.DEVNULL)
-                        # Store process for later closing
-                        self._pdf_viewer_process = proc
-                        self._pdf_viewer_path = pdf_path
-                        
-                        # Wait a moment for window to open, then position it
-                        time.sleep(1.5)
-                        self._position_pdf_window(pdf_path)
-                        self.logger.info("PDF viewer opened successfully")
-                        return True
-                    except Exception as e:
-                        self.logger.warning(f"Failed to open PDF with PowerShell: {e}")
-                    
-                    # Fallback: try wslview if available
-                    try:
-                        proc = subprocess.Popen(['wslview', str(windows_path)],
-                                                stdout=subprocess.DEVNULL,
-                                                stderr=subprocess.DEVNULL)
+                        self.logger.info(f"Opening PDF in viewer via wslview: {windows_path}")
+                        proc = subprocess.Popen(
+                            ['wslview', str(windows_path)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
                         self._pdf_viewer_process = proc
                         self._pdf_viewer_path = pdf_path
                         time.sleep(1.5)
-                        self._position_pdf_window(pdf_path)
                         return True
                     except FileNotFoundError:
                         self.logger.warning("wslview not found")
                     except Exception as e:
                         self.logger.warning(f"Failed to open PDF with wslview: {e}")
 
-                    # Fallback: cmd.exe /c start (works from WSL when powershell.exe fails with Exec format error)
-                    try:
-                        # start "" "path" = empty title, then path (Windows default handler for file)
-                        subprocess.Popen(
-                            ['cmd.exe', '/c', 'start', '""', str(windows_path)],
+                # Fallback: xdg-open with WSL path (Linux viewer if path is accessible)
+                try:
+                    wsl_path_str = str(pdf_path)
+                    if not (wsl_path_str.startswith('\\\\') or (':\\' in wsl_path_str or ':/' in wsl_path_str)):
+                        proc = subprocess.Popen(
+                            ['xdg-open', wsl_path_str],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                         )
+                        self._pdf_viewer_process = proc
                         self._pdf_viewer_path = pdf_path
                         time.sleep(1.5)
-                        self._position_pdf_window(pdf_path)
-                        self.logger.info("PDF viewer opened via cmd.exe start")
+                        self.logger.info("PDF viewer opened via xdg-open")
                         return True
-                    except FileNotFoundError:
-                        self.logger.warning("cmd.exe not found")
-                    except Exception as e:
-                        self.logger.warning(f"Failed to open PDF with cmd.exe start: {e}")
+                except FileNotFoundError:
+                    self.logger.warning("xdg-open not found")
+                except Exception as e:
+                    self.logger.warning(f"Failed to open PDF with xdg-open: {e}")
 
-                    # Fallback: explorer.exe (Windows file explorer opens default handler for file)
-                    try:
-                        subprocess.Popen(
-                            ['explorer.exe', windows_path],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                        self._pdf_viewer_path = pdf_path
-                        time.sleep(1.5)
-                        self._position_pdf_window(pdf_path)
-                        self.logger.info("PDF viewer opened via explorer.exe")
-                        return True
-                    except FileNotFoundError:
-                        self.logger.warning("explorer.exe not found")
-                    except Exception as e:
-                        self.logger.warning(f"Failed to open PDF with explorer.exe: {e}")
-
-                    # Fallback: xdg-open with WSL path (Linux viewer if path is accessible)
-                    try:
-                        wsl_path_str = str(pdf_path)
-                        if wsl_path_str.startswith('\\\\') or (':\\' in wsl_path_str or ':/' in wsl_path_str):
-                            pass  # already Windows path, skip xdg-open
-                        else:
-                            proc = subprocess.Popen(
-                                ['xdg-open', wsl_path_str],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                            )
-                            self._pdf_viewer_process = proc
-                            self._pdf_viewer_path = pdf_path
-                            time.sleep(1.5)
-                            self.logger.info("PDF viewer opened via xdg-open")
-                            return True
-                    except FileNotFoundError:
-                        self.logger.warning("xdg-open not found")
-                    except Exception as e:
-                        self.logger.warning(f"Failed to open PDF with xdg-open: {e}")
-                else:
-                    self.logger.warning(f"Could not convert path to Windows format: {pdf_path}")
-                    return False
+                self.logger.warning(f"Could not open PDF in viewer on non-Windows platform: {pdf_path}")
+                return False
             else:
                 # Windows: ensure we're on the correct desktop before opening
                 # Bring terminal to foreground first to ensure PDF opens on same desktop
@@ -8070,7 +8021,7 @@ if ([Win32]::IsWindowVisible($terminalHwnd)) {{
 }}
 '''
                         subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
                     except Exception as e:
                         self.logger.debug(f"Could not bring terminal to foreground before opening PDF: {e}")
                 
@@ -8094,6 +8045,11 @@ if ([Win32]::IsWindowVisible($terminalHwnd)) {{
     
     def _store_terminal_window_handle(self):
         """Store terminal window handle at startup for later use."""
+        if sys.platform != 'win32':
+            # Only supported on native Windows where user32 APIs are available
+            self.logger.debug("Skipping terminal window handle storage on non-Windows platform")
+            return
+        
         self.logger.info("Storing terminal window handle...")
         try:
             # Use PowerShell to find terminal window by process tree
@@ -8249,6 +8205,11 @@ if (!$found) {
         Uses Windows keyboard shortcut (Win+Right) to snap window to right half.
         This is more reliable than manual positioning and can create snap groups.
         """
+        if sys.platform != 'win32':
+            # Window snapping is only supported on native Windows
+            self.logger.debug("Skipping terminal window positioning on non-Windows platform")
+            return
+        
         self.logger.info("Positioning terminal window to right half using Windows Snap...")
         try:
             # Use Windows keyboard shortcut to snap window to right half
@@ -8402,6 +8363,11 @@ public struct RECT {
         Args:
             pdf_path: Path to PDF file (used to find window by title)
         """
+        # Only supported on native Windows where user32 APIs are available
+        if sys.platform != 'win32':
+            self.logger.debug("Skipping PDF window positioning on non-Windows platform")
+            return
+        
         # Retry logic: Sumatra may take a moment to open
         max_retries = 3
         retry_delay = 0.5

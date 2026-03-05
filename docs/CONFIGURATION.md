@@ -23,6 +23,22 @@ Directory paths for the daemon.
 - `scanner_papers_dir`: Directory to watch for new scanned PDFs (WSL or Windows format)
 - `publications_dir`: Directory where processed PDFs are copied
 
+Recommended Windows-first setup (native Windows Python, CMD/PowerShell):
+
+```ini
+[PATHS]
+scanner_papers_dir = I:\FraScanner\papers
+publications_dir = I:\publications
+```
+
+Equivalent WSL-style paths (when running the daemon inside WSL):
+
+```ini
+[PATHS]
+scanner_papers_dir = /mnt/i/FraScanner/papers
+publications_dir = /mnt/i/publications
+```
+
 ### [GROBID]
 
 GROBID service configuration for metadata extraction.
@@ -138,7 +154,36 @@ The daemon validates configuration on startup using `ConfigValidator`:
 
 Errors are reported with clear messages indicating what needs to be fixed.
 
-## Security Best Practices
+## Environments and Security Best Practices
+
+### Recommended environments
+
+- **WSL (Linux) environment**: `research-tools`
+  - Used for legacy WSL-based workflows and scripts that assume `/mnt/...` paths.
+  - Typical activation:
+    ```bash
+    cd /mnt/f/prog/research-tools
+    conda activate research-tools
+    ```
+- **Windows environment**: `research-tools-win` (recommended for daemon and tests)
+  - Create this env by exporting your WSL `research-tools` env and recreating it on Windows, for example:
+    ```bash
+    # In WSL
+    conda activate research-tools
+    conda env export --no-builds > environment-research-tools.yml
+
+    # In Windows PowerShell
+    conda env create -n research-tools-win -f environment-research-tools.yml
+    conda activate research-tools-win
+    ```
+  - Use this env to run:
+    ```powershell
+    cd F:\prog\research-tools
+    python .\scripts\paper_processor_daemon.py
+    python -m pytest tests
+    ```
+
+### Security Best Practices
 
 1. **Never commit sensitive data**: Use `config.personal.conf` (in `.gitignore`) for personal settings
 2. **File permissions**: Set restrictive permissions on personal config file:
@@ -149,6 +194,23 @@ Errors are reported with clear messages indicating what needs to be fixed.
 4. **Network security**: For distributed setups, ensure proper firewall rules for service ports
 
 ## Troubleshooting
+
+### Recommended Windows-first runtime
+
+On a Windows workstation, the preferred way to run the daemon is:
+
+```powershell
+cd F:\prog\research-tools
+python .\scripts\paper_processor_daemon.py
+```
+
+In this mode (`sys.platform == 'win32'`):
+
+- Windows-style paths in `[PATHS]` (like `I:\FraScanner\papers` and `I:\publications`) are used directly.
+- The daemon can manage the terminal window position and the PDF viewer window using Windows APIs.
+- PDF files are opened with the default Windows PDF viewer (e.g. SumatraPDF, Edge, Acrobat) using `os.startfile`.
+
+Running the daemon from inside WSL is still supported as a best-effort mode, but Windows-specific features (terminal snapping, PDF window positioning, PowerShell-based file copying) are skipped, and only Linux tools such as `wslview` and `xdg-open` are used for opening PDFs.
 
 ### Services Not Starting
 
@@ -176,5 +238,7 @@ Paths can be in WSL format (`/mnt/c/...`) or Windows format (`C:\...`). The daem
 
 1. Check path exists
 2. Verify path format matches your environment (WSL vs Windows)
+   - When running natively on Windows, prefer Windows-style paths (e.g. `I:\FraScanner\papers`).
+   - When running inside WSL, prefer `/mnt/...` paths (e.g. `/mnt/i/FraScanner/papers`).
 3. Check file permissions
 

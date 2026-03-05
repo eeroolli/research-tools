@@ -30,7 +30,13 @@
   - [ ] `shared_tools/zotero/local_search.py` (Task 8)
   - [ ] `CURSOR_TASKS.md` (reference)
 
-- [ ] **Terminal ready**
+- [ ] **Terminal ready (Windows-native, recommended)**
+  ```powershell
+  cd F:\prog\research-tools
+  conda activate research-tools-win
+  ```
+
+- [ ] **Terminal ready (WSL, legacy / optional)**
   ```bash
   cd /mnt/f/prog/research-tools
   conda activate research-tools

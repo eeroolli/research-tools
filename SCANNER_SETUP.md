@@ -9,7 +9,8 @@ This guide explains how to configure your Epson scanner to automatically trigger
 ## Prerequisites
 
 - ✅ Epson Capture Pro installed on Windows
-- ✅ WSL2 with research-tools repo installed
+- ✅ Windows conda environment `research-tools-win` for the daemon and tests
+- ✅ (Optional) WSL2 with research-tools repo and `research-tools` env for legacy workflows
 - ✅ Paper processor daemon implemented (done)
 - ✅ Batch/PowerShell launcher scripts created (done)
 - ✅ **GROBID Integration** - Advanced academic paper metadata extraction
@@ -17,23 +18,37 @@ This guide explains how to configure your Epson scanner to automatically trigger
 
 ---
 
-## Step 1: Verify WSL Access
+## Step 1: Choose runtime: Windows-native (recommended) vs WSL
 
-**Test from Windows Command Prompt:**
+### Windows-native workflow (recommended)
+
+Run the daemon directly in Windows using the `research-tools-win` environment:
+
+```powershell
+conda activate research-tools-win
+cd F:\prog\research-tools
+python .\scripts\paper_processor_daemon.py --debug
+```
+
+You should see:
+
+```
+============================================================
+Paper Processor Daemon Started
+Watching: I:\FraScanner\papers
+Publications: I:\publications
+============================================================
+```
+
+### WSL workflow (legacy / optional)
+
+If you still want to start the daemon from WSL, you can use:
 
 ```cmd
 wsl bash -c "source ~/miniconda3/etc/profile.d/conda.sh && conda activate research-tools && python /mnt/f/prog/research-tools/scripts/start_paper_processor.py"
 ```
 
-**Note:** This activates the `research-tools` conda environment properly, ensuring all dependencies (watchdog, pdfplumber, etc.) are available. If your conda is installed in a different location (e.g., `anaconda3` instead of `miniconda3`), adjust the path accordingly.
-
-You should see:
-```
-============================================================
-Starting paper processor daemon...
-============================================================
-...
-```
+This activates the WSL `research-tools` environment and runs the legacy WSL launcher. Prefer the Windows-native workflow above for day-to-day use on a Windows workstation.
 
 ---
 
