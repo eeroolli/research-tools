@@ -158,15 +158,16 @@ Errors are reported with clear messages indicating what needs to be fixed.
 
 ### Recommended environments
 
-- **WSL (Linux) environment**: `research-tools`
-  - Used for legacy WSL-based workflows and scripts that assume `/mnt/...` paths.
+- **Windows environment (recommended)**: `research-tools-win`
+  - Primary runtime for the paper processor daemon and tests.
   - Typical activation:
-    ```bash
-    cd /mnt/f/prog/research-tools
-    conda activate research-tools
+    ```powershell
+    cd F:\prog\research-tools
+    conda activate research-tools-win
+    python .\scripts\paper_processor_daemon.py
+    python -m pytest tests
     ```
-- **Windows environment**: `research-tools-win` (recommended for daemon and tests)
-  - Create this env by exporting your WSL `research-tools` env and recreating it on Windows, for example:
+  - You can create this env by exporting your WSL `research-tools` env and recreating it on Windows, for example:
     ```bash
     # In WSL
     conda activate research-tools
@@ -176,11 +177,12 @@ Errors are reported with clear messages indicating what needs to be fixed.
     conda env create -n research-tools-win -f environment-research-tools.yml
     conda activate research-tools-win
     ```
-  - Use this env to run:
-    ```powershell
-    cd F:\prog\research-tools
-    python .\scripts\paper_processor_daemon.py
-    python -m pytest tests
+- **WSL (Linux) environment (legacy / optional)**: `research-tools`
+  - Used for legacy WSL-based workflows and scripts that assume `/mnt/...` paths.
+  - Typical activation:
+    ```bash
+    cd /mnt/f/prog/research-tools
+    conda activate research-tools
     ```
 
 ### Security Best Practices

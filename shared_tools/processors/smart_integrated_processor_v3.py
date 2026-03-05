@@ -5,7 +5,6 @@ Smart integrated image processor v2 - with better success criteria
 import cv2
 import numpy as np
 from pyzbar import pyzbar
-import pytesseract
 import logging
 from pathlib import Path
 from dataclasses import dataclass
@@ -17,6 +16,13 @@ import concurrent.futures
 import signal
 import configparser
 from ..utils.thread_pool_manager import thread_pool_manager
+
+try:
+    import pytesseract  # type: ignore[import]
+    _HAS_PYTESSERACT = True
+except ImportError:  # pragma: no cover - optional dependency
+    pytesseract = None  # type: ignore[assignment]
+    _HAS_PYTESSERACT = False
 
 @dataclass
 class ImageData:
@@ -45,6 +51,10 @@ class SmartIntegratedProcessorV3:
     def __init__(self, photo_batch: List[Path] = None):
         self.logger = logging.getLogger(__name__)
         cv2.setUseOptimized(True)
+        
+        if not _HAS_PYTESSERACT:
+            # Make it explicit in logs that OCR-based strategies are disabled
+            self.logger.info("pytesseract not available - OCR-based ISBN detection will be skipped")
         
         # Load configuration
         config = configparser.ConfigParser()
@@ -224,6 +234,10 @@ class SmartIntegratedProcessorV3:
         # Safety check
         if image is None or image.size == 0:
             return None
+        if not _HAS_PYTESSERACT:
+            # Without pytesseract we cannot run OCR-based fast rotation
+            self.logger.debug("Skipping fast_rotation_detection because pytesseract is not available")
+            return None
             
         # Resize to 25% for fast processing
         height, width = image.shape[:2]
@@ -308,6 +322,9 @@ class SmartIntegratedProcessorV3:
     
     def _perform_ocr(self, image: np.ndarray, config: str) -> Optional[str]:
         """Perform OCR with given config and timeout - only return if likely contains ISBN"""
+        if not _HAS_PYTESSERACT:
+            self.logger.debug("Skipping OCR strategy %s because pytesseract is not available", config)
+            return None
         try:
             # Use timeout to prevent hanging on difficult images
             with concurrent.futures.ThreadPoolExecutor() as executor:

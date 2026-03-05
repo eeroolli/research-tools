@@ -162,6 +162,39 @@ def move_to_subdirectory(
         return False
 
 
+def validate_file_path(path: Path, base_dir: Path) -> Path:
+    """Validate that a path is inside a given base directory.
+    
+    This helper is used to guard against directory traversal and accidental
+    writes outside the daemon's managed tree.
+    
+    Args:
+        path: Path to validate (absolute or relative).
+        base_dir: Base directory that `path` must reside in.
+        
+    Returns:
+        The resolved absolute path.
+        
+    Raises:
+        FileOperationError: If the path is outside base_dir.
+    """
+    base_dir = base_dir.resolve()
+    # Interpret relative paths as relative to base_dir
+    if not path.is_absolute():
+        path = base_dir / path
+    try:
+        resolved = path.resolve()
+    except FileNotFoundError:
+        # For non-existent paths, resolve without requiring existence
+        resolved = (base_dir / path.name).with_suffix(path.suffix)
+    
+    # Python 3.11: use simple parent check instead of Path.is_relative_to
+    if resolved == base_dir or base_dir in resolved.parents:
+        return resolved
+    
+    raise FileOperationError(f"Path {resolved} is outside base directory {base_dir}")
+
+
 @contextmanager
 def temporary_file(base_path: Path, suffix: str = '.tmp'):
     """Context manager for temporary files.
@@ -189,6 +222,37 @@ def temporary_file(base_path: Path, suffix: str = '.tmp'):
                 temp_path.unlink()
             except Exception as e:
                 # Log cleanup errors but don't raise
+                logging.getLogger(__name__).warning(f"Failed to clean up temporary file {temp_path}: {e}")
+
+
+@contextmanager
+def temporary_file_context(base_dir: Path, prefix: str = 'temp_', suffix: str = '.tmp'):
+    """Context manager for a real temporary file in base_dir.
+    
+    Creates a temporary file on entry and ensures it is deleted on exit.
+    The returned path points to an existing file suitable for writing.
+    """
+    import tempfile
+
+    base_dir = base_dir.resolve()
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    tmp = tempfile.NamedTemporaryFile(
+        dir=str(base_dir),
+        prefix=prefix,
+        suffix=suffix,
+        delete=False,
+    )
+    temp_path = Path(tmp.name)
+    tmp.close()
+
+    try:
+        yield temp_path
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception as e:
                 logging.getLogger(__name__).warning(f"Failed to clean up temporary file {temp_path}: {e}")
 
 

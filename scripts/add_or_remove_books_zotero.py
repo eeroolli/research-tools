@@ -2,7 +2,6 @@
 
 import cv2
 from pyzbar import pyzbar
-import pytesseract
 import requests
 import json
 import time
@@ -13,6 +12,13 @@ from dataclasses import dataclass
 from typing import Optional, List, Dict, Tuple
 import re
 import sys
+
+try:
+    import pytesseract  # type: ignore[import]
+    _HAS_PYTESSERACT = True
+except ImportError:  # pragma: no cover - optional OCR dependency
+    pytesseract = None  # type: ignore[assignment]
+    _HAS_PYTESSERACT = False
 
 # Add project root to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))

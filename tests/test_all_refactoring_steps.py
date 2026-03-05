@@ -186,11 +186,11 @@ def test_all_steps():
         print("  ✓ Step 4: Recycle bin uses helper - Working")
         print("  ✓ Step 5: Consolidated normalize_path_for_wsl() - Working")
         print("  ✓ Integration: All components work together - Working")
-        return True
     else:
         print("✗ SOME TESTS FAILED")
         print("="*70)
-        return False
+        # Fail the test explicitly so pytest reports a proper assertion failure
+        assert all_passed, "One or more refactoring step checks failed"
 
 if __name__ == '__main__':
     success = test_all_steps()

@@ -13,11 +13,7 @@ import os
 import json
 import time
 
-try:
-    import select
-    HAS_SELECT = True
-except ImportError:
-    HAS_SELECT = False
+from .input_timeout import drain_stdin, read_line_with_timeout
 
 from .colors import ColorScheme, Colors
 
@@ -188,45 +184,8 @@ class NavigationEngine:
         Uses a small timeout (0.05s) to catch input that's already buffered but not yet
         detected by select() with timeout 0.
         """
-        if not HAS_SELECT:
-            return 0
-        drained = 0
-        try:
-            # First pass: check with a tiny timeout to catch buffered input
-            for _ in range(max_lines):
-                ready, _, _ = select.select([sys.stdin], [], [], 0.05)
-                if not ready:
-                    break
-                _ = sys.stdin.readline()
-                drained += 1
-            # Second pass: quick check for any remaining immediate data
-            for _ in range(max_lines - drained):
-                ready, _, _ = select.select([sys.stdin], [], [], 0)
-                if not ready:
-                    break
-                _ = sys.stdin.readline()
-                drained += 1
-        except Exception:
-            return drained
-
-        # #region agent log
-        try:
-            log_path = r"f:\prog\research-tools\.cursor\debug.log" if os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "NAV_DRAIN",
-                    "location": "navigation.py:NavigationEngine._drain_stdin_nonblocking",
-                    "message": "stdin drained",
-                    "data": {"drained_lines": drained},
-                    "timestamp": int(time.time() * 1000),
-                }) + "\n")
-        except Exception:
-            pass
-        # #endregion
-
-        return drained
+        # Delegate to shared helper (cross-platform behavior)
+        return drain_stdin(max_lines=max_lines, timeout_per_line=0.05)
     
     def show_page(self, page_id: str, context: dict) -> NavigationResult:
         """Display a page and handle user input.
@@ -269,33 +228,39 @@ class NavigationEngine:
             # Use page-specific timeout if available, otherwise use engine timeout
             timeout_to_use = page.timeout_seconds if page.timeout_seconds is not None else self.timeout_seconds
             
-            if timeout_to_use > 0 and HAS_SELECT and has_default:
-                # Use timeout with default (no warning message - just timeout if needed)
-                # Remove leading newline from prompt if present (we already have spacing)
-                prompt_text = page.prompt.lstrip('\n') if page.prompt.startswith('\n') else page.prompt
-                print(prompt_text, end='', flush=True)
-                
-                try:
-                    ready, _, _ = select.select([sys.stdin], [], [], timeout_to_use)
-                    if ready:
-                        user_input = sys.stdin.readline().strip()
-                    else:
-                        # Timeout - use default
+            try:
+                if timeout_to_use > 0 and has_default:
+                    # Timeout with default; helper will handle cross-platform behavior
+                    prompt_text = page.prompt.lstrip('\n') if page.prompt.startswith('\n') else page.prompt
+                    user_input = read_line_with_timeout(
+                        prompt_text,
+                        timeout=timeout_to_use,
+                        default=page.default,
+                        clear_buffered=False,
+                    )
+                    # If helper returned None, treat as timeout with no default (should not
+                    # normally happen when default is provided).
+                    if user_input is None:
                         timeout_msg = Colors.colorize("⏱️  Timeout reached - proceeding with default", ColorScheme.TIMEOUT)
                         print(f"\n{timeout_msg}")
                         user_input = page.default
+                    elif user_input == page.default:
+                        # Explicit timeout case (helper applied default)
+                        timeout_msg = Colors.colorize("⏱️  Timeout reached - proceeding with default", ColorScheme.TIMEOUT)
+                        print(f"\n{timeout_msg}")
                         # Drain any queued input that might arrive right after the timeout.
                         self._drain_stdin_nonblocking(max_lines=3)
-                except (KeyboardInterrupt, EOFError):
-                    print("\n❌ Cancelled")
-                    return NavigationResult.quit_scan(move_to_manual=False)
-            else:
-                # No timeout or no default - use regular input
-                try:
-                    user_input = input(page.prompt).strip()
-                except (KeyboardInterrupt, EOFError):
-                    print("\n❌ Cancelled")
-                    return NavigationResult.quit_scan(move_to_manual=False)
+                else:
+                    # No timeout or no default - use regular input
+                    user_input = read_line_with_timeout(
+                        page.prompt,
+                        timeout=None,
+                        default=None,
+                        clear_buffered=False,
+                    )
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Cancelled")
+                return NavigationResult.quit_scan(move_to_manual=False)
             
             user_input = user_input.lower() if user_input else ""
             

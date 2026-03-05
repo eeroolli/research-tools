@@ -33,42 +33,130 @@ page_offset_timeout = 10
 
 ### 2. Code Changes
 
-**File:** `scripts/paper_processor_daemon.py`
+**Files:**
+- `scripts/paper_processor_daemon.py` – main daemon prompts and legacy wrapper `_input_with_timeout`
+- `shared_tools/ui/navigation.py` – multi-page NavigationEngine used for enrichment and note flows
+- `shared_tools/ui/input_timeout.py` – new cross-platform input/timeout helper
 
-#### A. Import Statement
-Added `select` module import with fallback:
-```python
-try:
-    import select
-    HAS_SELECT = True
-except ImportError:
-    HAS_SELECT = False
-```
-
-#### B. Configuration Loading
-In `load_config()` method, added:
+#### A. Configuration Loading
+In `load_config()` (daemon), we still load:
 ```python
 # Get UX configuration
 self.page_offset_timeout = self.config.getint('UX', 'page_offset_timeout', fallback=10)
 ```
 
-#### C. Enhanced `_prompt_for_page_offset()` Method
+#### B. Cross-platform input helper (`shared_tools/ui/input_timeout.py`)
 
-**Location:** Line ~4334
+We now centralize timeout handling in a dedicated helper:
 
-**Key Changes:**
-1. Reads timeout from config
-2. Shows timeout message if timeout is enabled
-3. Uses `select.select()` for non-blocking input with timeout (Unix/WSL)
-4. Falls back to regular `input()` if `select` unavailable or timeout disabled
-5. Automatically returns `0` (page 1) if timeout expires
+```python
+read_line_with_timeout(
+    prompt: str,
+    timeout: float | None,
+    default: str | None = None,
+    clear_buffered: bool = False,
+) -> str | None
 
-**Implementation Logic:**
-- If `timeout_seconds > 0` and `HAS_SELECT`:
-  - Uses `select.select([sys.stdin], [], [], timeout_seconds)` to wait for input
-  - If input available: reads and processes normally
-  - If timeout: prints message and returns `0` (page 1 default)
-- Otherwise: Uses regular blocking `input()` (no timeout)
+drain_stdin(
+    max_lines: int = 5,
+    timeout_per_line: float = 0.05,
+) -> int
+```
+
+Platform behavior:
+
+- **Unix/WSL (non-win32)**:
+  - Uses `select.select([sys.stdin], [], [], timeout)` to implement timeouts.
+  - Uses non-blocking reads in `drain_stdin` to clear buffered input between prompts.
+- **Windows (win32)**:
+  - Avoids `select()` on `sys.stdin` entirely (to prevent `WinError 10038`).
+  - Uses `msvcrt.kbhit()` / `msvcrt.getwch()` polling to:
+    - Collect characters into a line until Enter is pressed.
+    - Enforce a timeout and return `default` when no input is received in time.
+  - `drain_stdin` uses `msvcrt.kbhit()/getwch()` in a short loop to clear pending keystrokes.
+
+Return semantics:
+
+- Returns the line the user typed (without newline) on normal input.
+- Returns `default` when timeout occurs and a default is provided.
+- Returns `None` on timeout when `default` is `None`, or on `KeyboardInterrupt`/`EOFError`.
+
+#### C. Daemon wrapper `_input_with_timeout()` (delegates to helper)
+
+The daemon’s `_input_with_timeout()` is now a thin wrapper:
+
+```python
+from shared_tools.ui.input_timeout import read_line_with_timeout
+
+def _input_with_timeout(...):
+    if timeout_seconds is None:
+        timeout_seconds = self.prompt_timeout
+
+    user_input = read_line_with_timeout(
+        prompt,
+        timeout=timeout_seconds,
+        default=default,
+        clear_buffered=clear_buffered,
+    )
+
+    if user_input is None:
+        if default is not None:
+            # Timeout with default
+            print(\"⏱️  Timeout reached - proceeding with default\")
+            return default
+        else:
+            # Timeout with no default
+            print(\"⏱️  Timeout reached\")
+            return None
+
+    user_input = user_input.strip()
+    return user_input if user_input else default
+```
+
+This preserves existing daemon semantics (including timeout messages) while delegating all platform-specific behavior to `input_timeout.py`.
+
+#### D. NavigationEngine integration
+
+`NavigationEngine` in `shared_tools/ui/navigation.py` now uses the helper:
+
+- `_drain_stdin_nonblocking()`:
+
+```python
+from shared_tools.ui.input_timeout import drain_stdin
+
+def _drain_stdin_nonblocking(...):
+    return drain_stdin(max_lines=max_lines, timeout_per_line=0.05)
+```
+
+- Timed page input in `show_page()`:
+
+```python
+from shared_tools.ui.input_timeout import read_line_with_timeout
+
+if timeout_to_use > 0 and has_default:
+    prompt_text = page.prompt.lstrip('\\n') if page.prompt.startswith('\\n') else page.prompt
+    user_input = read_line_with_timeout(
+        prompt_text,
+        timeout=timeout_to_use,
+        default=page.default,
+        clear_buffered=False,
+    )
+    if user_input is None:
+        # Fallback: treat as timeout with no default
+        print(\"⏱️  Timeout reached - proceeding with default\")
+        user_input = page.default
+    elif user_input == page.default:
+        # Helper applied default due to timeout
+        print(\"⏱️  Timeout reached - proceeding with default\")
+        self._drain_stdin_nonblocking(max_lines=3)
+else:
+    user_input = read_line_with_timeout(
+        page.prompt,
+        timeout=None,
+        default=None,
+        clear_buffered=False,
+    )
+```
 
 ### 3. User Experience
 
@@ -110,9 +198,14 @@ Extracting metadata...
 
 ### Platform Support
 
-- **Unix/WSL (Primary):** Uses `select.select()` for non-blocking input with timeout
-- **Windows (Fallback):** Falls back to regular `input()` if `select` unavailable
-- **Timeout Disabled:** If `page_offset_timeout = 0`, uses regular blocking input
+- **Unix/WSL (Primary):**
+  - Uses `select.select()` for non-blocking input with timeout and buffer draining.
+  - Honors all configured timeouts (`page_offset_timeout`, `prompt_timeout`, navigation page `timeout_seconds`).
+- **Windows (First-class):**
+  - Uses `msvcrt`-based polling for timeouts and buffer draining.
+  - No longer uses `select()` on `sys.stdin`, avoiding `OSError: [WinError 10038]`.
+  - Honors the same timeout settings as Unix/WSL.
+- **Timeout Disabled:** If `page_offset_timeout = 0` (or a page has timeout 0/None), falls back to regular blocking input.
 
 ### Behavior
 

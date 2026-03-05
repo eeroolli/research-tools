@@ -166,6 +166,9 @@ class TestNotePromptConfiguration(unittest.TestCase):
         class DummyDaemon:
             """Minimal daemon stub for page creation."""
             dummy_attr = None
+            # Use the same timeout attribute that the real daemon exposes so that
+            # pages like 'enrichment_review_auto' can be constructed safely.
+            prompt_timeout = 10
 
         module = importlib.import_module("handle_item_selected_pages")
         create_all_pages = getattr(module, "create_all_pages")

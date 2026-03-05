@@ -30,7 +30,9 @@ import re
 from pathlib import Path
 try:
     import select
-    HAS_SELECT = True
+    # On Windows, select() only works with sockets; using it on sys.stdin causes
+    # OSError [WinError 10038]. Treat select-as-available only on non-Windows.
+    HAS_SELECT = sys.platform != "win32"
 except ImportError:
     HAS_SELECT = False
 from watchdog.observers.polling import PollingObserver as Observer
@@ -7209,64 +7211,36 @@ class PaperProcessorDaemon:
         if timeout_seconds is None:
             timeout_seconds = self.prompt_timeout
         
-        # Clear any buffered input before waiting (prevents leftover input from previous prompts)
-        if clear_buffered and timeout_seconds > 0 and HAS_SELECT:
-            # Check if there's any input waiting without blocking
-            ready, _, _ = select.select([sys.stdin], [], [], 0)
-            if ready:
-                # There's buffered input - read and discard it
-                try:
-                    # Read available input without blocking
-                    import termios
-                    import tty
-                    old_settings = termios.tcgetattr(sys.stdin)
-                    tty.setcbreak(sys.stdin.fileno())
-                    cleared_chars = []
-                    # Read all available characters
-                    while ready:
-                        ch = sys.stdin.read(1)
-                        if not ch or ch == '\n':
-                            break
-                        cleared_chars.append(ch)
-                        ready, _, _ = select.select([sys.stdin], [], [], 0)
-                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-                except (ImportError, OSError, AttributeError):
-                    # termios not available - try simpler approach
-                    # Just read one line if available
-                    try:
-                        sys.stdin.readline()
-                    except:
-                        pass
-        
-        # Silent timeout - no warning message (only show message when timeout occurs)
+        from shared_tools.ui.input_timeout import read_line_with_timeout
+
+        # Use shared helper for cross-platform behavior
         try:
-            if timeout_seconds > 0 and HAS_SELECT:
-                # Use select-based timeout for Unix/WSL
-                print(prompt, end='', flush=True)
-                
-                # Wait for input with timeout using select
-                ready, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
-                if ready:
-                    # Input is available - read it
-                    user_input = sys.stdin.readline().strip()
-                    return user_input if user_input else default
-                else:
-                    # Timeout - use default (low-contrast message)
-                    if default is not None:
-                        timeout_msg = Colors.colorize("⏱️  Timeout reached - proceeding with default", ColorScheme.TIMEOUT)
-                        print(f"\n{timeout_msg}")
-                        return default
-                    else:
-                        timeout_msg = Colors.colorize("⏱️  Timeout reached", ColorScheme.TIMEOUT)
-                        print(f"\n{timeout_msg}")
-                        return None
-            else:
-                # No timeout or select not available - use regular input
-                user_input = input(prompt).strip()
-                return user_input if user_input else default
+            user_input = read_line_with_timeout(
+                prompt,
+                timeout=timeout_seconds,
+                default=default,
+                clear_buffered=clear_buffered,
+            )
         except (KeyboardInterrupt, EOFError):
             print("\n❌ Cancelled")
             return None
+
+        # Determine return value:
+        # - None  -> timeout with no default or user cancelled at lower level
+        # - ''    -> treat as default if provided
+        # - other -> user input
+        if user_input is None:
+            if default is not None:
+                timeout_msg = Colors.colorize("⏱️  Timeout reached - proceeding with default", ColorScheme.TIMEOUT)
+                print(f"\n{timeout_msg}")
+                return default
+            else:
+                timeout_msg = Colors.colorize("⏱️  Timeout reached", ColorScheme.TIMEOUT)
+                print(f"\n{timeout_msg}")
+                return None
+
+        user_input = user_input.strip()
+        return user_input if user_input else default
     
     def _prompt_for_page_offset(self, pdf_path: Path) -> Optional[int]:
         """Prompt user to specify which page the document actually starts on.

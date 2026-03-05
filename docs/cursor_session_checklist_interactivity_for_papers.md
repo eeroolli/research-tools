@@ -328,6 +328,23 @@ git add shared_tools/zotero/local_search.py
 git commit -m "feature: add attach_pdf_to_existing and search_by_author methods"
 ```
 
+---
+
+## Manual diagnostic scripts vs automated tests
+
+- **Manual diagnostics under `scripts/analysis/`**
+  - `grobid_extraction_demo.py`: inspect raw GROBID metadata for a single PDF.
+  - `pdf_rotation_demo.py`: exercise the PDF rotation handler and GROBID together.
+  - `gutter_detection_debug.py`: visualize gutter detection on a two‑page scan.
+  - `year_extraction_demo.py`: inspect year extraction heuristics on sample PDFs.
+  - `handwritten_detection_diagnostic.py`: run the handwritten‑note detector end‑to‑end.
+- These scripts are **not** part of `python -m pytest tests`; use them manually when
+  debugging metadata/geometry issues.
+- On Windows, the expected baseline is:
+  - `python -m pytest tests` passes without requiring personal filesystem paths
+    (e.g. `I:\FraScanner\...`, `G:\My Drive\...`) or always‑on services such as GROBID
+    or Tesseract.
+
 **Time:** _____ minutes | **Issues:** _____________________
 
 ---

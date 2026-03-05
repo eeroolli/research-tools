@@ -4,8 +4,13 @@
 ' Use this for Epson scanner post-processing
 ' Very unobtrusive: only starts if daemon is not running
 ' No popups, no visible windows if daemon already running
-
+'
 Set objShell = CreateObject("WScript.Shell")
+
+' Configuration for Windows and WSL environments
+Const PROJECT_DIR_WIN = "F:\prog\research-tools"
+Const CONDA_ENV_WIN = "research-tools-win"
+Const CONDA_ACTIVATE_PATH = "%USERPROFILE%\miniconda3\Scripts\activate.bat"
 
 ' Function to check if a visible terminal window is already running the daemon
 ' This checks for cmd.exe or WindowsTerminal.exe processes with the daemon script in command line
@@ -44,10 +49,28 @@ Function HasVisibleDaemonTerminal()
     On Error GoTo 0
 End Function
 
+' Test whether the Windows Conda environment is available
+Function CanUseWindowsConda()
+    Dim testCmd, exitCode
+    testCmd = "cmd /C """ & CONDA_ACTIVATE_PATH & """ " & CONDA_ENV_WIN
+    exitCode = objShell.Run(testCmd, 0, True)
+    If exitCode = 0 Then
+        CanUseWindowsConda = True
+    Else
+        CanUseWindowsConda = False
+    End If
+End Function
+
 ' First check: Is daemon process running?
 ' This uses --status which exits with code 0 if running, 1 if not
 ' Run status check (hidden window, wait for completion)
-exitCode = objShell.Run("wsl -e bash -c ""source ~/miniconda3/etc/profile.d/conda.sh && conda activate research-tools && cd /mnt/f/prog/research-tools && python scripts/paper_processor_daemon.py --status""", 0, True)
+Dim statusCmd, exitCode
+If CanUseWindowsConda() Then
+    statusCmd = "cmd /C """ & CONDA_ACTIVATE_PATH & """ " & CONDA_ENV_WIN & " && cd /D " & PROJECT_DIR_WIN & " && python scripts\paper_processor_daemon.py --status"
+    exitCode = objShell.Run(statusCmd, 0, True)
+Else
+    exitCode = objShell.Run("wsl -e bash -c ""source ~/miniconda3/etc/profile.d/conda.sh && conda activate research-tools && cd /mnt/f/prog/research-tools && python scripts/paper_processor_daemon.py --status""", 0, True)
+End If
 
 ' If exit code is 0, daemon process is running
 If exitCode = 0 Then
@@ -65,7 +88,12 @@ End If
 ' Daemon is not running - start it with minimal window
 ' Use windowStyle 1 (normal window) so user can interact when prompts appear
 ' No popup message to be unobtrusive - just start the daemon
-startCommand = "wsl -e bash -c ""source ~/miniconda3/etc/profile.d/conda.sh && conda activate research-tools && cd /mnt/f/prog/research-tools && python scripts/paper_processor_daemon.py"""
+Dim startCommand
+If CanUseWindowsConda() Then
+    startCommand = "cmd /K """ & CONDA_ACTIVATE_PATH & """ " & CONDA_ENV_WIN & " && cd /D " & PROJECT_DIR_WIN & " && python scripts\paper_processor_daemon.py"
+Else
+    startCommand = "wsl -e bash -c ""source ~/miniconda3/etc/profile.d/conda.sh && conda activate research-tools && cd /mnt/f/prog/research-tools && python scripts/paper_processor_daemon.py"""
+End If
 objShell.Run startCommand, 1, False
 
 ' Exit immediately (daemon runs in background)

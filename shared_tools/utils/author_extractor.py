@@ -71,10 +71,18 @@ class AuthorExtractor:
 
         cleaned_authors = []
         for author in authors:
-            author = re.sub(r'^(By|Authors?|Author)\s*:?\s*', '', author, flags=re.IGNORECASE)
+            # Strip common label prefixes
+            author = re.sub(r'^(By|Authors?|Author\(s\))\s*:?\s*', '', author, flags=re.IGNORECASE)
+            # Some patterns can capture just "(s): Alice Johnson, Bob Miller" – strip the suffix label too.
+            author = re.sub(r'^\(s\)\s*:?\s*', '', author, flags=re.IGNORECASE)
             author = re.sub(r'\s+', ' ', author.strip())
-            if len(author.split()) >= 2 and len(author) > 3:
-                cleaned_authors.append(author)
+
+            # Split on typical separators so "Alice Johnson, Bob Miller" becomes two authors
+            parts = re.split(r'[;,]|\band\b|&', author)
+            for part in parts:
+                candidate = part.strip()
+                if len(candidate.split()) >= 2 and len(candidate) > 3:
+                    cleaned_authors.append(candidate)
 
         seen = set()
         unique_authors = []

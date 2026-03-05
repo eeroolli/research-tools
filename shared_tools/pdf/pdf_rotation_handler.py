@@ -13,9 +13,15 @@ from typing import Optional, Tuple, Dict, Any
 import cv2
 import numpy as np
 from PIL import Image
-import pytesseract
 import fitz  # PyMuPDF
 import io
+
+try:
+    import pytesseract  # type: ignore[import]
+    _HAS_PYTESSERACT = True
+except ImportError:  # pragma: no cover - optional dependency
+    pytesseract = None  # type: ignore[assignment]
+    _HAS_PYTESSERACT = False
 
 
 class PDFRotationHandler:
@@ -30,9 +36,15 @@ class PDFRotationHandler:
         self.config = config or {}
         self.logger = logging.getLogger(__name__)
         
-        # Configure Tesseract if path provided
-        if self.config.get('tesseract_path'):
-            pytesseract.pytesseract.tesseract_cmd = self.config['tesseract_path']
+        # Configure Tesseract if path provided and pytesseract is available
+        tesseract_path = self.config.get('tesseract_path')
+        if tesseract_path and _HAS_PYTESSERACT:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        elif tesseract_path and not _HAS_PYTESSERACT:
+            self.logger.warning(
+                "tesseract_path configured but pytesseract is not installed; "
+                "OCR-based rotation detection will be disabled."
+            )
     
     def detect_pdf_rotation(self, pdf_path: Path, max_pages: int = 2) -> Optional[str]:
         """Detect if PDF needs rotation correction.
@@ -160,6 +172,11 @@ class PDFRotationHandler:
         Returns:
             Rotation type needed or None
         """
+        if not _HAS_PYTESSERACT:
+            # pytesseract is optional; without it we skip OCR-based rotation
+            self.logger.info("pytesseract not available - skipping OCR-based image rotation detection")
+            return None
+        
         try:
             # Create small image for fast processing
             height, width = image.shape[:2]
