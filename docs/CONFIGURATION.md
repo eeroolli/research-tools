@@ -57,7 +57,7 @@ GROBID service configuration for metadata extraction.
 
 ### [OLLAMA]
 
-Ollama service configuration for AI-powered metadata extraction (fallback).
+Ollama service configuration for AI-powered metadata extraction (fallback) and filename shortening.
 
 - `host`: Ollama host address (default: `localhost`)
   - For distributed setup: use hostname (e.g., `p1`) or primary remote IP (e.g., `192.168.178.129`)
@@ -65,6 +65,11 @@ Ollama service configuration for AI-powered metadata extraction (fallback).
   - For local setup: use `localhost`
 - `fallback_hosts`: Comma-separated IPs to try when `host` is a hostname that doesn't resolve (e.g. `192.168.178.176,192.168.178.129`). Leave empty to disable fallback.
 - `port`: Ollama port (default: `11434`)
+- `model`: Base Ollama model name. Used when role-specific models are not configured (default: `llama2:7b` in `config.conf`).
+- `metadata_model` (optional): Model used for *PDF metadata extraction* and other heavy text-understanding tasks. If omitted or empty, falls back to `model`.
+- `title_model` (optional): Model used for *filename shortening* (`shorten_title`). If omitted or empty, falls back to `model`.
+- `metadata_temperature` (optional): Temperature for metadata extraction calls. If omitted or empty, a conservative default (≈ `0.1`) is used.
+- `title_temperature` (optional): Temperature for filename shortening calls. If omitted or empty, a near-zero default (≈ `0.0`) is used.
 - `auto_start`: Automatically start Ollama if local (default: `true`)
 - `startup_timeout`: Timeout in seconds for Ollama startup (default: `30`)
 - `shutdown_timeout`: Timeout in seconds for Ollama shutdown (default: `10`)

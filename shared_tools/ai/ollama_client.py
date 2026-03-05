@@ -53,11 +53,25 @@ class OllamaClient:
         self.ollama_host = config.get('OLLAMA', 'host', fallback='localhost')
         self.ollama_port = config.getint('OLLAMA', 'port', fallback=11434)
         
-        # Get model name (use override if provided, otherwise config, otherwise default)
-        default_model = model_name_override or "llama2:7b"
-        self.ollama_model = config.get('OLLAMA', 'model', fallback=default_model)
+        # Determine base model (single-model, backward compatible)
+        base_default = model_name_override or "llama2:7b"
+        base_model = config.get('OLLAMA', 'model', fallback=base_default)
         if model_name_override:
-            self.ollama_model = model_name_override
+            # Explicit override wins over config
+            base_model = model_name_override
+        self.ollama_model = base_model
+        
+        # Role-specific models (metadata vs title), falling back to base model
+        metadata_model_cfg = config.get('OLLAMA', 'metadata_model', fallback='').strip()
+        title_model_cfg = config.get('OLLAMA', 'title_model', fallback='').strip()
+        
+        if model_name_override:
+            # If caller forces a model, use it for all roles
+            self.metadata_model = base_model
+            self.title_model = base_model
+        else:
+            self.metadata_model = metadata_model_cfg or base_model
+            self.title_model = title_model_cfg or base_model
         
         # Get timeout (use override if provided, otherwise config, otherwise default)
         default_timeout = timeout_override or 180
@@ -72,6 +86,20 @@ class OllamaClient:
         # Get title shortening configuration
         self.title_shorten_preserve_words = config.getint('OLLAMA', 'title_shorten_preserve_words', fallback=4)
         self.title_shorten_max_length = config.getint('OLLAMA', 'title_shorten_max_length', fallback=70)
+        
+        # Temperature configuration with safe defaults
+        def _get_float_option(section: str, option: str, default: float) -> float:
+            try:
+                raw = config.get(section, option, fallback='').strip()
+                if not raw:
+                    return default
+                return float(raw)
+            except Exception:
+                return default
+        
+        # Conservative defaults: low temperature for metadata, near-zero for filenames
+        self.metadata_temperature = _get_float_option('OLLAMA', 'metadata_temperature', 0.1)
+        self.title_temperature = _get_float_option('OLLAMA', 'title_temperature', 0.0)
         
         # Build base URL
         self.ollama_base_url = f"http://{self.ollama_host}:{self.ollama_port}"
@@ -133,10 +161,15 @@ class OllamaClient:
             for base_url in hosts_to_try:
                 try:
                     url = f"{base_url}/api/generate"
+                    model = (getattr(self, "metadata_model", None) or self.ollama_model)
+                    temperature = getattr(self, "metadata_temperature", 0.1)
                     payload = {
-                        "model": self.ollama_model,
+                        "model": model,
                         "prompt": prompt,
-                        "stream": False
+                        "stream": False,
+                        "options": {
+                            "temperature": temperature
+                        }
                     }
                     
                     response = requests.post(url, json=payload, timeout=self.timeout)
@@ -628,10 +661,15 @@ Return ONLY the JSON:"""
                     try:
                         # Make HTTP API request to Ollama
                         url = f"{base_url}/api/generate"
+                        model = (getattr(self, "title_model", None) or self.ollama_model)
+                        temperature = getattr(self, "title_temperature", 0.0)
                         payload = {
-                            "model": self.ollama_model,
+                            "model": model,
                             "prompt": prompt,
-                            "stream": False
+                            "stream": False,
+                            "options": {
+                                "temperature": temperature
+                            }
                         }
                         
                         # Use configured timeout (from config, handles Docker container wake-up)
