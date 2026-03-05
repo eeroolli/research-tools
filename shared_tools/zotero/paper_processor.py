@@ -503,6 +503,28 @@ class ZoteroPaperProcessor:
             current_value = str(item_data.get(normalized_field, '') or '').strip()
             if current_value:
                 # Field already has a value, don't update
+                # #region agent log
+                try:
+                    import time as _time, json as _json, os as _os
+                    log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                    with open(log_path, "a", encoding="utf-8") as _f:
+                        _f.write(_json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "run-enrich2",
+                            "hypothesisId": "A2",
+                            "location": "zotero/paper_processor.py:update_item_field_if_missing",
+                            "message": "skip_update_field_already_present",
+                            "data": {
+                                "item_key": item_key,
+                                "field_name": field_name,
+                                "normalized_field": normalized_field,
+                                "current_value_preview": current_value[:120],
+                            },
+                            "timestamp": int(_time.time() * 1000)
+                        }) + "\n")
+                except Exception:
+                    pass
+                # #endregion
                 return True
             
             # Update field with new value
@@ -515,11 +537,59 @@ class ZoteroPaperProcessor:
                 json=item_data,
                 timeout=10
             )
-            
-            return response.status_code == 200
+            # Zotero commonly returns 204 No Content for successful PATCH.
+            ok = response.status_code in (200, 204)
+            # #region agent log
+            try:
+                import time as _time, json as _json, os as _os
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                with open(log_path, "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run-enrich2",
+                        "hypothesisId": "A3",
+                        "location": "zotero/paper_processor.py:update_item_field_if_missing",
+                        "message": "patch_attempt",
+                        "data": {
+                            "item_key": item_key,
+                            "field_name": field_name,
+                            "normalized_field": normalized_field,
+                            "sent_value_preview": str(field_value)[:120],
+                            "status_code": response.status_code,
+                            "ok_200_or_204": ok,
+                            "resp_text_preview": (response.text or "")[:200],
+                        },
+                        "timestamp": int(_time.time() * 1000)
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            return ok
             
         except Exception as e:
             print(f"Error updating item field: {e}")
+            # #region agent log
+            try:
+                import time as _time, json as _json, os as _os
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                with open(log_path, "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run-enrich2",
+                        "hypothesisId": "A3",
+                        "location": "zotero/paper_processor.py:update_item_field_if_missing",
+                        "message": "exception",
+                        "data": {
+                            "item_key": item_key,
+                            "field_name": field_name,
+                            "normalized_field": normalized_field,
+                            "error": str(e),
+                        },
+                        "timestamp": int(_time.time() * 1000)
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
             return False
 
     def update_item_field(self, item_key: str, field_name: str, field_value) -> bool:

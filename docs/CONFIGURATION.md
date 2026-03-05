@@ -28,7 +28,8 @@ Directory paths for the daemon.
 GROBID service configuration for metadata extraction.
 
 - `host`: GROBID host address (default: `localhost`)
-  - For distributed setup: use remote IP (e.g., `192.168.178.129`)
+  - For distributed setup: use the primary remote IP (e.g., `192.168.178.129`)
+  - Other reference IPs: `192.168.178.130`, `192.168.178.176`
   - For local setup: use `localhost`
 - `port`: GROBID port (default: `8070`)
 - `auto_start`: Automatically start GROBID container if local (default: `true`)
@@ -43,8 +44,10 @@ GROBID service configuration for metadata extraction.
 Ollama service configuration for AI-powered metadata extraction (fallback).
 
 - `host`: Ollama host address (default: `localhost`)
-  - For distributed setup: use remote IP (e.g., `192.168.178.129`)
+  - For distributed setup: use hostname (e.g., `p1`) or primary remote IP (e.g., `192.168.178.129`)
+  - Other reference IPs: `192.168.178.130`, `192.168.178.176`
   - For local setup: use `localhost`
+- `fallback_hosts`: Comma-separated IPs to try when `host` is a hostname that doesn't resolve (e.g. `192.168.178.176,192.168.178.129`). Leave empty to disable fallback.
 - `port`: Ollama port (default: `11434`)
 - `auto_start`: Automatically start Ollama if local (default: `true`)
 - `startup_timeout`: Timeout in seconds for Ollama startup (default: `30`)
@@ -91,12 +94,13 @@ For distributed setup (blacktower ↔ P1):
 
 ```ini
 [GROBID]
-host = 192.168.178.129  # P1 IP address
+host = 192.168.178.129  # P1 primary API IP
 port = 8070
 auto_start = false  # Service runs on P1, not blacktower
 
 [OLLAMA]
-host = 192.168.178.129  # P1 IP address
+host = 192.168.178.129  # P1 primary API IP
+fallback_hosts = 192.168.178.130,192.168.178.176
 port = 11434
 auto_start = false  # Service runs on P1, not blacktower
 
@@ -151,8 +155,9 @@ Errors are reported with clear messages indicating what needs to be fixed.
 1. Check service configuration (host, port)
 2. Verify network connectivity (for remote services):
    ```bash
-   curl http://192.168.178.129:8070/api/isalive  # GROBID
-   curl http://192.168.178.129:11434/api/tags    # Ollama
+   curl http://192.168.178.129:8070/api/isalive  # GROBID (primary API)
+   curl http://192.168.178.129:11434/api/tags    # Ollama (primary API)
+   # Other reference IPs: 192.168.178.130 (LAN), 192.168.178.176 (legacy)
    ```
 3. Check service logs
 4. Verify Docker is running (for local GROBID)

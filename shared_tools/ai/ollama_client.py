@@ -75,6 +75,10 @@ class OllamaClient:
         
         # Build base URL
         self.ollama_base_url = f"http://{self.ollama_host}:{self.ollama_port}"
+        
+        # Fallback hosts from config (used when hostname doesn't resolve, e.g. host = p1)
+        fallback_str = config.get('OLLAMA', 'fallback_hosts', fallback='').strip()
+        self.fallback_hosts = [h.strip() for h in fallback_str.split(',') if h.strip()] if fallback_str else []
     
     def extract_paper_metadata(self, text: str, validate: bool = True, 
                               document_context: str = "general", language: str = None,
@@ -119,15 +123,36 @@ class OllamaClient:
                 progress_thread.start()
             
             # Use HTTP API to connect to configured Ollama host (p1 or localhost)
-            url = f"{self.ollama_base_url}/api/generate"
-            payload = {
-                "model": self.ollama_model,
-                "prompt": prompt,
-                "stream": False
-            }
+            # Try primary host first, then fallback to IPs if hostname doesn't resolve
+            hosts_to_try = [self.ollama_base_url]
+            for fallback_host in self.fallback_hosts:
+                hosts_to_try.append(f"http://{fallback_host}:{self.ollama_port}")
             
-            response = requests.post(url, json=payload, timeout=self.timeout)
-            response.raise_for_status()
+            last_error = None
+            response = None
+            for base_url in hosts_to_try:
+                try:
+                    url = f"{base_url}/api/generate"
+                    payload = {
+                        "model": self.ollama_model,
+                        "prompt": prompt,
+                        "stream": False
+                    }
+                    
+                    response = requests.post(url, json=payload, timeout=self.timeout)
+                    response.raise_for_status()
+                    break  # Success, exit loop
+                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, 
+                        requests.exceptions.RequestException) as e:
+                    last_error = e
+                    continue  # Try next host
+            
+            if response is None:
+                # All hosts failed
+                if last_error:
+                    raise last_error
+                else:
+                    raise requests.exceptions.ConnectionError("Failed to connect to Ollama on all hosts")
             
             result = response.json()
             response_text = result.get('response', '').strip()
@@ -591,17 +616,39 @@ Return ONLY the JSON:"""
         # Use config values for retries
         for attempt in range(self.max_retries):
             try:
-                # Make HTTP API request to Ollama
-                url = f"{self.ollama_base_url}/api/generate"
-                payload = {
-                    "model": self.ollama_model,
-                    "prompt": prompt,
-                    "stream": False
-                }
+                # Build list of hosts to try: primary first, then fallbacks
+                hosts_to_try = [self.ollama_base_url]
+                for fallback_host in self.fallback_hosts:
+                    hosts_to_try.append(f"http://{fallback_host}:{self.ollama_port}")
                 
-                # Use configured timeout (from config, handles Docker container wake-up)
-                response = requests.post(url, json=payload, timeout=self.timeout)
-                response.raise_for_status()
+                # Try each host in order until one succeeds
+                response = None
+                last_error = None
+                for base_url in hosts_to_try:
+                    try:
+                        # Make HTTP API request to Ollama
+                        url = f"{base_url}/api/generate"
+                        payload = {
+                            "model": self.ollama_model,
+                            "prompt": prompt,
+                            "stream": False
+                        }
+                        
+                        # Use configured timeout (from config, handles Docker container wake-up)
+                        response = requests.post(url, json=payload, timeout=self.timeout)
+                        response.raise_for_status()
+                        break  # Success, exit host loop
+                    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                            requests.exceptions.RequestException) as e:
+                        last_error = e
+                        continue  # Try next host
+                
+                if response is None:
+                    # All hosts failed, raise last error
+                    if last_error:
+                        raise last_error
+                    else:
+                        raise requests.exceptions.ConnectionError("Failed to connect to Ollama on all hosts")
                 
                 result = response.json()
                 response_text = result.get('response', '').strip()

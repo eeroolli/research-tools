@@ -1,12 +1,13 @@
 """Tests for page-based navigation system."""
 
+import importlib
 import unittest
 from pathlib import Path
 from shared_tools.ui.navigation import (
     NavigationResult,
     Page,
     ItemSelectedContext,
-    NavigationEngine
+    NavigationEngine,
 )
 
 
@@ -155,6 +156,31 @@ class TestNavigationEngine(unittest.TestCase):
         self.assertTrue(engine.validate_input('y', page))
         self.assertTrue(engine.validate_input('z', page))
         self.assertFalse(engine.validate_input('x', page))
+
+
+class TestNotePromptConfiguration(unittest.TestCase):
+    """Test configuration of the WRITE A NOTE prompt page."""
+
+    def test_note_prompt_uses_y_for_add_note(self):
+        """NOTE PROMPT should use y (not n) for adding a note."""
+        class DummyDaemon:
+            """Minimal daemon stub for page creation."""
+            dummy_attr = None
+
+        module = importlib.import_module("handle_item_selected_pages")
+        create_all_pages = getattr(module, "create_all_pages")
+        pages = create_all_pages(DummyDaemon())
+        note_page = pages.get('note_prompt')
+
+        self.assertIsNotNone(note_page, "note_prompt page should exist")
+        self.assertEqual(note_page.page_id, 'note_prompt')
+        self.assertIn('y', note_page.valid_inputs)
+        self.assertIn('z', note_page.valid_inputs)
+        self.assertIn('', note_page.valid_inputs)
+        self.assertIn('y', note_page.handlers)
+        self.assertIn('', note_page.handlers)
+        self.assertIn('z', note_page.handlers)
+        self.assertIn('[Enter/y/z]', note_page.prompt)
 
 
 if __name__ == '__main__':

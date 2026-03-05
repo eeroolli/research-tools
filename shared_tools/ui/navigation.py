@@ -9,6 +9,9 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Union
 from pathlib import Path
 from enum import Enum
+import os
+import json
+import time
 
 try:
     import select
@@ -177,6 +180,53 @@ class NavigationEngine:
         """
         self.pages = pages
         self.timeout_seconds = timeout_seconds
+
+    def _drain_stdin_nonblocking(self, *, max_lines: int = 5) -> int:
+        """Drain any buffered stdin lines (best-effort).
+        
+        This prevents "late keystrokes" after a timeout from being applied to the next page.
+        Uses a small timeout (0.05s) to catch input that's already buffered but not yet
+        detected by select() with timeout 0.
+        """
+        if not HAS_SELECT:
+            return 0
+        drained = 0
+        try:
+            # First pass: check with a tiny timeout to catch buffered input
+            for _ in range(max_lines):
+                ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if not ready:
+                    break
+                _ = sys.stdin.readline()
+                drained += 1
+            # Second pass: quick check for any remaining immediate data
+            for _ in range(max_lines - drained):
+                ready, _, _ = select.select([sys.stdin], [], [], 0)
+                if not ready:
+                    break
+                _ = sys.stdin.readline()
+                drained += 1
+        except Exception:
+            return drained
+
+        # #region agent log
+        try:
+            log_path = r"f:\prog\research-tools\.cursor\debug.log" if os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "NAV_DRAIN",
+                    "location": "navigation.py:NavigationEngine._drain_stdin_nonblocking",
+                    "message": "stdin drained",
+                    "data": {"drained_lines": drained},
+                    "timestamp": int(time.time() * 1000),
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
+        return drained
     
     def show_page(self, page_id: str, context: dict) -> NavigationResult:
         """Display a page and handle user input.
@@ -191,6 +241,10 @@ class NavigationEngine:
         page = self.pages.get(page_id)
         if not page:
             raise ValueError(f"Page not found: {page_id}")
+
+        # Drain any buffered input from previous page/timeouts.
+        # This avoids stray keystrokes being "consumed" by the next page.
+        self._drain_stdin_nonblocking(max_lines=3)
         
         # Display page
         print("\n" + "="*70)
@@ -230,6 +284,8 @@ class NavigationEngine:
                         timeout_msg = Colors.colorize("⏱️  Timeout reached - proceeding with default", ColorScheme.TIMEOUT)
                         print(f"\n{timeout_msg}")
                         user_input = page.default
+                        # Drain any queued input that might arrive right after the timeout.
+                        self._drain_stdin_nonblocking(max_lines=3)
                 except (KeyboardInterrupt, EOFError):
                     print("\n❌ Cancelled")
                     return NavigationResult.quit_scan(move_to_manual=False)

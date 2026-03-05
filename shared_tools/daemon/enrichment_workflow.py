@@ -59,6 +59,23 @@ class EnrichmentWorkflow:
                 if cr_results:
                     results.extend(cr_results)
         except Exception as e:
+            # #region agent log
+            try:
+                import time as _time, json as _json, os as _os
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                with open(log_path, "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run-enrich",
+                        "hypothesisId": "H2",
+                        "location": "enrichment_workflow.py:search_online",
+                        "message": "CrossRef search failed",
+                        "data": {"error": str(e), "title_len": len(title or ""), "authors_count": len(authors or []), "year": year, "journal": journal},
+                        "timestamp": int(_time.time() * 1000)
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
             self.logger.warning(f"CrossRef search failed: {e}")
 
         try:
@@ -72,8 +89,46 @@ class EnrichmentWorkflow:
                 if ar_results:
                     results.extend(ar_results)
         except Exception as e:
+            # #region agent log
+            try:
+                import time as _time, json as _json, os as _os
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                with open(log_path, "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run-enrich",
+                        "hypothesisId": "H2",
+                        "location": "enrichment_workflow.py:search_online",
+                        "message": "arXiv search failed",
+                        "data": {"error": str(e), "title_len": len(title or ""), "authors_count": len(authors or [])},
+                        "timestamp": int(_time.time() * 1000)
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
             self.logger.warning(f"arXiv search failed: {e}")
 
+        # #region agent log
+        try:
+            import time as _time, json as _json, os as _os
+            log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+            with open(log_path, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run-enrich",
+                    "hypothesisId": "H1",
+                    "location": "enrichment_workflow.py:search_online",
+                    "message": "search_online results",
+                    "data": {
+                        "results_count": len(results),
+                        "sources_preview": [r.get("source") for r in results[:5] if isinstance(r, dict)],
+                        "additional_candidates_count": len(additional_candidates or []),
+                    },
+                    "timestamp": int(_time.time() * 1000)
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
         return results[:max_results] if results else []
 
     def choose_best(
@@ -147,6 +202,28 @@ class EnrichmentWorkflow:
                 applied.append(field)
             else:
                 failed.append(field)
+            # #region agent log
+            try:
+                import time as _time, json as _json, os as _os
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                with open(log_path, "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run-enrich2",
+                        "hypothesisId": "A4",
+                        "location": "enrichment_workflow.py:apply_plan",
+                        "message": "field_apply_result",
+                        "data": {
+                            "item_key": item_key,
+                            "field": field,
+                            "ok": ok,
+                            "value_preview": str(value)[:120],
+                        },
+                        "timestamp": int(_time.time() * 1000)
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
 
         # Apply explicit overwrites (user-approved conflicts)
         if overwrite_fields:

@@ -6,6 +6,10 @@ or reject an online metadata candidate.
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Tuple
+import os
+import json
+import time
+import re
 
 
 @dataclass
@@ -139,6 +143,28 @@ class MatchPolicy:
         return SequenceMatcher(None, a_clean, b_clean).ratio()
 
     def _author_overlap(self, a_list: List[str], b_list: List[str]) -> Tuple[float, Dict]:
+        # #region agent log
+        try:
+            log_path = r"f:\prog\research-tools\.cursor\debug.log" if os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "ENR_A1",
+                    "location": "enrichment_policy.py:_author_overlap",
+                    "message": "Author overlap input",
+                    "data": {
+                        "z_types": [type(x).__name__ for x in (a_list or [])][:5],
+                        "c_types": [type(x).__name__ for x in (b_list or [])][:5],
+                        "z_preview": (a_list or [])[:3],
+                        "c_preview": (b_list or [])[:3],
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
         a_norm = {self._clean_author(a) for a in a_list if self._clean_author(a)}
         b_norm = {self._clean_author(b) for b in b_list if self._clean_author(b)}
 
@@ -152,6 +178,27 @@ class MatchPolicy:
         matches = len(a_norm.intersection(b_norm))
         denom = max(len(a_norm), len(b_norm))
         score = matches / denom if denom else 0.0
+        # #region agent log
+        try:
+            log_path = r"f:\prog\research-tools\.cursor\debug.log" if os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "ENR_A2",
+                    "location": "enrichment_policy.py:_author_overlap",
+                    "message": "Author overlap normalized",
+                    "data": {
+                        "z_norm_preview": list(a_norm)[:5],
+                        "c_norm_preview": list(b_norm)[:5],
+                        "matches": matches,
+                        "score": score,
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
         return score, {
             "matches": matches,
             "total_zotero": len(a_norm),
@@ -172,12 +219,29 @@ class MatchPolicy:
     def _type_match(self, t1: Optional[str], t2: Optional[str]) -> float:
         if not t1 or not t2:
             return 0.0
-        t1n = t1.lower().strip()
-        t2n = t2.lower().strip()
+        # Normalize to a comparable form across Zotero (camelCase) and online sources (snake/kebab).
+        t1n = re.sub(r"[^a-z0-9]", "", t1.lower().strip())
+        t2n = re.sub(r"[^a-z0-9]", "", t2.lower().strip())
+        # #region agent log
+        try:
+            log_path = r"f:\prog\research-tools\.cursor\debug.log" if os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "ENR_T1",
+                    "location": "enrichment_policy.py:_type_match",
+                    "message": "Type match compare",
+                    "data": {"t1": t1, "t2": t2, "t1n": t1n, "t2n": t2n},
+                    "timestamp": int(time.time() * 1000),
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
         if t1n == t2n:
             return 1.0
         # partial match for journal vs conference
-        if {t1n, t2n} <= {"journal_article", "conference_paper"}:
+        if {t1n, t2n} <= {"journalarticle", "conferencepaper"}:
             return 0.3
         return 0.0
 
@@ -242,5 +306,28 @@ class MatchPolicy:
 
     @staticmethod
     def _clean_author(text: str) -> str:
-        text = MatchPolicy._clean(text)
-        return text.replace(",", "") if text else ""
+        if not isinstance(text, str):
+            return ""
+        raw = " ".join(text.lower().split())
+        if not raw:
+            return ""
+
+        # Normalize "Last, First" into "First Last" before token handling.
+        if "," in text:
+            parts = [p.strip() for p in raw.split(",") if p.strip()]
+            if len(parts) >= 2:
+                raw = " ".join([parts[1], parts[0]] + parts[2:])
+            else:
+                raw = raw.replace(",", " ")
+        else:
+            raw = raw.replace(",", " ")
+
+        # Remove punctuation, keep spaces/alphanumerics.
+        raw = re.sub(r"[^a-z0-9\s]", "", raw)
+        tokens = raw.split()
+        if not tokens:
+            return ""
+
+        # Order-invariant comparison: "Louis Wirth" == "Wirth Louis"
+        tokens = sorted(tokens)
+        return " ".join(tokens)

@@ -204,12 +204,11 @@ def create_review_and_proceed_page(daemon) -> Page:
     
     def handler_e(ctx):
         """Edit tags - go to EDIT TAGS page."""
-        daemon = ctx['daemon']
         item_key = ctx.get('item_key') or ctx['selected_item'].get('key')
         if not item_key:
             print("❌ No item key found - cannot edit tags")
             print("ℹ️  Please edit this item in Zotero, then process the scan again")
-            daemon.move_to_manual_review(ctx['pdf_path'])
+            print("📝 Moving to manual review")
             return NavigationResult.quit_scan(move_to_manual=True)
         
         return NavigationResult.show_page('edit_tags')
@@ -221,8 +220,7 @@ def create_review_and_proceed_page(daemon) -> Page:
     
     def quit_action(ctx):
         """Quit - move to manual review."""
-        daemon = ctx['daemon']
-        daemon.move_to_manual_review(ctx['pdf_path'])
+        print("📝 Moving to manual review")
         return NavigationResult.quit_scan(move_to_manual=True)
     
     return Page(
@@ -251,26 +249,54 @@ def create_enrichment_review_auto_page(daemon) -> Page:
         enrich = ctx.get('enrichment') or {}
         status = enrich.get('status')
         reason = enrich.get('reason')
+        plan = enrich.get('plan') or {}
+        manual_fields = plan.get('manual_fields') or []
         lines = [
             "Online enrichment was found and auto-accepted by match policy.",
             f"Status: {status or '(unknown)'}" + (f" | reason: {reason}" if reason else ""),
             "",
             "  (y/Enter) Apply enrichment and continue",
+            ("  (m) Review optional/manual fields (authors/type/conflicts)" if manual_fields else None),
             "  (n) Skip enrichment and continue",
             f"  (timeout) Defaults to apply after {daemon.prompt_timeout}s",
         ]
         # Print diff summary (side-effect is acceptable here for clarity)
         zotero_metadata = enrich.get('zotero_metadata') or {}
         candidate = enrich.get('candidate') or {}
-        plan = enrich.get('plan') or {}
         display_enrichment_summary(zotero_metadata, candidate, plan, heading="ENRICHMENT REVIEW (AUTO-ACCEPT)")
-        return lines
+        return [l for l in lines if l]
 
     def handler_y(ctx):
         enrich = ctx.get('enrichment') or {}
         item_key = ctx.get('item_key')
         plan = enrich.get('plan') or {}
         candidate = enrich.get('candidate') or {}
+        # #region agent log
+        try:
+            import time as _time, json as _json, os as _os
+            _zp = getattr(daemon, "zotero_processor", None)
+            log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+            with open(log_path, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run-enrich2",
+                    "hypothesisId": "A1",
+                    "location": "handle_item_selected_pages.py:enrichment_review_auto:handler_y",
+                    "message": "about to apply enrichment",
+                    "data": {
+                        "item_key": item_key,
+                        "updates_keys": sorted(list((plan.get("updates") or {}).keys()))[:30],
+                        "manual_fields": sorted(list((plan.get("manual_fields") or [])))[:30],
+                        "candidate_source": candidate.get("source"),
+                        "zotero_processor_type": str(type(_zp)),
+                        "has_update_if_missing": hasattr(_zp, "update_item_field_if_missing"),
+                        "has_update_field": hasattr(_zp, "update_item_field"),
+                    },
+                    "timestamp": int(_time.time() * 1000)
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
         if item_key and plan:
             result = daemon.enrichment_workflow.apply_plan(
                 daemon.zotero_processor,
@@ -292,13 +318,17 @@ def create_enrichment_review_auto_page(daemon) -> Page:
         clear_enrichment_context(ctx)
         return NavigationResult.show_page('review_and_proceed')
 
+    def handler_m(ctx):
+        # Keep enrichment context; user wants to decide manual/overwrite fields.
+        return NavigationResult.show_page('enrichment_review_manual')
+
     return Page(
         page_id='enrichment_review_auto',
         title='ENRICHMENT REVIEW',
         content=content,
-        prompt='\nApply enrichment? [y/n]: ',
-        valid_inputs=['y', 'n'],
-        handlers={'y': handler_y, 'n': handler_n},
+        prompt='\nApply enrichment? [y/n/m]: ',
+        valid_inputs=['y', 'n', 'm'],
+        handlers={'y': handler_y, 'n': handler_n, 'm': handler_m},
         default='y',
         timeout_seconds=daemon.prompt_timeout,
         back_page=None,
@@ -321,8 +351,9 @@ def create_enrichment_review_manual_page(daemon) -> Page:
             "",
             "  (a) Apply all suggested fields (fillable + overwrite manual/conflicts)",
             "  (s) Select which fields to apply",
+            "  (w) Continue (done with enrichment)",
             "  (n/Enter) Skip enrichment",
-            f"  (timeout) Defaults to skip after {daemon.prompt_timeout * 2}s",
+            f"  (timeout) Defaults to skip after {daemon.prompt_timeout * 3}s",
         ]
         zotero_metadata = enrich.get('zotero_metadata') or {}
         candidate = enrich.get('candidate') or {}
@@ -380,12 +411,38 @@ def create_enrichment_review_manual_page(daemon) -> Page:
         for i, f in enumerate(fields, start=1):
             kind = "fill" if f in updates else "manual"
             print(f"  [{i}] ({kind}) {f}")
-        sel = input("Select fields to apply (e.g., 1,3-4) or Enter to cancel: ").strip()
-        idxs = parse_index_selection(sel, len(fields))
-        if not idxs:
-            print("Skipped applying enrichment.")
-            clear_enrichment_context(ctx)
-            return NavigationResult.show_page('review_and_proceed')
+        while True:
+            sel = input("Select fields to apply (e.g., 1,3-4), 'a' for all, or Enter to cancel: ").strip()
+            if not sel:
+                print("Cancelled selection (no changes applied).")
+                return NavigationResult.show_page('enrichment_review_manual')
+            if sel.lower() in {"u", "up", "b", "back", "z"}:
+                print("⬅️  Back to enrichment menu (no changes applied).")
+                return NavigationResult.show_page('enrichment_review_manual')
+            if sel.lower() in {"a", "all"}:
+                idxs = list(range(1, len(fields) + 1))
+            else:
+                idxs = parse_index_selection(sel, len(fields))
+            # #region agent log
+            try:
+                import os as _os, json as _json, time as _time
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                with open(log_path, "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "ENR_SEL1",
+                        "location": "handle_item_selected_pages.py:enrichment_review_manual:handler_s",
+                        "message": "Selection parsed",
+                        "data": {"sel": sel[:40], "idxs_count": len(idxs) if idxs else 0, "max": len(fields)},
+                        "timestamp": int(_time.time() * 1000),
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            if idxs:
+                break
+            print("⚠️  Invalid selection. Use numbers like '1,3-4' or 'a' for all.")
 
         chosen = [fields[i - 1] for i in idxs]
         chosen_fill = [f for f in chosen if f in updates]
@@ -399,8 +456,51 @@ def create_enrichment_review_manual_page(daemon) -> Page:
             print(Colors.colorize(f"✅ Enrichment applied to Zotero ({item_key}): {', '.join(applied)}", ColorScheme.SUCCESS))
         if item_key and failed:
             print(Colors.colorize(f"⚠️  Enrichment failed for fields: {', '.join(failed)}", ColorScheme.ERROR))
+        # Keep user on this page so they can apply more fields.
+        # Remove applied fields from the remaining plan so the menu shrinks.
+        try:
+            enrich = ctx.get('enrichment') or {}
+            plan = enrich.get('plan') or {}
+            updates = dict(plan.get('updates') or {})
+            manual_fields = list(plan.get('manual_fields') or [])
+            for f in applied:
+                if f in updates:
+                    updates.pop(f, None)
+                if f in manual_fields:
+                    manual_fields = [x for x in manual_fields if x != f]
+            plan['updates'] = updates
+            plan['manual_fields'] = manual_fields
+            enrich['plan'] = plan
+            ctx['enrichment'] = enrich
+        except Exception:
+            pass
+        # #region agent log
+        try:
+            import os as _os, json as _json, time as _time
+            log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+            with open(log_path, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "ENR_LOOP1",
+                    "location": "handle_item_selected_pages.py:enrichment_review_manual:handler_s",
+                    "message": "Applied subset; staying on manual page",
+                    "data": {"applied": applied[:20], "failed": failed[:20]},
+                    "timestamp": int(_time.time() * 1000),
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        return NavigationResult.show_page('enrichment_review_manual')
+
+    def handler_c(ctx):
+        # Done with enrichment; prevent stale reuse later.
         clear_enrichment_context(ctx)
         return NavigationResult.show_page('review_and_proceed')
+
+    def handler_w(ctx):
+        # Alias for continue
+        return handler_c(ctx)
 
     def handler_n(ctx):
         clear_enrichment_context(ctx)
@@ -410,11 +510,11 @@ def create_enrichment_review_manual_page(daemon) -> Page:
         page_id='enrichment_review_manual',
         title='ENRICHMENT REVIEW',
         content=content,
-        prompt='\nApply enrichment? [a/s/n]: ',
-        valid_inputs=['a', 's', 'n'],
-        handlers={'a': handler_a, 's': handler_s, 'n': handler_n},
+        prompt='\nApply enrichment? [a/s/w/n]: ',
+        valid_inputs=['a', 's', 'w', 'n'],
+        handlers={'a': handler_a, 's': handler_s, 'w': handler_w, 'n': handler_n},
         default='n',
-        timeout_seconds=daemon.prompt_timeout * 2,
+        timeout_seconds=daemon.prompt_timeout * 3,
         back_page=None,
         quit_action=None,
     )
@@ -508,15 +608,13 @@ def create_edit_tags_page(daemon) -> Page:
     
     def handler_m(ctx):
         """Move to manual review."""
-        daemon = ctx['daemon']
         print("ℹ️  Please edit this item in Zotero, then process the scan again")
-        daemon.move_to_manual_review(ctx['pdf_path'])
+        print("📝 Moving to manual review")
         return NavigationResult.quit_scan(move_to_manual=True)
     
     def quit_action(ctx):
         """Quit - move to manual review."""
-        daemon = ctx['daemon']
-        daemon.move_to_manual_review(ctx['pdf_path'])
+        print("📝 Moving to manual review")
         return NavigationResult.quit_scan(move_to_manual=True)
     
     return Page(
@@ -733,8 +831,7 @@ def create_proceed_after_edit_page(daemon) -> Page:
     
     def quit_action(ctx):
         """Quit - move to manual review."""
-        daemon = ctx['daemon']
-        daemon.move_to_manual_review(ctx['pdf_path'])
+        print("📝 Moving to manual review")
         return NavigationResult.quit_scan(move_to_manual=True)
     
     return Page(
@@ -904,8 +1001,7 @@ def create_filename_title_override_page(daemon) -> Page:
     
     def quit_action(ctx):
         """Quit - move to manual review."""
-        daemon = ctx['daemon']
-        daemon.move_to_manual_review(ctx['pdf_path'])
+        print("📝 Moving to manual review")
         return NavigationResult.quit_scan(move_to_manual=True)
     
     # Create page with consistent navigation: 'z' always means "back", Enter means "use default"
@@ -1012,9 +1108,7 @@ def create_proposed_actions_page(daemon) -> Page:
     
     def quit_action(ctx):
         """Quit - move to manual review."""
-        daemon = ctx['daemon']
         print("📝 Moving to manual review")
-        daemon.move_to_manual_review(ctx['pdf_path'])
         return NavigationResult.quit_scan(move_to_manual=True)
     
     return Page(
@@ -1042,7 +1136,7 @@ def create_note_prompt_page(daemon) -> Page:
         lines = [
             "You can add a sentence or two from your notes on the paper folder.",
             "  (Enter) Skip - don't add a note",
-            "  (n) Add a note",
+            "  (y) Add a note",
             "  (z) Cancel and go back"
         ]
         return lines
@@ -1052,7 +1146,7 @@ def create_note_prompt_page(daemon) -> Page:
         print("ℹ️  Skipping note...")
         return NavigationResult.process_pdf()
     
-    def handler_n(ctx):
+    def handler_y(ctx):
         """Add note - go to NOTE INPUT page."""
         return NavigationResult.show_page('note_input')
     
@@ -1063,19 +1157,18 @@ def create_note_prompt_page(daemon) -> Page:
     
     def quit_action(ctx):
         """Quit - move to manual review."""
-        daemon = ctx['daemon']
-        daemon.move_to_manual_review(ctx['pdf_path'])
+        print("📝 Moving to manual review")
         return NavigationResult.quit_scan(move_to_manual=True)
     
     return Page(
         page_id='note_prompt',
         title='WRITE A NOTE',
         content=content,
-        prompt='\nAdd a note? [Enter/n/z]: ',
-        valid_inputs=['', 'n', 'z'],
+        prompt='\nAdd a note? [Enter/y/z]: ',
+        valid_inputs=['', 'y', 'z'],
         handlers={
             '': handler_enter,  # Enter key
-            'n': handler_n,
+            'y': handler_y,
             'z': handler_z
         },
         default='',  # Enter is default
@@ -1249,10 +1342,8 @@ def create_pdf_preview_page(daemon) -> Page:
     
     def quit_action(ctx):
         """Quit - move to manual review."""
-        daemon = ctx['daemon']
         pdf_path = ctx['pdf_path']
         print("📝 Moving to manual review")
-        daemon.move_to_manual_review(pdf_path)
         return NavigationResult.quit_scan(move_to_manual=True)
     
     return Page(
@@ -1541,8 +1632,7 @@ def create_note_input_page(daemon) -> Page:
     
     def quit_action(ctx):
         """Quit - move to manual review."""
-        daemon = ctx['daemon']
-        daemon.move_to_manual_review(ctx['pdf_path'])
+        print("📝 Moving to manual review")
         return NavigationResult.quit_scan(move_to_manual=True)
     
     # Note: This page uses special handling in NavigationEngine

@@ -114,7 +114,9 @@ class AuthorExtractor:
         authors = set()
 
         # Special-case labeled authors: capture after "Author(s):" up to newline
+        label_found = False
         for label_match in re.finditer(r'Author\(s\)\s*:\s*([^\n]+)', text, re.IGNORECASE | re.UNICODE):
+            label_found = True
             label_chunk = label_match.group(1)
             # Split on comma / semicolon / "and" / "&"
             for part in re.split(r'[;,]|\\band\\b|&', label_chunk):
@@ -126,6 +128,48 @@ class AuthorExtractor:
                 if len(words) > 4:
                     candidate = ' '.join(words[:4])
                 authors.add(candidate)
+
+        # If we found an explicit Author(s) line, prefer it and avoid broader heuristics.
+        # This prevents pulling in two-word title/journal phrases that are not authors.
+        if label_found and authors:
+            cleaned = []
+            for author in authors:
+                author = re.sub(r'\s+', ' ', author.strip())
+                author = re.sub(r'^(By|Authors?|Author\(s\))\s*:?\s*', '', author, flags=re.IGNORECASE).strip()
+                if len(author.split()) >= 2 and len(author) > 3:
+                    cleaned.append(author)
+
+            seen = set()
+            unique_authors = []
+            for author in cleaned:
+                if author.lower() not in seen:
+                    seen.add(author.lower())
+                    unique_authors.append(author)
+
+            # #region agent log
+            try:
+                import os, json, time as _time
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "author-extractor",
+                        "hypothesisId": "AF1",
+                        "location": "author_extractor.py:extract_authors_simple",
+                        "message": "Author(s) label found; returning label-only authors",
+                        "data": {
+                            "text_length": len(text) if text else 0,
+                            "label_candidates": len(authors),
+                            "unique_authors": unique_authors[:10],
+                            "unique_count": len(unique_authors)
+                        },
+                        "timestamp": int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
+
+            return unique_authors
 
         for pattern in cls.NAME_PATTERNS:
             matches = re.findall(pattern, text, re.UNICODE)

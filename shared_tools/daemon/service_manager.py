@@ -46,6 +46,11 @@ class ServiceManager:
         self.grobid_auto_start = config.getboolean('GROBID', 'auto_start', fallback=True)
         self.grobid_auto_stop = config.getboolean('GROBID', 'auto_stop', fallback=True)
         self.grobid_container_name = config.get('GROBID', 'container_name', fallback='grobid')
+        # Optional fallback hosts for GROBID (comma-separated list)
+        fallback_str = config.get('GROBID', 'fallback_hosts', fallback='').strip()
+        self.grobid_fallback_hosts: List[str] = [
+            h.strip() for h in fallback_str.split(',') if h.strip()
+        ] if fallback_str else []
         
         # Ollama configuration
         self.ollama_host = config.get('OLLAMA', 'host', fallback='localhost').strip()
@@ -103,30 +108,47 @@ class ServiceManager:
             'tesseract_path': self.config.get('PROCESSING', 'tesseract_path', fallback=None)
         }
         
-        # Create GROBID client
-        grobid_url = f"http://{self.grobid_host}:{self.grobid_port}"
-        self.grobid_client = GrobidClient(grobid_url, config=grobid_config)
+        # Try primary host first, then any configured fallback hosts
+        hosts_to_try: List[str] = [self.grobid_host]
+        for h in self.grobid_fallback_hosts:
+            if h not in hosts_to_try:
+                hosts_to_try.append(h)
         
-        # Check if available
-        is_available, error_msg = self.check_grobid_health()
+        last_error = None
         
-        if is_available:
-            self.grobid_ready = True
-            location = "Local" if self.is_local_grobid else f"Remote ({self.grobid_host})"
-            self.logger.info(f"GROBID initialized successfully ({location})")
-            return True
-        else:
-            # Try to start if local
-            if self.is_local_grobid and self.grobid_auto_start:
-                self.logger.info("Attempting to start local GROBID container...")
-                if self._start_local_grobid():
-                    self.grobid_ready = True
-                    return True
+        for host in hosts_to_try:
+            # Update current host and locality flag
+            self.grobid_host = host.strip()
+            self.is_local_grobid = self._is_localhost(self.grobid_host)
             
-            self.grobid_ready = False
-            location = "local" if self.is_local_grobid else f"remote ({self.grobid_host})"
-            self.logger.warning(f"GROBID not available ({location}): {error_msg}")
-            return False
+            # Create GROBID client for this host
+            grobid_url = f"http://{self.grobid_host}:{self.grobid_port}"
+            self.grobid_client = GrobidClient(grobid_url, config=grobid_config)
+            
+            # Check if available
+            is_available, error_msg = self.check_grobid_health()
+            last_error = error_msg
+            
+            if is_available:
+                self.grobid_ready = True
+                location = "Local" if self.is_local_grobid else f"Remote ({self.grobid_host})"
+                self.logger.info(f"GROBID initialized successfully ({location})")
+                return True
+            else:
+                location = "local" if self.is_local_grobid else f"remote ({self.grobid_host})"
+                self.logger.warning(f"GROBID not available on {location} host {self.grobid_host}: {error_msg}")
+        
+        # If we reach here, all hosts failed; try to start local container if configured as local
+        if self.is_local_grobid and self.grobid_auto_start:
+            self.logger.info("Attempting to start local GROBID container...")
+            if self._start_local_grobid():
+                self.grobid_ready = True
+                return True
+        
+        self.grobid_ready = False
+        location = "local" if self.is_local_grobid else f"remote ({self.grobid_host})"
+        self.logger.warning(f"GROBID not available ({location}): {last_error}")
+        return False
     
     def initialize_ollama(self) -> bool:
         """Initialize Ollama service (lazy initialization - only check availability).

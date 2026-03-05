@@ -193,12 +193,13 @@ class PaperMetadataProcessor:
                 print(f"  ⚠️  Could not initialize journal validator: {e}")
                 self.journal_validator = None
         
-        # Use shared filtering method for consistent logic
+        # Use shared filtering method with strict (last-name only) matching for regex
         return AuthorFilter.filter_authors_against_zotero(
             authors=regex_authors,
             author_validator=self.author_validator,
             journal_validator=self.journal_validator,
-            logger=None
+            logger=None,
+            strict_match=True,
         )
     
     def _extract_structured_repository_metadata(self, text: str) -> Optional[Dict]:
@@ -434,8 +435,7 @@ class PaperMetadataProcessor:
                             }) + '\n')
                         # #endregion
                         if regex_authors:
-                            print(f"  Authors (regex, before filtering): {regex_authors}")
-                            # Filter against Zotero author/journal lists
+                            # Filter against Zotero author/journal lists before presenting to user
                             filtered_authors = self._filter_regex_authors(regex_authors)
                             if filtered_authors:
                                 print(f"  Authors (regex, after filtering): {filtered_authors}")
@@ -541,26 +541,28 @@ class PaperMetadataProcessor:
             jstor_id = valid_jstor_ids[0]
             print(f"  JSTOR ID: {jstor_id}")
             print(f"  ℹ️  JSTOR ID confirms this is a journal article")
-            
-            print(f"  🔍 Fetching metadata from JSTOR page...")
-            jstor_result = self.jstor_handler.process_jstor_id(jstor_id)
-            
-            if jstor_result:
-                jstor_metadata = jstor_result.get('metadata', {})
-                method = jstor_result.get('method', 'jstor')
-                
-                result['method'] = method
-                result['metadata'] = jstor_metadata
-                result['success'] = True
-                result['processing_time_seconds'] = time.time() - start_time
-                print(f"  ✅ Got metadata from JSTOR in {result['processing_time_seconds']:.1f}s")
-                return result
-            else:
-                print(f"  ⚠️  Could not fetch metadata from JSTOR page - will try GROBID extraction")
-                # Store JSTOR ID for later use (fallback if JSTOR fetch fails)
-                result['jstor_id'] = jstor_id
-                result['document_type_hint'] = 'journal_article'
-                # Continue processing - don't return yet
+            print("  ℹ️  Skipping JSTOR page scraping; using PDF extraction + legal APIs (Crossref/OpenAlex/PubMed) instead.")
+            # Store JSTOR ID for later use as a hint only (no web fetch).
+            result['jstor_id'] = jstor_id
+            result['document_type_hint'] = 'journal_article'
+            # #region agent log
+            try:
+                import os as _os, json as _json, time as _time
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                with open(log_path, "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "JST_SKIP",
+                        "location": "paper_processor.py:jstor_branch",
+                        "message": "JSTOR id present; skipping JSTOR page fetch",
+                        "data": {"jstor_id": jstor_id},
+                        "timestamp": int(_time.time() * 1000),
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            # Continue processing - don't return yet
         
         elif valid_isbns:
             print(f"\n📚 Step 3: ISBN found - use existing book lookup workflow")

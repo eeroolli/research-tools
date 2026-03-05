@@ -351,7 +351,7 @@ class AuthorValidator:
         
         return previous_row[-1]
     
-    def validate_authors(self, extracted_authors: List[str]) -> Dict:
+    def validate_authors(self, extracted_authors: List[str], allow_partial_match: bool = True) -> Dict:
         """
         Validate extracted authors against Zotero collection.
         
@@ -359,6 +359,9 @@ class AuthorValidator:
         
         Args:
             extracted_authors: List of author names from extraction
+            allow_partial_match: If True (default), use last-name match then "any word"
+                match. If False (e.g. for regex-extracted authors), use only last-name
+                matching to avoid false positives from phrase fragments.
             
         Returns:
             Dict with validation results:
@@ -390,9 +393,10 @@ class AuthorValidator:
                 # Found matching last name(s) in Zotero
                 matches = self.lastname_index[lastname]
             
-            # Strategy 2: If no lastname match, try matching any part of the name
-            # This handles cases where first/last names are swapped or only part extracted
-            if not matches:
+            # Strategy 2: If no lastname match and partial allowed, try matching any part of the name
+            # This handles cases where first/last names are swapped or only part extracted.
+            # Disabled when allow_partial_match=False (e.g. regex source) to avoid false positives.
+            if not matches and allow_partial_match:
                 extracted_lower = extracted_name.lower()
                 # Extract all words from extracted name
                 extracted_words = [w.strip() for w in extracted_lower.replace(',', ' ').split() if len(w.strip()) >= 2]

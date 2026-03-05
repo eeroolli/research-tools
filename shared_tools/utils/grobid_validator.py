@@ -11,6 +11,7 @@ from .identifier_extractor import IdentifierExtractor
 import os
 import json
 import time
+import hashlib
 
 
 class GrobidValidator:
@@ -50,6 +51,8 @@ class GrobidValidator:
                         'has_authors': bool(metadata.get('authors')),
                         'extraction_method': metadata.get('extraction_method', metadata.get('method', '')),
                         'has_pdf_path': bool(pdf_path),
+                        'pdf_basename': os.path.basename(str(pdf_path)) if pdf_path else None,
+                        'force_text_validation': bool(force_text_validation),
                         'regex_authors_count': len(regex_authors) if regex_authors else 0
                     },
                     'timestamp': int(time.time() * 1000)
@@ -75,6 +78,8 @@ class GrobidValidator:
         try:
             log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
             with open(log_path, 'a', encoding='utf-8') as f:
+                _sample = doc_text[:2000]
+                _fp = hashlib.sha1(_sample.encode('utf-8', errors='ignore')).hexdigest()[:12] if _sample else None
                 f.write(json.dumps({
                     'sessionId': 'debug-session',
                     'runId': 'run1',
@@ -84,7 +89,9 @@ class GrobidValidator:
                     'data': {
                         'doc_text_len': len(doc_text),
                         'pages_scanned': 3,
-                        'authors_count': len(original_authors)
+                        'authors_count': len(original_authors),
+                        'doc_text_fp_2k_sha1_12': _fp,
+                        'doc_text_head_300': doc_text[:300],
                     },
                     'timestamp': int(time.time() * 1000)
                 }) + '\n')
@@ -98,6 +105,7 @@ class GrobidValidator:
         authors_in_text = []
         authors_not_in_text = []
         expanded_names = []  # Track full names found from partials
+        _match_debug = []  # small per-author match diagnostics
 
         for author in original_authors:
             author_lower = author.lower()
@@ -123,6 +131,7 @@ class GrobidValidator:
             last_name_found = False
             is_partial = False
             full_name_from_partial = None
+            matched_by = None
 
             # Check if this is a partial name (e.g., "Eric M.", "J. F.")
             # Partial names: 1-2 words ending in "." or very short (2-4 chars total)
@@ -166,6 +175,7 @@ class GrobidValidator:
                     if full_name_from_partial not in expanded_names:
                         expanded_names.append(full_name_from_partial)
                     found_in_text = True  # Partial is valid if we found a full name
+                    matched_by = 'partial_expand'
                     break
 
             if last_name and len(last_name) > 2:
@@ -174,6 +184,7 @@ class GrobidValidator:
                 if re.search(pattern, doc_text):
                     last_name_found = True
                     found_in_text = True
+                    matched_by = matched_by or 'last_name_word_boundary'
                 elif last_name in doc_text:
                     idx = doc_text.find(last_name)
                     if idx >= 0:
@@ -182,6 +193,7 @@ class GrobidValidator:
                         if before_ok and after_ok:
                             last_name_found = True
                             found_in_text = True
+                            matched_by = matched_by or 'last_name_fallback'
 
             if last_name_found and first_name and len(first_name) > 1:
                 first_pattern = r'\b' + re.escape(first_name) + r'\b'
@@ -194,6 +206,7 @@ class GrobidValidator:
                         distance = abs(fm.start() - lm.start())
                         if distance <= proximity_threshold:
                             found_in_text = True
+                            matched_by = matched_by or 'first_last_proximity'
                             break
                     if found_in_text:
                         break
@@ -202,11 +215,22 @@ class GrobidValidator:
                 author_pattern = r'\b' + re.escape(author_lower) + r'\b'
                 if re.search(author_pattern, doc_text):
                     found_in_text = True
+                    matched_by = matched_by or 'full_author_word_boundary'
 
             if found_in_text:
                 authors_in_text.append(author)
             else:
                 authors_not_in_text.append(author)
+
+            if len(_match_debug) < 12:
+                _match_debug.append({
+                    'author': author,
+                    'first': first_name,
+                    'last': last_name,
+                    'is_partial': bool(is_partial),
+                    'matched': bool(found_in_text),
+                    'matched_by': matched_by,
+                })
 
         # Add expanded full names to authors_in_text (if not already present)
         for expanded_name in expanded_names:
@@ -272,7 +296,10 @@ class GrobidValidator:
                     'message': 'Exit',
                     'data': {
                         'authors_in_text': len(authors_in_text),
-                        'authors_not_in_text': len(authors_not_in_text)
+                        'authors_not_in_text': len(authors_not_in_text),
+                        'preview_in_text': authors_in_text[:10],
+                        'preview_not_in_text': authors_not_in_text[:10],
+                        'match_debug_first12': _match_debug,
                     },
                     'timestamp': int(time.time() * 1000)
                 }) + '\n')

@@ -860,6 +860,12 @@ class PaperProcessorDaemon:
         self._display_metadata_universal(metadata)
         
         print("-" * 40)
+        print(Colors.colorize(
+            "Note: At this stage, no Zotero item has been created. "
+            "The metadata above is used to search your existing Zotero library. "
+            "A new Zotero item is only created later if you explicitly choose a 'create new Zotero item' option.",
+            ColorScheme.ACTION
+        ))
         print(Colors.colorize("💡 Tip: You can edit any field (including year) by choosing option [2] Edit metadata", ColorScheme.ACTION))
     
     def prompt_for_year(self, metadata: dict, allow_back: bool = False, force_prompt: bool = False) -> dict:
@@ -928,7 +934,7 @@ class PaperProcessorDaemon:
         
         return metadata
     
-    def filter_garbage_authors(self, metadata: dict, pdf_path: Path = None) -> dict:
+    def filter_garbage_authors(self, metadata: dict, pdf_path: Path = None, regex_authors: Optional[List[str]] = None) -> dict:
         """Filter out garbage authors, keeping only those found in Zotero and/or document text.
         
         When extraction quality is poor (e.g., regex fallback finds junk like
@@ -950,7 +956,8 @@ class PaperProcessorDaemon:
             metadata=metadata,
             pdf_path=pdf_path,
             author_validator=self.author_validator,
-            logger=self.logger
+            logger=self.logger,
+            regex_authors=regex_authors,
         )
     
     def confirm_document_type_early(self, metadata: dict) -> dict:
@@ -1741,7 +1748,7 @@ class PaperProcessorDaemon:
                 print()
                 print(Colors.colorize("Options:", ColorScheme.ACTION))
                 print(Colors.colorize("[1] Enter a different year and search again", ColorScheme.LIST))
-                print(Colors.colorize("[2] Proceed to create new Zotero item", ColorScheme.LIST))
+                print(Colors.colorize("[2] Proceed to create new Zotero item using the current metadata (title, authors, year, DOI, etc.)", ColorScheme.LIST))
                 print(Colors.colorize("[3] Move to manual review", ColorScheme.LIST))
                 print(Colors.colorize("  (z) Back to previous step", ColorScheme.LIST))
                 print()
@@ -2912,6 +2919,42 @@ class PaperProcessorDaemon:
         Returns:
             Metadata dict in our format
         """
+        # #region agent log
+        try:
+            import os as _os, json as _json, time as _time
+            log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+            with open(log_path, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "ZMAP1",
+                    "location": "paper_processor_daemon.py:convert_zotero_item_to_metadata",
+                    "message": "Convert Zotero item to metadata (raw keys/preview)",
+                    "data": {
+                        "zotero_item_keys_preview": list(zotero_item.keys())[:30] if isinstance(zotero_item, dict) else None,
+                        "has_creators": bool(zotero_item.get("creators")) if isinstance(zotero_item, dict) else False,
+                        "has_authors_list": bool(zotero_item.get("authors")) if isinstance(zotero_item, dict) else False,
+                        "raw_title": (zotero_item.get("title") if isinstance(zotero_item, dict) else None),
+                        "raw_year": (zotero_item.get("year") if isinstance(zotero_item, dict) else None),
+                        "raw_itemType": (zotero_item.get("itemType") if isinstance(zotero_item, dict) else None),
+                        "raw_DOI": (zotero_item.get("DOI") if isinstance(zotero_item, dict) else None),
+                        "raw_doi": (zotero_item.get("doi") if isinstance(zotero_item, dict) else None),
+                        "raw_publicationTitle": (zotero_item.get("publicationTitle") if isinstance(zotero_item, dict) else None),
+                        "raw_journal": (zotero_item.get("journal") if isinstance(zotero_item, dict) else None),
+                        "raw_ISSN": (zotero_item.get("ISSN") if isinstance(zotero_item, dict) else None),
+                        "raw_issn": (zotero_item.get("issn") if isinstance(zotero_item, dict) else None),
+                        "raw_url": (zotero_item.get("url") if isinstance(zotero_item, dict) else None),
+                        "raw_pages": (zotero_item.get("pages") if isinstance(zotero_item, dict) else None),
+                        "raw_volume": (zotero_item.get("volume") if isinstance(zotero_item, dict) else None),
+                        "raw_issue": (zotero_item.get("issue") if isinstance(zotero_item, dict) else None),
+                        "raw_publisher": (zotero_item.get("publisher") if isinstance(zotero_item, dict) else None),
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
         metadata = {
             'title': zotero_item.get('title', ''),
             'year': zotero_item.get('year', ''),
@@ -2936,11 +2979,65 @@ class PaperProcessorDaemon:
         # Copy other fields if present
         if zotero_item.get('DOI'):
             metadata['doi'] = zotero_item['DOI']
+        # Journal: prefer publicationTitle, fallback to journal (from local DB)
         if zotero_item.get('publicationTitle'):
             metadata['journal'] = zotero_item['publicationTitle']
+        elif zotero_item.get('journal'):
+            metadata['journal'] = zotero_item['journal']
         if zotero_item.get('abstractNote'):
             metadata['abstract'] = zotero_item['abstractNote']
+        # ISSN: check both uppercase and lowercase variants
+        if zotero_item.get('ISSN'):
+            metadata['issn'] = zotero_item['ISSN']
+        elif zotero_item.get('issn'):
+            metadata['issn'] = zotero_item['issn']
+        # URL
+        if zotero_item.get('url'):
+            metadata['url'] = zotero_item['url']
+        # Pages
+        if zotero_item.get('pages'):
+            metadata['pages'] = zotero_item['pages']
+        # Volume
+        if zotero_item.get('volume'):
+            metadata['volume'] = zotero_item['volume']
+        # Issue
+        if zotero_item.get('issue'):
+            metadata['issue'] = zotero_item['issue']
+        # Publisher
+        if zotero_item.get('publisher'):
+            metadata['publisher'] = zotero_item['publisher']
         
+        # #region agent log
+        try:
+            import os as _os, json as _json, time as _time
+            log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+            with open(log_path, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "ZMAP2",
+                    "location": "paper_processor_daemon.py:convert_zotero_item_to_metadata",
+                    "message": "Converted Zotero metadata (mapped preview)",
+                    "data": {
+                        "title": metadata.get("title", "")[:80],
+                        "year": metadata.get("year", ""),
+                        "document_type": metadata.get("document_type", ""),
+                        "authors_count": len(metadata.get("authors") or []),
+                        "doi": metadata.get("doi", ""),
+                        "journal": metadata.get("journal", ""),
+                        "has_url": bool(metadata.get("url")),
+                        "has_issn": bool(metadata.get("issn")),
+                        "has_volume": bool(metadata.get("volume")),
+                        "has_issue": bool(metadata.get("issue")),
+                        "has_pages": bool(metadata.get("pages")),
+                        "has_publisher": bool(metadata.get("publisher")),
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
         return metadata
     
     def use_metadata_as_is(self, pdf_path: Path, metadata: dict) -> bool:
@@ -4460,7 +4557,8 @@ class PaperProcessorDaemon:
                     
                     # Filter authors early to avoid propagating hallucinations into searches
                     if metadata.get('authors'):
-                        metadata = self.filter_garbage_authors(metadata, pdf_path=pdf_to_use)
+                        regex_authors_for_merge = identifiers_found.get('regex_authors', []) if isinstance(identifiers_found, dict) else []
+                        metadata = self.filter_garbage_authors(metadata, pdf_path=pdf_to_use, regex_authors=regex_authors_for_merge)
                         result['metadata'] = metadata
                     
                     # If we have a JSTOR ID, try to fetch full metadata from JSTOR (authoritative) before other searches
@@ -4739,7 +4837,9 @@ class PaperProcessorDaemon:
                                             'success': True,
                                             'metadata': {
                                                 'authors': regex_authors,
-                                                'title': metadata.get('title', '') if metadata else '',
+                                                # Prefer identifiers extracted from the PDF first page (JSTOR-like front pages)
+                                                'title': (identifiers_found.get('title') or (metadata.get('title', '') if metadata else '')),
+                                                'journal': identifiers_found.get('journal', ''),
                                                 'year': identifiers_found.get('best_year', ''),
                                                 'document_type': 'journal_article' if identifiers_found.get('jstor_ids') else 'unknown'
                                             },
@@ -4747,6 +4847,28 @@ class PaperProcessorDaemon:
                                             'processing_time_seconds': 0,
                                             'identifiers_found': identifiers_found
                                         }
+                                        # #region agent log
+                                        try:
+                                            import os as _os, json as _json, time as _time
+                                            log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                                            with open(log_path, "a", encoding="utf-8") as _f:
+                                                _f.write(_json.dumps({
+                                                    "sessionId": "debug-session",
+                                                    "runId": "run1",
+                                                    "hypothesisId": "RX_META1",
+                                                    "location": "paper_processor_daemon.py:regex_fallback_metadata",
+                                                    "message": "Built regex_fallback metadata (title/journal propagation)",
+                                                    "data": {
+                                                        "title": (identifiers_found.get("title") or ""),
+                                                        "journal": (identifiers_found.get("journal") or ""),
+                                                        "year": identifiers_found.get("best_year", ""),
+                                                        "authors_count": len(regex_authors),
+                                                    },
+                                                    "timestamp": int(_time.time() * 1000),
+                                                }) + "\n")
+                                        except Exception:
+                                            pass
+                                        # #endregion
                     except Exception as e:
                         self.logger.warning(f"Regex extraction failed: {e}")
                     
@@ -4784,7 +4906,11 @@ class PaperProcessorDaemon:
                         # Preserve identifiers_found from GREP
                         ollama_result['identifiers_found'] = identifiers_found
                         # Filter authors immediately to limit hallucinations before further handling
-                        filtered_meta = self.filter_garbage_authors(ollama_result['metadata'], pdf_path=pdf_to_use)
+                        filtered_meta = self.filter_garbage_authors(
+                            ollama_result['metadata'],
+                            pdf_path=pdf_to_use,
+                            regex_authors=identifiers_found.get('regex_authors', []) if isinstance(identifiers_found, dict) else [],
+                        )
                         ollama_result['metadata'] = filtered_meta
                         result = ollama_result
                         # Only log "Ollama found authors" if Ollama was actually used (not regex fallback)
@@ -4832,7 +4958,9 @@ class PaperProcessorDaemon:
                 
                 # Filter garbage authors (keeps only known authors when extraction is poor)
                 # For GROBID, also validates against document text to filter hallucinations
-                metadata = self.filter_garbage_authors(metadata, pdf_path=pdf_to_use)
+                identifiers = result.get('identifiers_found', {})
+                regex_authors_for_merge = identifiers.get('regex_authors', []) if isinstance(identifiers, dict) else []
+                metadata = self.filter_garbage_authors(metadata, pdf_path=pdf_to_use, regex_authors=regex_authors_for_merge)
 
                 # Check if we should skip year prompt (valid DOI + successful API lookup)
                 identifiers = result.get('identifiers_found', {})
@@ -7841,8 +7969,8 @@ if ([Win32]::IsWindowVisible($terminalHwnd)) {{
                     
                     # Fallback: try wslview if available
                     try:
-                        proc = subprocess.Popen(['wslview', str(windows_path)], 
-                                                stdout=subprocess.DEVNULL, 
+                        proc = subprocess.Popen(['wslview', str(windows_path)],
+                                                stdout=subprocess.DEVNULL,
                                                 stderr=subprocess.DEVNULL)
                         self._pdf_viewer_process = proc
                         self._pdf_viewer_path = pdf_path
@@ -7853,6 +7981,62 @@ if ([Win32]::IsWindowVisible($terminalHwnd)) {{
                         self.logger.warning("wslview not found")
                     except Exception as e:
                         self.logger.warning(f"Failed to open PDF with wslview: {e}")
+
+                    # Fallback: cmd.exe /c start (works from WSL when powershell.exe fails with Exec format error)
+                    try:
+                        # start "" "path" = empty title, then path (Windows default handler for file)
+                        subprocess.Popen(
+                            ['cmd.exe', '/c', 'start', '""', str(windows_path)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        self._pdf_viewer_path = pdf_path
+                        time.sleep(1.5)
+                        self._position_pdf_window(pdf_path)
+                        self.logger.info("PDF viewer opened via cmd.exe start")
+                        return True
+                    except FileNotFoundError:
+                        self.logger.warning("cmd.exe not found")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to open PDF with cmd.exe start: {e}")
+
+                    # Fallback: explorer.exe (Windows file explorer opens default handler for file)
+                    try:
+                        subprocess.Popen(
+                            ['explorer.exe', windows_path],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        self._pdf_viewer_path = pdf_path
+                        time.sleep(1.5)
+                        self._position_pdf_window(pdf_path)
+                        self.logger.info("PDF viewer opened via explorer.exe")
+                        return True
+                    except FileNotFoundError:
+                        self.logger.warning("explorer.exe not found")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to open PDF with explorer.exe: {e}")
+
+                    # Fallback: xdg-open with WSL path (Linux viewer if path is accessible)
+                    try:
+                        wsl_path_str = str(pdf_path)
+                        if wsl_path_str.startswith('\\\\') or (':\\' in wsl_path_str or ':/' in wsl_path_str):
+                            pass  # already Windows path, skip xdg-open
+                        else:
+                            proc = subprocess.Popen(
+                                ['xdg-open', wsl_path_str],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
+                            self._pdf_viewer_process = proc
+                            self._pdf_viewer_path = pdf_path
+                            time.sleep(1.5)
+                            self.logger.info("PDF viewer opened via xdg-open")
+                            return True
+                    except FileNotFoundError:
+                        self.logger.warning("xdg-open not found")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to open PDF with xdg-open: {e}")
                 else:
                     self.logger.warning(f"Could not convert path to Windows format: {pdf_path}")
                     return False
@@ -9219,8 +9403,26 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 return False
             elif final_state.get('quit'):
                 # User wants to quit to manual review
-                self.move_to_manual_review(pdf_path)
-                print("✅ Moved to manual review")
+                # #region agent log
+                try:
+                    import time as _time, json as _json
+                    log_path = r"f:\prog\research-tools\.cursor\debug.log" if os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(_json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "run1",
+                            "hypothesisId": "MR_CALL1",
+                            "location": "paper_processor_daemon.py:_handle_pdf_attachment_step",
+                            "message": "Manual review requested (preprocess preview)",
+                            "data": {"pdf_path": str(pdf_path)},
+                            "timestamp": int(_time.time() * 1000),
+                        }) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+                moved = self.move_to_manual_review(pdf_path)
+                if moved:
+                    print("✅ Moved to manual review")
                 return False
             else:
                 # Cancelled or error
@@ -9316,8 +9518,12 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             print(f"❌ Error: {e}")
             return False
     
-    def move_to_manual_review(self, pdf_path: Path):
-        """Move PDF to manual review directory."""
+    def move_to_manual_review(self, pdf_path: Path) -> bool:
+        """Move PDF to manual review directory.
+        
+        Returns:
+            True if the file was moved, False otherwise.
+        """
         # Prefer moving the original scan if available
         src = getattr(self, '_original_scan_path', None)
         if src is None or not Path(src).exists():
@@ -9326,12 +9532,47 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         # Check if source file exists before attempting to move
         if not Path(src).exists():
             self.logger.warning(f"Cannot move to manual review: file no longer exists: {src}")
-            return
+            # #region agent log
+            try:
+                import time as _time, json as _json
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "MR1",
+                        "location": "paper_processor_daemon.py:move_to_manual_review",
+                        "message": "Source missing; move skipped",
+                        "data": {"src": str(src), "pdf_path": str(pdf_path)},
+                        "timestamp": int(_time.time() * 1000),
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            return False
         
         manual_dir = self.watch_dir / "manual_review"
         manual_dir.mkdir(exist_ok=True)
         
         dest = manual_dir / Path(src).name
+        # #region agent log
+        try:
+            import time as _time, json as _json
+            log_path = r"f:\prog\research-tools\.cursor\debug.log" if os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(_json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "MR2",
+                    "location": "paper_processor_daemon.py:move_to_manual_review",
+                    "message": "Moving to manual_review",
+                    "data": {"src": str(src), "dest": str(dest)},
+                    "timestamp": int(_time.time() * 1000),
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
         shutil.move(str(src), str(dest))
         self.logger.info(f"Moved to manual review: {dest}")
         print(f"📝 Moved to manual review: {dest}")
@@ -9344,6 +9585,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     original_filename=original_filename,
                     status='manual_review'
                 )
+        return True
     
     def select_authors_for_search(self, authors: list) -> list:
         """Let user select which authors to search by and in what order.
@@ -9696,7 +9938,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         print("  [1-N] Select item from list above")
         print("[a]   🔍 Change author/year search parameters")
         print("[b]   🔍 Change all search parameters")
-        print("[c]   None of these items - create new")
+        print("[c]   Create new Zotero item using the metadata above (title, authors, year, DOI, etc.)")
         print("[d]   ❌ Skip document")
         print("  (z) ⬅️  Back to author selection")
         print("  (r) 🔄 Restart from beginning")
@@ -11322,6 +11564,31 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 start_page = 'enrichment_review_auto'
             else:
                 start_page = 'enrichment_review_manual'
+        # #region agent log
+        try:
+            import time as _time, json as _json, os as _os
+            log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+            with open(log_path, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run-enrich",
+                    "hypothesisId": "H1",
+                    "location": "paper_processor_daemon.py:handle_item_selected",
+                    "message": "enrichment routing decision",
+                    "data": {
+                        "item_key": (selected_item.get("key") or selected_item.get("item_key")),
+                        "start_page": start_page,
+                        "bundle_is_none": enrichment_bundle is None,
+                        "bundle_status": (enrichment_bundle or {}).get("status"),
+                        "bundle_reason": (enrichment_bundle or {}).get("reason"),
+                        "bundle_updates_count": len(((enrichment_bundle or {}).get("plan") or {}).get("updates", {}) or {}),
+                        "bundle_manual_count": len(((enrichment_bundle or {}).get("plan") or {}).get("manual_fields", []) or []),
+                    },
+                    "timestamp": int(_time.time() * 1000)
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
         
         # Create pages and navigation engine
         pages = create_all_pages(self)
@@ -11389,6 +11656,39 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 return None
 
             zotero_metadata = self.convert_zotero_item_to_metadata(zotero_item) or {}
+            # #region agent log
+            try:
+                import time as _time, json as _json, os as _os
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                with open(log_path, "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run-enrich",
+                        "hypothesisId": "H2",
+                        "location": "paper_processor_daemon.py:_auto_enrich_selected_item",
+                        "message": "entry",
+                        "data": {
+                            "item_key": item_key,
+                            "z_doi": (zotero_metadata.get("doi") or ""),
+                            "z_isbn": (zotero_metadata.get("isbn") or ""),
+                            "z_issn": (zotero_metadata.get("issn") or ""),
+                            "z_journal": (zotero_metadata.get("journal") or ""),
+                            "z_url": (zotero_metadata.get("url") or ""),
+                            "z_pages": (zotero_metadata.get("pages") or ""),
+                            "z_volume": (zotero_metadata.get("volume") or ""),
+                            "z_issue": (zotero_metadata.get("issue") or ""),
+                            "z_publisher": (zotero_metadata.get("publisher") or ""),
+                            "z_title_len": len(zotero_metadata.get("title") or ""),
+                            "z_authors_count": len(zotero_metadata.get("authors") or []),
+                            "ex_has_doi": bool((extracted_metadata or {}).get("doi")),
+                            "ex_has_url": bool((extracted_metadata or {}).get("url")),
+                            "ex_source": (extracted_metadata or {}).get("source") or (extracted_metadata or {}).get("data_source"),
+                        },
+                        "timestamp": int(_time.time() * 1000)
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
             # Use Zotero metadata as base; supplement with extracted fields if missing
             search_base = zotero_metadata.copy()
             for k, v in (extracted_metadata or {}).items():
@@ -11410,6 +11710,33 @@ if ($hwnd -ne [IntPtr]::Zero) {{
 
             candidates = self.enrichment_workflow.search_online(search_base, additional_candidates=additional_candidates)
             if not candidates:
+                # #region agent log
+                try:
+                    import time as _time, json as _json, os as _os
+                    log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                    with open(log_path, "a", encoding="utf-8") as _f:
+                        _f.write(_json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "run-enrich",
+                            "hypothesisId": "H1",
+                            "location": "paper_processor_daemon.py:_auto_enrich_selected_item",
+                            "message": "no candidates from search_online",
+                            "data": {
+                                "item_key": item_key,
+                                "search_base_keys": sorted(list(search_base.keys()))[:25],
+                                "search_title_len": len(search_base.get("title") or ""),
+                                "search_authors_count": len(search_base.get("authors") or []),
+                                "search_year": search_base.get("year"),
+                                "search_journal": search_base.get("journal"),
+                                "search_doi": search_base.get("doi"),
+                                "search_url": search_base.get("url"),
+                                "additional_candidates_count": len(additional_candidates),
+                            },
+                            "timestamp": int(_time.time() * 1000)
+                        }) + "\n")
+                except Exception:
+                    pass
+                # #endregion
                 return None
 
             summary = self.enrichment_workflow.evaluate_and_plan(zotero_metadata, candidates)
@@ -11417,10 +11744,68 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             plan = summary.get("plan")
             candidate = summary.get("candidate")
             if not decision or not plan or not candidate:
+                # #region agent log
+                try:
+                    import time as _time, json as _json, os as _os
+                    log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                    with open(log_path, "a", encoding="utf-8") as _f:
+                        _f.write(_json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "run-enrich",
+                            "hypothesisId": "H3",
+                            "location": "paper_processor_daemon.py:_auto_enrich_selected_item",
+                            "message": "evaluate_and_plan returned incomplete",
+                            "data": {
+                                "item_key": item_key,
+                                "has_decision": bool(decision),
+                                "has_plan": bool(plan),
+                                "has_candidate": bool(candidate),
+                                "candidates_count": len(candidates),
+                            },
+                            "timestamp": int(_time.time() * 1000)
+                        }) + "\n")
+                except Exception:
+                    pass
+                # #endregion
                 return None
 
             status = decision.get("status")
             reason = decision.get("reason")
+            # #region agent log
+            try:
+                import time as _time, json as _json, os as _os
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                ev = (decision or {}).get("evidence", {}) or {}
+                with open(log_path, "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run-enrich",
+                        "hypothesisId": "H4",
+                        "location": "paper_processor_daemon.py:_auto_enrich_selected_item",
+                        "message": "decision computed",
+                        "data": {
+                            "item_key": item_key,
+                            "status": status,
+                            "reason": reason,
+                            "confidence": decision.get("confidence"),
+                            "e_title_similarity": ev.get("title_similarity"),
+                            "e_author_overlap": (ev.get("author_overlap") or {}).get("matches"),
+                            "e_author_total_zotero": (ev.get("author_overlap") or {}).get("total_zotero"),
+                            "e_author_total_candidate": (ev.get("author_overlap") or {}).get("total_candidate"),
+                            "e_year_match": ev.get("year_match"),
+                            "e_type_match": ev.get("type_match"),
+                            "e_identifier": ev.get("identifier"),
+                            "candidate_source": (candidate or {}).get("source"),
+                            "candidate_has_doi": bool((candidate or {}).get("doi")),
+                            "candidate_title_len": len((candidate or {}).get("title") or ""),
+                            "plan_updates": sorted(list((plan or {}).get("updates", {}).keys()))[:25],
+                            "plan_manual_fields": sorted(list((plan or {}).get("manual_fields", [])))[:25],
+                        },
+                        "timestamp": int(_time.time() * 1000)
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
 
             return {
                 "status": status,
@@ -11546,8 +11931,26 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     return
                 elif final_state.get('quit'):
                     # User wants to quit to manual review
-                    self.move_to_manual_review(pdf_path)
-                    print("✅ Moved to manual review")
+                    # #region agent log
+                    try:
+                        import time as _time, json as _json
+                        log_path = r"f:\prog\research-tools\.cursor\debug.log" if os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write(_json.dumps({
+                                "sessionId": "debug-session",
+                                "runId": "run1",
+                                "hypothesisId": "MR_CALL2",
+                                "location": "paper_processor_daemon.py:_handle_pdf_attachment_step",
+                                "message": "Manual review requested (attachment step)",
+                                "data": {"pdf_path": str(pdf_path)},
+                                "timestamp": int(_time.time() * 1000),
+                            }) + "\n")
+                    except Exception:
+                        pass
+                    # #endregion
+                    moved = self.move_to_manual_review(pdf_path)
+                    if moved:
+                        print("✅ Moved to manual review")
                     return
                 else:
                     # Cancelled or error
@@ -12179,8 +12582,54 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             out['size_mb'] = st.st_size / 1024 / 1024
             out['modified'] = st.st_mtime
             out['created'] = st.st_ctime
-        except Exception:
-            pass
+        except Exception as e:
+            # Cloud-drive publications may not be stat()-able from WSL; fall back to PowerShell.
+            # #region agent log
+            try:
+                import os as _os, json as _json, time as _time
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                with open(log_path, "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "PDFSZ1",
+                        "location": "paper_processor_daemon.py:_summarize_pdf_for_compare",
+                        "message": "path.stat failed; attempting PowerShell fallback",
+                        "data": {"path": str(path), "error_type": type(e).__name__, "access_mode": getattr(self, "publications_access_mode", "wsl")},
+                        "timestamp": int(_time.time() * 1000),
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
+
+            try:
+                info = None
+                if self._publications_use_powershell():
+                    info = self._get_file_info_via_powershell(path, with_hash=False)
+                if info and info.get('exists') and info.get('isFile') and info.get('size') is not None:
+                    out['size_mb'] = float(info.get('size')) / 1024 / 1024
+                    # Prefer ISO timestamps if available
+                    out['created'] = info.get('ctime') or out.get('created')
+                    out['modified'] = info.get('mtime') or out.get('modified')
+                    # #region agent log
+                    try:
+                        import os as _os, json as _json, time as _time
+                        log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                        with open(log_path, "a", encoding="utf-8") as _f:
+                            _f.write(_json.dumps({
+                                "sessionId": "debug-session",
+                                "runId": "run1",
+                                "hypothesisId": "PDFSZ2",
+                                "location": "paper_processor_daemon.py:_summarize_pdf_for_compare",
+                                "message": "PowerShell fallback size applied",
+                                "data": {"path": str(path), "size": info.get('size')},
+                                "timestamp": int(_time.time() * 1000),
+                            }) + "\n")
+                    except Exception:
+                        pass
+                    # #endregion
+            except Exception:
+                pass
         # Page count and OCR snippet
         try:
             import fitz
