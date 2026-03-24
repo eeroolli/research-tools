@@ -688,6 +688,33 @@ class ZoteroLocalSearch:
             self.logger.debug(f"Error getting DOI: {e}")
         
         return None
+
+    def _get_url(self, item_id: int) -> Optional[str]:
+        """Get URL for an item."""
+        try:
+            cursor = self.db_connection.cursor()
+
+            query = """
+            SELECT value
+            FROM itemDataValues
+            WHERE valueID IN (
+                SELECT valueID FROM itemData
+                WHERE itemID = ?
+                AND fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'url')
+            )
+            LIMIT 1
+            """
+
+            cursor.execute(query, (item_id,))
+            result = cursor.fetchone()
+
+            if result and result[0]:
+                return result[0]
+
+        except Exception as e:
+            self.logger.debug(f"Error getting URL: {e}")
+
+        return None
     
     def _get_abstract(self, item_id: int) -> Optional[str]:
         """Get abstract for an item."""
@@ -790,7 +817,7 @@ class ZoteroLocalSearch:
         self.connect()
         return self
     
-    def search_by_author(self, author_name: str, limit: int = 10) -> list:
+    def search_by_author(self, author_name: str, limit: int = 10) -> Optional[list]:
         """Search local Zotero database by author name.
         
         Args:
@@ -800,10 +827,9 @@ class ZoteroLocalSearch:
         Returns:
             List of matching items with metadata
         """
-        if not self.db_connection:
-            self.connect()
-        
         try:
+            if not self.db_connection:
+                self.connect()
             cursor = self.db_connection.cursor()
             
             # Search in creators table
@@ -856,11 +882,28 @@ class ZoteroLocalSearch:
             
             return results
             
+        except sqlite3.OperationalError as e:
+            # Distinguish DB-locked state from true "no matches".
+            if "database is locked" in str(e).lower():
+                self.logger.warning("Zotero DB locked during author search; cannot determine matches")
+                return None
+            self.logger.error(f"Error searching by author: {e}")
+            return []
         except Exception as e:
             self.logger.error(f"Error searching by author: {e}")
             return []
     
-    def search_by_authors_ordered(self, author_names: List[str], year: str = None, limit: int = 20, document_type: str = None) -> list:
+    def search_by_authors_ordered(
+        self,
+        author_names: List[str],
+        year: str = None,
+        limit: int = 20,
+        document_type: str = None,
+        target_doi: Optional[str] = None,
+        target_url: Optional[str] = None,
+        target_title: Optional[str] = None,
+        target_year: Optional[str] = None,
+    ) -> Optional[list]:
         """Search for items with specific authors in specific order.
         
         Args:
@@ -872,13 +915,12 @@ class ZoteroLocalSearch:
         Returns:
             List of matching items, sorted by how well they match the author order
         """
-        if not self.db_connection:
-            self.connect()
-        
         if not author_names:
             return []
         
         try:
+            if not self.db_connection:
+                self.connect()
             cursor = self.db_connection.cursor()
             
             # Build query to find items with any of these authors
@@ -968,6 +1010,7 @@ class ZoteroLocalSearch:
                 item['container_info'] = container_info
                 item['journal'] = container_info['value'] if container_info else None  # Backward compat
                 item['DOI'] = self._get_doi(item['itemID'])
+                item['url'] = self._get_url(item['itemID'])
                 item['abstractNote'] = self._get_abstract(item['itemID'])
                 item['tags'] = self._get_tags(item['itemID'])
                 
@@ -978,14 +1021,105 @@ class ZoteroLocalSearch:
                 
                 results.append(item)
             
-            # Sort by order score (higher is better), then by year (newer first)
-            results.sort(key=lambda x: (x['order_score'], x.get('year', '')), reverse=True)
+            # Compute overall match rank for better ordering.
+            # Rank rules (best first):
+            # 1) DOI or URL identical
+            # 2) Year and Title identical
+            # 3) Year matches + best author order score
+            # 4) Fallback: author order score
+            target_doi_norm = self._normalize_identifier(target_doi)
+            target_url_norm = self._normalize_identifier(target_url)
+            target_title_norm = self._normalize_title(target_title)
+            target_year_norm = self._normalize_year(target_year)
+            
+            for item in results:
+                item_doi_norm = self._normalize_identifier(item.get('DOI'))
+                item_url_norm = self._normalize_identifier(item.get('url'))
+                item_year_norm = self._normalize_year(item.get('year'))
+                item_title_norm = self._normalize_title(item.get('title'))
+                
+                year_match = bool(target_year_norm and item_year_norm == target_year_norm)
+                doi_url_match = bool(
+                    (target_doi_norm and item_doi_norm and item_doi_norm == target_doi_norm) or
+                    (target_url_norm and item_url_norm and item_url_norm == target_url_norm)
+                )
+                title_year_match = bool(
+                    year_match and
+                    bool(target_title_norm) and
+                    bool(item_title_norm) and
+                    item_title_norm == target_title_norm
+                )
+                
+                if doi_url_match:
+                    item['match_rank'] = 0
+                    item['match_label'] = 'DOI/URL identical'
+                elif title_year_match:
+                    item['match_rank'] = 1
+                    item['match_label'] = 'Year and title identical'
+                elif year_match:
+                    item['match_rank'] = 2
+                    item['match_label'] = 'Year matches + author order'
+                else:
+                    item['match_rank'] = 3
+                    item['match_label'] = 'Author order (weak)'
+                
+            # Sort by match rank, then by year-match, then by author order score.
+            # Use normalized title as a stable tie-breaker.
+            results.sort(
+                key=lambda x: (
+                    x.get('match_rank', 3),
+                    0 if (target_year_norm and self._normalize_year(x.get('year')) == target_year_norm) else 1,
+                    -(x.get('order_score', 0) or 0),
+                    self._normalize_title(x.get('title'))
+                )
+            )
             
             return results[:limit]
             
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e).lower():
+                self.logger.warning("Zotero DB locked during ordered-author search; cannot determine matches")
+                return None
+            self.logger.error(f"Error searching by ordered authors: {e}")
+            return []
         except Exception as e:
             self.logger.error(f"Error searching by ordered authors: {e}")
             return []
+
+    @staticmethod
+    def _normalize_identifier(value: Optional[str]) -> Optional[str]:
+        """Normalize identifiers (DOI/URL) for exact comparison."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            value = str(value)
+        v = value.strip().lower()
+        return v or None
+    
+    @staticmethod
+    def _normalize_year(value: Optional[str]) -> Optional[str]:
+        """Normalize year value to a 4-digit string if possible."""
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return str(value)
+        v = str(value).strip()
+        # Extract first 4-digit year if a full date was provided.
+        m = re.search(r'\b(19|20)\d{2}\b', v)
+        return m.group(0) if m else (v or None)
+    
+    @staticmethod
+    def _normalize_title(value: Optional[str]) -> Optional[str]:
+        """Normalize titles for exact (post-normalization) comparison."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            value = str(value)
+        v = value.lower()
+        # Collapse punctuation/whitespace to single spaces.
+        v = re.sub(r'[^a-z0-9]+', ' ', v)
+        v = ' '.join(v.split())
+        return v or None
     
     def _calculate_author_order_score(self, creators: list, search_names: List[str]) -> int:
         """Calculate how well item's authors match the search order.

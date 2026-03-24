@@ -46,6 +46,17 @@ class ServiceManager:
         self.grobid_auto_start = config.getboolean('GROBID', 'auto_start', fallback=True)
         self.grobid_auto_stop = config.getboolean('GROBID', 'auto_stop', fallback=True)
         self.grobid_container_name = config.get('GROBID', 'container_name', fallback='grobid')
+        # Remote GROBID auto-start (SSH to remote host and run a command, e.g. "docker start grobid")
+        self.grobid_remote_auto_start = config.getboolean('GROBID', 'remote_auto_start', fallback=False)
+        self.grobid_remote_ssh_host = config.get('GROBID', 'remote_ssh_host', fallback='').strip()
+        self.grobid_remote_ssh_user = config.get('GROBID', 'remote_ssh_user', fallback='').strip()
+        self.grobid_remote_start_command = config.get(
+            'GROBID', 'remote_start_command', fallback=f'docker start {self.grobid_container_name}'
+        ).strip()
+        # TCP precheck: fast connectivity test before HTTP health check (seconds)
+        self.grobid_tcp_precheck_timeout = float(
+            config.get('GROBID', 'tcp_precheck_timeout', fallback='1.0')
+        )
         # Optional fallback hosts for GROBID (comma-separated list)
         fallback_str = config.get('GROBID', 'fallback_hosts', fallback='').strip()
         self.grobid_fallback_hosts: List[str] = [
@@ -113,6 +124,21 @@ class ServiceManager:
         for h in self.grobid_fallback_hosts:
             if h not in hosts_to_try:
                 hosts_to_try.append(h)
+
+        # Option A (start first): run one start step up-front if configured
+        primary_host = hosts_to_try[0].strip() if hosts_to_try else self.grobid_host
+        is_primary_local = self._is_localhost(primary_host)
+
+        if is_primary_local and self.grobid_auto_start:
+            # Ensure flags/host match the primary before starting local container
+            self.grobid_host = primary_host
+            self.is_local_grobid = True
+            self.logger.info("Auto-start enabled for local GROBID; starting container before health checks...")
+            self._start_local_grobid()
+        elif (not is_primary_local) and self.grobid_remote_auto_start:
+            ssh_host = (self.grobid_remote_ssh_host or primary_host).strip()
+            self.logger.info(f"Auto-start enabled for remote GROBID; attempting remote start on {ssh_host}...")
+            self._try_remote_grobid_start(ssh_host)
         
         last_error = None
         
@@ -138,17 +164,53 @@ class ServiceManager:
                 location = "local" if self.is_local_grobid else f"remote ({self.grobid_host})"
                 self.logger.warning(f"GROBID not available on {location} host {self.grobid_host}: {error_msg}")
         
-        # If we reach here, all hosts failed; try to start local container if configured as local
-        if self.is_local_grobid and self.grobid_auto_start:
-            self.logger.info("Attempting to start local GROBID container...")
-            if self._start_local_grobid():
-                self.grobid_ready = True
-                return True
-        
         self.grobid_ready = False
         location = "local" if self.is_local_grobid else f"remote ({self.grobid_host})"
         self.logger.warning(f"GROBID not available ({location}): {last_error}")
         return False
+
+    def _try_remote_grobid_start(self, ssh_host: str) -> bool:
+        """Attempt to start remote GROBID via SSH.
+
+        Runs a configured command on a remote host (e.g. 'docker start grobid').
+        This method does not validate GROBID readiness; it only executes the command.
+        """
+        if not ssh_host:
+            self.logger.warning("Remote GROBID SSH host is empty; skipping remote start")
+            return False
+
+        ssh_target = (
+            f"{self.grobid_remote_ssh_user}@{ssh_host}"
+            if self.grobid_remote_ssh_user
+            else ssh_host
+        )
+
+        try:
+            result = subprocess.run(
+                [
+                    'ssh',
+                    '-o', 'BatchMode=yes',
+                    '-o', 'ConnectTimeout=10',
+                    ssh_target,
+                    self.grobid_remote_start_command,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                self.logger.debug("Remote start command completed successfully")
+                return True
+
+            stderr = (result.stderr or "").strip()
+            stdout = (result.stdout or "").strip()
+            msg = stderr if stderr else stdout if stdout else f"exit code {result.returncode}"
+            self.logger.warning(f"Remote start command failed: {msg}")
+            return False
+        except Exception as e:
+            self.logger.warning(f"Remote start command failed: {e}")
+            return False
     
     def initialize_ollama(self) -> bool:
         """Initialize Ollama service (lazy initialization - only check availability).
@@ -238,11 +300,28 @@ class ServiceManager:
             return False, "GROBID client not initialized"
         
         health_url = f"http://{self.grobid_host}:{self.grobid_port}/api/isalive"
+
+        def check_grobid() -> Tuple[bool, Optional[str]]:
+            tcp_ok, tcp_err = self._tcp_can_connect(
+                host=self.grobid_host,
+                port=self.grobid_port,
+                timeout_s=self.grobid_tcp_precheck_timeout,
+            )
+            if not tcp_ok:
+                return False, f"TCP connect failed: {tcp_err}"
+
+            response = requests.get(health_url, timeout=self.health_check_timeout)
+            body = (response.text or "").strip()
+            if response.status_code == 200 and body == "true":
+                return True, None
+
+            preview = body[:200]
+            return False, f"HTTP bad response: status={response.status_code} body={preview!r}"
         
         return self._check_service_health(
             service_name="GROBID",
             health_url=health_url,
-            health_check_fn=lambda: self.grobid_client.is_available(verbose=False)
+            health_check_fn=check_grobid
         )
     
     def check_ollama_health(self) -> Tuple[bool, Optional[str]]:
@@ -256,12 +335,11 @@ class ServiceManager:
         
         health_url = f"http://{self.ollama_host}:{self.ollama_port}/api/tags"
         
-        def check_ollama() -> bool:
-            try:
-                response = requests.get(health_url, timeout=self.health_check_timeout)
-                return response.status_code == 200
-            except Exception:
-                return False
+        def check_ollama() -> Tuple[bool, Optional[str]]:
+            response = requests.get(health_url, timeout=self.health_check_timeout)
+            if response.status_code == 200:
+                return True, None
+            return False, f"HTTP bad response: status={response.status_code}"
         
         return self._check_service_health(
             service_name="Ollama",
@@ -273,7 +351,7 @@ class ServiceManager:
         self,
         service_name: str,
         health_url: str,
-        health_check_fn: Callable[[], bool]
+        health_check_fn: Callable[[], Tuple[bool, Optional[str]]]
     ) -> Tuple[bool, Optional[str]]:
         """Check service health with exponential backoff.
         
@@ -289,19 +367,16 @@ class ServiceManager:
         
         for attempt in range(self.health_check_retries):
             try:
-                if health_check_fn():
+                ok, msg = health_check_fn()
+                if ok:
                     return True, None
-                else:
-                    last_error = f"{service_name} health check returned False"
+                last_error = msg or f"{service_name} health check returned False"
             except requests.ConnectionError as e:
                 last_error = f"Connection error: {e}"
             except requests.Timeout:
                 last_error = f"Timeout after {self.health_check_timeout}s"
             except requests.RequestException as e:
                 last_error = f"Request error: {e}"
-            except Exception as e:
-                # Catch-all for unexpected errors (e.g., from health_check_fn)
-                last_error = f"Unexpected error: {e}"
             
             # Exponential backoff (except on last attempt)
             if attempt < self.health_check_retries - 1:
@@ -314,6 +389,20 @@ class ServiceManager:
         
         error_msg = f"{service_name} health check failed after {self.health_check_retries} attempts: {last_error}"
         return False, error_msg
+
+    @staticmethod
+    def _tcp_can_connect(host: str, port: int, timeout_s: float) -> Tuple[bool, Optional[str]]:
+        """Fast TCP connectivity probe to separate network vs HTTP/service failures."""
+        try:
+            conn = socket.create_connection((host, port), timeout=timeout_s)
+            conn.close()
+            return True, None
+        except socket.gaierror as e:
+            return False, f"DNS error: {e}"
+        except TimeoutError:
+            return False, f"timeout after {timeout_s}s"
+        except OSError as e:
+            return False, str(e)
     
     def _start_local_grobid(self) -> bool:
         """Start local GROBID Docker container.
@@ -391,10 +480,16 @@ class ServiceManager:
         self.logger.info(f"Creating new GROBID container: {self.grobid_container_name}")
         # Safe: all values are from config, not user input
         # Using list form (not shell=True) prevents injection
+        # FIX: Added JVM memory options (-Xmx2g -Xms2g -XX:+UseG1GC) to address intermittent availability
+        # The G1GC garbage collector is better for handling native memory fragmentation from ML libraries
         result = subprocess.run([
             'docker', 'run', '-d',
             '--name', self.grobid_container_name,
             '-p', f'{self.grobid_port}:8070',
+            '-e', 'GROBID_SERVICE_OPTS=-Xmx2g -Xms2g -XX:+UseG1GC -Djava.library.path=grobid-home/lib/lin-64:grobid-home/lib/lin-64/jep',
+            '--memory', '4g',
+            '--memory-swap', '4g',
+            '--restart', 'unless-stopped',
             'lfoppiano/grobid:0.8.2'
         ], capture_output=True, text=True, check=False, timeout=60)
         
@@ -517,4 +612,3 @@ class ServiceManager:
                 self.logger.warning("Ollama process killed (did not terminate gracefully)")
             except Exception as e:
                 self.logger.error(f"Error stopping Ollama: {e}")
-

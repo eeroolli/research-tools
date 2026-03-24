@@ -15,6 +15,7 @@
 - Scripts and code should be robust, clear, and maintainable.
 - Avoid fragile hacks—prefer explicit, well-documented logic, especially for file handling and parsing (e.g., use `csvtool` for CSVs, not `awk` or `read`).
 - If there is a package, module or something similar that is well written for the purpose perhaps it is better to use that instead of writing a lot of code that needs to be tested.
+- It is always better to get the logic correct instead of writing more code to handle problems and exceptions. Try to find the core problem, instead of patching.
 
 
 ## Absolute Paths for Critical Files

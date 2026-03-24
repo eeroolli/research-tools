@@ -1,0 +1,4 @@
+fix: show preprocessing preview for new Zotero items
+
+- Run preprocessing + preview before copy/attach in the create-new-item flow
+- Suppress verbose rotation diagnostics when no rotation correction is needed
