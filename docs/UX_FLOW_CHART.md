@@ -493,6 +493,29 @@ Throughout the workflow, users can:
 
 These options are available at most decision points.
 
+Restart behavior for the active scan:
+- When `r` is chosen during processing, the daemon immediately restarts the same
+  scan file before continuing with any newly queued scans.
+- This applies to restart points in year confirmation and downstream search flows.
+
+### Reverse Flow Guarantee (Item Selection Path)
+
+When an existing Zotero item has been selected, reverse navigation must preserve the
+same scan context and return to item selection (not advance to the next scan):
+
+- `PDF PREVIEW` + `z` -> `PROPOSED ACTIONS`
+- `PROPOSED ACTIONS` + `z` -> `REVIEW & PROCEED`
+- `REVIEW & PROCEED` + `z` -> `ZOTERO ITEM SELECTION` (same scan, same search context)
+
+This ensures users can recover from a wrong item selection without losing the current
+paper flow.
+
+### Non-Page Prompt Back Semantics
+
+For key non-page prompts (for example year confirmation and search-parameter review),
+`z` is treated as one-step back to the previous workflow stage. Any partial edits made
+inside the current prompt may be discarded when going back.
+
 ---
 
 ## File Locations
@@ -520,6 +543,8 @@ These options are available at most decision points.
 - **REFACTORING_PLAN.md** - Planned code improvements
 - **implementation-plan.md** - Overall system architecture
 - **SCANNER_SETUP.md** - Scanner configuration and setup
+- **BUG_BACKLOG.md** - Active bug backlog and first planned batch
+- **BUG_TRIAGE_GUIDE.md** - Triage rubric, cadence, and prioritization rules
 
 ---
 
