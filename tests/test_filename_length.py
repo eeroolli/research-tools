@@ -81,7 +81,12 @@ def test_filename_length_limit():
         from shared_tools.ai.ollama_client import OllamaClient
         client = OllamaClient()
         print(f"Ollama host: {client.ollama_base_url}")
-        print(f"Ollama model: {client.ollama_model}")
+        print(f"Base Ollama model (fallback): {client.ollama_model}")
+        # Role-specific models used internally by OllamaClient
+        title_model = getattr(client, "title_model", client.ollama_model)
+        metadata_model = getattr(client, "metadata_model", client.ollama_model)
+        print(f"Title model (shorten_title): {title_model}")
+        print(f"Metadata model (extraction): {metadata_model}")
         test_title = "In_Search_of_the_Right_Spouse_Interracial_Marriage_among_Chinese_and_Japanese_Americans"
         print(f"Testing with title: {test_title}")
         shortened = client.shorten_title(test_title, preserve_first_n_words=4)
@@ -104,6 +109,33 @@ def test_filename_length_limit():
     print("\nNote: If Ollama is available and working, Test 1 and 2 should show")
     print("      intelligently shortened titles (first 4 words preserved).")
     print("      If Ollama is unavailable, truncation fallback will be used.")
+
+    # Test case 5: Ensure no double underscores after shortening
+    print("\nTest 5: No double underscores after shortening")
+    print("-" * 80)
+    gen2 = create_filename_generator()
+    # Force shortening by using a very small max length
+    gen2.filename_max_length = 40
+
+    metadata5 = {
+        'title': 'A Very Long Academic Paper Title That Will Be Shortened',
+        'authors': ['Author One', 'Author Two'],
+        'year': '2023',
+        'document_type': 'journal_article'
+    }
+
+    # Monkeypatch the internal Ollama shortening to simulate a problematic output
+    # that would produce double underscores if not normalized.
+    def fake_shorten_title(title: str) -> str:
+        return "_about__complex_topics"
+
+    gen2._shorten_title_with_ollama = fake_shorten_title  # type: ignore[attr-defined]
+
+    filename5 = gen2.generate_filename(metadata5)
+    base5 = filename5.rsplit('.', 1)[0] if '.' in filename5 else filename5
+    print(f"Generated filename (Test 5): {filename5}")
+    print(f"Contains '__': {'YES' if '__' in base5 else 'NO'}")
+    assert "__" not in base5, "Filename should not contain double underscores after shortening"
 
 if __name__ == "__main__":
     test_filename_length_limit()

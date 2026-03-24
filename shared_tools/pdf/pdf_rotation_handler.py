@@ -13,9 +13,15 @@ from typing import Optional, Tuple, Dict, Any
 import cv2
 import numpy as np
 from PIL import Image
-import pytesseract
 import fitz  # PyMuPDF
 import io
+
+try:
+    import pytesseract  # type: ignore[import]
+    _HAS_PYTESSERACT = True
+except ImportError:  # pragma: no cover - optional dependency
+    pytesseract = None  # type: ignore[assignment]
+    _HAS_PYTESSERACT = False
 
 
 class PDFRotationHandler:
@@ -30,9 +36,15 @@ class PDFRotationHandler:
         self.config = config or {}
         self.logger = logging.getLogger(__name__)
         
-        # Configure Tesseract if path provided
-        if self.config.get('tesseract_path'):
-            pytesseract.pytesseract.tesseract_cmd = self.config['tesseract_path']
+        # Configure Tesseract if path provided and pytesseract is available
+        tesseract_path = self.config.get('tesseract_path')
+        if tesseract_path and _HAS_PYTESSERACT:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        elif tesseract_path and not _HAS_PYTESSERACT:
+            self.logger.warning(
+                "tesseract_path configured but pytesseract is not installed; "
+                "OCR-based rotation detection will be disabled."
+            )
     
     def detect_pdf_rotation(self, pdf_path: Path, max_pages: int = 2) -> Optional[str]:
         """Detect if PDF needs rotation correction.
@@ -53,6 +65,11 @@ class PDFRotationHandler:
             # Check multiple pages to detect mixed orientation
             pages_to_check = min(max_pages + 2, len(doc))  # Check a few more pages
             rotation_votes = {'rotated_90': 0, 'rotated_270': 0, 'rotated_180': 0, 'normal': 0}
+
+            # Buffer verbose rotation messages. We only emit them if rotation correction
+            # is actually needed, to keep normal-case console output concise.
+            verbose_logs: list[str] = []
+            verbose_logs.append("Checking PDF for rotation issues...")
             
             for page_num in range(pages_to_check):
                 page = doc[page_num]
@@ -62,11 +79,11 @@ class PDFRotationHandler:
                 
                 if text and len(text.strip()) > 50:
                     # Page has machine-readable text - use text-based detection
-                    self.logger.info(f"Page {page_num + 1}: machine-readable text found")
+                    verbose_logs.append(f"Page {page_num + 1}: machine-readable text found")
                     rotation_votes['normal'] += 1
                 else:
                     # Page is likely scanned image - use image analysis
-                    self.logger.info(f"Page {page_num + 1}: scanned image, analyzing for rotation...")
+                    verbose_logs.append(f"Page {page_num + 1}: scanned image, analyzing for rotation...")
                     
                     # Get page as image for analysis
                     mat = fitz.Matrix(1.0, 1.0)  # 1x zoom for speed
@@ -81,10 +98,10 @@ class PDFRotationHandler:
                     rotation = self._detect_scanned_image_rotation(image)
                     if rotation:
                         rotation_votes[rotation] += 1
-                        self.logger.info(f"Page {page_num + 1}: detected '{rotation}'")
+                        verbose_logs.append(f"Page {page_num + 1}: detected '{rotation}'")
                     else:
                         rotation_votes['normal'] += 1
-                        self.logger.info(f"Page {page_num + 1}: normal orientation")
+                        verbose_logs.append(f"Page {page_num + 1}: normal orientation")
             
             doc.close()
             
@@ -93,11 +110,16 @@ class PDFRotationHandler:
             most_common_count = rotation_votes[most_common]
             total_pages = sum(rotation_votes.values())
             
-            self.logger.info(f"Rotation analysis: {rotation_votes}")
+            verbose_logs.append(f"Rotation analysis: {rotation_votes}")
             
             # If most pages are rotated, return the rotation type
             if most_common != 'normal' and most_common_count > total_pages * 0.5:
-                self.logger.info(f"Detected mixed orientation: {most_common} on {most_common_count}/{total_pages} pages")
+                verbose_logs.append(
+                    f"Detected mixed orientation: {most_common} on {most_common_count}/{total_pages} pages"
+                )
+                # Emit buffered verbose logs only in rotation-needed case.
+                for msg in verbose_logs:
+                    self.logger.info(msg)
                 return most_common
             
             return None
@@ -142,7 +164,7 @@ class PDFRotationHandler:
                 short_lines = [line for line in lines if len(line.strip()) < 10 and line.strip()]
                 
                 if len(short_lines) > len(lines) * 0.3:  # More than 30% short lines
-                    self.logger.info("Text pattern suggests rotation (many short lines)")
+                    self.logger.debug("Text pattern suggests rotation (many short lines)")
                     return 'rotated_90'  # Most common rotation for scanned book chapters
             
             return None
@@ -160,6 +182,11 @@ class PDFRotationHandler:
         Returns:
             Rotation type needed or None
         """
+        if not _HAS_PYTESSERACT:
+            # pytesseract is optional; without it we skip OCR-based rotation
+            self.logger.debug("pytesseract not available - skipping OCR-based image rotation detection")
+            return None
+        
         try:
             # Create small image for fast processing
             height, width = image.shape[:2]

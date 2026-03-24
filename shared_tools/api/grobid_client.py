@@ -15,6 +15,8 @@ import tempfile
 import os
 import importlib
 
+from shared_tools.utils.path_utils import normalize_path_for_wsl
+
 
 class GrobidClient:
     """Client for GROBID server."""
@@ -107,7 +109,6 @@ class GrobidClient:
             rotation_applied = None
             
             if handle_rotation:
-                self.logger.info("Checking PDF for rotation issues...")
                 corrected_pdf, rotation_applied = self.rotation_handler.process_pdf_with_rotation(
                     pdf_path, max_pages
                 )
@@ -118,8 +119,8 @@ class GrobidClient:
                     # Track temp file for cleanup
                     if corrected_pdf != pdf_path:
                         self.temp_files.append(corrected_pdf)
-                else:
-                    self.logger.info("No rotation correction needed")
+                # No else-logging here: when no rotation is needed we keep
+                # output concise (the rotation handler prints the conclusion).
             
             # Helper to call GROBID
             def _call_grobid(in_path: Path, end_pages: int):
@@ -142,6 +143,12 @@ class GrobidClient:
                     )
 
             # Send PDF to GROBID with page limit for better author extraction
+            # #region agent log
+            import os, json, time
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"grobid_client.py:147","message":"GROBID call start","data":{"pdf_path":str(pdf_to_process),"max_pages":max_pages},"timestamp":int(time.time()*1000)}) + '\n')
+            # #endregion
             response = _call_grobid(pdf_to_process, max_pages)
             
             if response.status_code != 200:
@@ -164,6 +171,12 @@ class GrobidClient:
             
             # Extract metadata
             metadata = self._parse_grobid_xml(root)
+            # #region agent log
+            import os, json, time
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"grobid_client.py:169","message":"GROBID extraction result","data":{"has_metadata":bool(metadata),"authors":metadata.get('authors',[]) if metadata else [],"title":metadata.get('title','')[:50] if metadata else None,"max_pages":max_pages},"timestamp":int(time.time()*1000)}) + '\n')
+            # #endregion
             
             # Log what was extracted for debugging conference info
             if self.logger.isEnabledFor(logging.DEBUG):
@@ -204,7 +217,7 @@ class GrobidClient:
                 except Exception:
                     pass
                 
-                # Retry with more pages
+                # Retry with more pages (no rotation retries; Document Capture Pro provides correct orientation)
                 if max_pages < 4:
                     self.logger.info("Retrying GROBID with max_pages=4...")
                     resp2 = _call_grobid(pdf_to_process, 4)
@@ -219,25 +232,6 @@ class GrobidClient:
                                 return metadata2
                         except Exception:
                             pass
-                
-                # Try forced rotation variants (90/270) once
-                for rot in ['rotated_90', 'rotated_270']:
-                    try:
-                        self.logger.info(f"Retrying GROBID with forced rotation: {rot}...")
-                        rotated_pdf = self.rotation_handler.create_corrected_pdf(pdf_path, rot)
-                        if rotated_pdf and rotated_pdf.exists():
-                            self.temp_files.append(rotated_pdf)
-                            resp3 = _call_grobid(rotated_pdf, 2)
-                            if resp3.status_code == 200:
-                                root3 = ET.fromstring(resp3.text)
-                                metadata3 = self._parse_grobid_xml(root3)
-                                if metadata3 and metadata3.get('authors'):
-                                    metadata3['extraction_method'] = 'grobid'
-                                    metadata3['extraction_note'] = f'extracted from pages 1-2, forced rotation {rot}'
-                                    self.logger.info(f"GROBID rotation retry succeeded: {len(metadata3.get('authors', []))} authors")
-                                    return metadata3
-                    except Exception as e:
-                        self.logger.debug(f"Rotation retry failed for {rot}: {e}")
             
             return metadata
             
@@ -277,15 +271,69 @@ class GrobidClient:
                 if full_title:
                     metadata['title'] = full_title
         
-        # Extract authors
+        # Extract authors - exclude those from footnotes, footers, bibliographies, citations
+        # Use XPath to find authors in unwanted contexts (ElementTree doesn't support getparent())
         authors = []
-        for author in root.findall('.//{http://www.tei-c.org/ns/1.0}author'):
-            # Get all forenames (first name, middle names, etc.)
-            forenames = author.findall('.//{http://www.tei-c.org/ns/1.0}forename')
-            surname = author.find('.//{http://www.tei-c.org/ns/1.0}surname')
+        ns = '{http://www.tei-c.org/ns/1.0}'
+        
+        # Build a set of authors in unwanted contexts using XPath
+        unwanted_author_paths = set()
+        
+        # Find authors in footnotes
+        note_authors = root.findall(f'.//{ns}note//{ns}author')
+        for author in note_authors:
+            unwanted_author_paths.add(id(author))
+        
+        # Find authors in bibliographies
+        # Note: <biblStruct> is used for both main document metadata (in <sourceDesc>) 
+        # and bibliography entries. We only want to filter bibliography entries, not main document authors.
+        for author in root.findall(f'.//{ns}listBibl//{ns}author'):
+            unwanted_author_paths.add(id(author))
+        for author in root.findall(f'.//{ns}bibl//{ns}author'):
+            unwanted_author_paths.add(id(author))
+        # Only filter <biblStruct> authors that are NOT in <sourceDesc> (main document metadata)
+        # Bibliography <biblStruct> elements are typically in <back> or <div type="references">
+        # Use XPath to find biblStruct elements that are NOT descendants of sourceDesc
+        # XPath: find all biblStruct that are not inside sourceDesc
+        all_bibl_structs = root.findall(f'.//{ns}biblStruct')
+        source_desc_bibl_structs = root.findall(f'.//{ns}sourceDesc//{ns}biblStruct')
+        source_desc_ids = {id(bs) for bs in source_desc_bibl_structs}
+        # Filter only biblStruct elements that are NOT in sourceDesc
+        for bibl_struct in all_bibl_structs:
+            if id(bibl_struct) not in source_desc_ids:
+                for author in bibl_struct.findall(f'.//{ns}author'):
+                    unwanted_author_paths.add(id(author))
+        
+        # Find authors in citations
+        for author in root.findall(f'.//{ns}ref//{ns}author'):
+            unwanted_author_paths.add(id(author))
+        for author in root.findall(f'.//{ns}cit//{ns}author'):
+            unwanted_author_paths.add(id(author))
+        for author in root.findall(f'.//{ns}quote//{ns}author'):
+            unwanted_author_paths.add(id(author))
+        
+        # Find authors in bibliography/reference sections (div with type="references" etc.)
+        for div in root.findall(f'.//{ns}div'):
+            div_type = div.get('type', '').lower()
+            if any(keyword in div_type for keyword in ['reference', 'bibliography', 'citation']):
+                for author in div.findall(f'.//{ns}author'):
+                    unwanted_author_paths.add(id(author))
+        
+        # Now iterate through all authors and exclude those in unwanted contexts
+        authors_before_filter = 0
+        authors_after_filter = 0
+        for author in root.findall(f'.//{ns}author'):
+            authors_before_filter += 1
+            # Skip authors in unwanted contexts
+            if id(author) in unwanted_author_paths:
+                continue
+            
+            authors_after_filter += 1
+            # Extract author (existing logic)
+            forenames = author.findall(f'.//{ns}forename')
+            surname = author.find(f'.//{ns}surname')
             
             if forenames and surname is not None and surname.text:
-                # Combine all forenames
                 forename_parts = [f.text.strip() for f in forenames if f.text]
                 forename_text = ' '.join(forename_parts)
                 surname_text = surname.text.strip()
@@ -293,7 +341,6 @@ class GrobidClient:
                 if forename_text and surname_text:
                     authors.append(f"{surname_text}, {forename_text}")
             elif surname is not None and surname.text:
-                # Only surname available
                 authors.append(surname.text.strip())
         
         if authors:
@@ -472,8 +519,8 @@ class GrobidClient:
                 found_any = True
         
         # Extract author (case-insensitive)
-        author_pattern = r'(?:^|\n)author\s*\n(.+?)(?=\n(?:title|publication|journal|date|url)|$)'
-        match = re.search(author_pattern, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        author_pattern = r'(?:^|\n)author\s*\n([^\n]+)(?=\n(?:title|publication|journal|date|url)|$)'
+        match = re.search(author_pattern, text, re.IGNORECASE | re.MULTILINE)
         if match:
             author = match.group(1).strip()
             # Clean up author

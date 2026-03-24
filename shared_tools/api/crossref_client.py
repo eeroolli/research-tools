@@ -220,7 +220,8 @@ class CrossRefClient:
         # CrossRef accepts a simple query string that searches across fields
         query_terms = []
         
-        if title:
+        # Normalize empty strings to None
+        if title and title.strip():
             # Clean and truncate title if too long (CrossRef has limits)
             # Remove special characters that might break the query
             clean_title = title.strip()
@@ -232,16 +233,18 @@ class CrossRefClient:
         if authors and len(authors) > 0:
             # Extract last name from first author
             first_author = authors[0]
-            # Handle "Last, First" or "First Last" formats
-            if ',' in first_author:
-                last_name = first_author.split(',')[0].strip()
-            elif ' ' in first_author:
-                last_name = first_author.split()[-1]
-            else:
-                last_name = first_author
-            query_terms.append(last_name)
+            if first_author and first_author.strip():
+                # Handle "Last, First" or "First Last" formats
+                if ',' in first_author:
+                    last_name = first_author.split(',')[0].strip()
+                elif ' ' in first_author:
+                    last_name = first_author.split()[-1].strip()
+                else:
+                    last_name = first_author.strip()
+                if last_name:
+                    query_terms.append(last_name)
         
-        if journal:
+        if journal and journal.strip():
             # Clean journal name
             clean_journal = journal.strip()
             if len(clean_journal) > 100:
@@ -262,12 +265,17 @@ class CrossRefClient:
             'sort': 'relevance'
         }
         
+        # Add mailto parameter for polite pool (better rate limits)
+        if self.email:
+            params['mailto'] = self.email
+        
         # Add year filter if provided (correct filter syntax)
         if year:
             try:
-                year_int = int(year)
-                # CrossRef filter format: from-pub-date:YYYY,to-pub-date:YYYY
-                params['filter'] = f'from-pub-date:{year_int},to-pub-date:{year_int}'
+                year_int = int(str(year).strip())
+                # CrossRef filter format: from-pub-date:YYYY-MM-DD,until-pub-date:YYYY-MM-DD
+                # Note: use 'until-pub-date' not 'to-pub-date', and full date format
+                params['filter'] = f'from-pub-date:{year_int}-01-01,until-pub-date:{year_int}-12-31'
             except (ValueError, TypeError):
                 # Invalid year format, skip filter
                 pass
@@ -291,15 +299,36 @@ class CrossRefClient:
                 
                 return results
             elif response.status_code == 400:
-                # Bad request - log the actual error message
+                # Bad request - log the actual error message with more detail
                 try:
                     error_data = response.json()
-                    error_msg = error_data.get('message', {}).get('message', [])
-                    if isinstance(error_msg, list) and len(error_msg) > 0:
-                        error_msg = error_msg[0]
-                    print(f"CrossRef search error 400: {error_msg}")
-                except:
+                    # CrossRef error structure can vary, try multiple paths
+                    error_msg = None
+                    if 'message' in error_data:
+                        msg_obj = error_data['message']
+                        if isinstance(msg_obj, dict):
+                            # Try 'message' field in message object
+                            if 'message' in msg_obj:
+                                msg_content = msg_obj['message']
+                                if isinstance(msg_content, list) and len(msg_content) > 0:
+                                    error_msg = msg_content[0]
+                                elif isinstance(msg_content, str):
+                                    error_msg = msg_content
+                            # Try 'error' field
+                            elif 'error' in msg_obj:
+                                error_msg = msg_obj['error']
+                        elif isinstance(msg_obj, str):
+                            error_msg = msg_obj
+                    
+                    if error_msg:
+                        print(f"CrossRef search error 400: {error_msg}")
+                    else:
+                        # Fallback: show the full error structure for debugging
+                        print(f"CrossRef search error 400: Bad request")
+                        print(f"  Error response: {error_data}")
+                except Exception as e:
                     print(f"CrossRef search error 400: Bad request (query may be malformed)")
+                    print(f"  Failed to parse error response: {e}")
                 return []
             else:
                 print(f"CrossRef search error: {response.status_code}")

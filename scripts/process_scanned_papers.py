@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
-Process scanned papers from /mnt/i/FraScanner/
+Process scanned papers from the scanner directory (typically `/mnt/i/FraScanner/` in WSL).
+
+This is a **WSL-focused helper script** intended to be run from a WSL shell where
+`/mnt/i` is mounted. It uses WSL-style paths internally (see `normalize_path_for_wsl`)
+and reads the scanner directory from config (`PATHS.scanner_papers_dir`), so it can
+also work with equivalent Windows paths when invoked under WSL.
+
+For the primary Windows-native workflow (CMD/PowerShell), prefer
+`scripts/paper_processor_daemon.py`, which handles watching, metadata extraction,
+and Zotero integration end-to-end.
 
 Workflow:
 1. Extract metadata using smart workflow (regex → API → Ollama fallback)

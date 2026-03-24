@@ -11,6 +11,12 @@ Usage:
     python scripts/ocr_pdf.py <input_pdf> [output_pdf]
     
 If output_pdf is not specified, creates a new file with "_ocr" suffix.
+
+Note:
+- This is an optional helper for OCR; the core paper scanner daemon does not
+  require Tesseract or ocrmypdf.
+- If Tesseract/ocrmypdf are missing, the script will log clear errors instead
+  of affecting the main daemon workflow.
 """
 
 import sys

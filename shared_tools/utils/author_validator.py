@@ -261,6 +261,7 @@ class AuthorValidator:
         Suggest OCR correction for an extracted name using edit distance.
         
         Checks all Zotero authors for potential OCR errors.
+        Handles special characters and OCR artifacts (e.g., "$" -> "k").
         
         Args:
             extracted_name: The name extracted from OCR/AI
@@ -278,26 +279,54 @@ class AuthorValidator:
         
         extracted_lower = extracted_name.lower()
         
-        for author in self.zotero_authors:
-            author_name = author['name']
-            author_lower = author_name.lower()
-            
-            # Calculate similarity ratio
-            similarity = SequenceMatcher(None, extracted_lower, author_lower).ratio()
-            
-            # Calculate Levenshtein-like distance
-            if similarity > 0.8:  # Only consider good matches
-                distance = self._edit_distance(extracted_lower, author_lower)
+        # Try matching by lastname first (faster, handles OCR errors in first name)
+        lastname = self._extract_lastname(extracted_name)
+        if lastname and lastname in self.lastname_index:
+            # Found matching lastname - check if any author with this lastname is similar
+            for author in self.lastname_index[lastname]:
+                author_name = author['name']
+                author_lower = author_name.lower()
                 
-                if distance <= max_distance and similarity > best_similarity:
-                    best_similarity = similarity
-                    best_match = {
-                        'corrected_name': author_name,
-                        'confidence': int(similarity * 100),
-                        'distance': distance,
-                        'paper_count': author['paper_count'],
-                        'original_name': extracted_name
-                    }
+                # Calculate similarity ratio
+                similarity = SequenceMatcher(None, extracted_lower, author_lower).ratio()
+                
+                # Calculate Levenshtein-like distance
+                # Be more lenient for lastname matches (similarity > 0.7 instead of 0.8)
+                if similarity > 0.7:
+                    distance = self._edit_distance(extracted_lower, author_lower)
+                    
+                    if distance <= max_distance and similarity > best_similarity:
+                        best_similarity = similarity
+                        best_match = {
+                            'corrected_name': author_name,
+                            'confidence': int(similarity * 100),
+                            'distance': distance,
+                            'paper_count': author['paper_count'],
+                            'original_name': extracted_name
+                        }
+        
+        # If no lastname match, try all authors (slower but more comprehensive)
+        if not best_match:
+            for author in self.zotero_authors:
+                author_name = author['name']
+                author_lower = author_name.lower()
+                
+                # Calculate similarity ratio
+                similarity = SequenceMatcher(None, extracted_lower, author_lower).ratio()
+                
+                # Calculate Levenshtein-like distance
+                if similarity > 0.8:  # Only consider good matches
+                    distance = self._edit_distance(extracted_lower, author_lower)
+                    
+                    if distance <= max_distance and similarity > best_similarity:
+                        best_similarity = similarity
+                        best_match = {
+                            'corrected_name': author_name,
+                            'confidence': int(similarity * 100),
+                            'distance': distance,
+                            'paper_count': author['paper_count'],
+                            'original_name': extracted_name
+                        }
         
         return best_match
     
@@ -322,7 +351,7 @@ class AuthorValidator:
         
         return previous_row[-1]
     
-    def validate_authors(self, extracted_authors: List[str]) -> Dict:
+    def validate_authors(self, extracted_authors: List[str], allow_partial_match: bool = True) -> Dict:
         """
         Validate extracted authors against Zotero collection.
         
@@ -330,6 +359,9 @@ class AuthorValidator:
         
         Args:
             extracted_authors: List of author names from extraction
+            allow_partial_match: If True (default), use last-name match then "any word"
+                match. If False (e.g. for regex-extracted authors), use only last-name
+                matching to avoid false positives from phrase fragments.
             
         Returns:
             Dict with validation results:
@@ -351,6 +383,7 @@ class AuthorValidator:
         known = []
         unknown = []
         corrections = []
+        weak_matches = []
         
         for extracted_name in extracted_authors:
             # Strategy 1: Try lastname matching first (fast, common case)
@@ -361,9 +394,13 @@ class AuthorValidator:
                 # Found matching last name(s) in Zotero
                 matches = self.lastname_index[lastname]
             
-            # Strategy 2: If no lastname match, try matching any part of the name
-            # This handles cases where first/last names are swapped or only part extracted
-            if not matches:
+            # Strategy 2: If no lastname match and partial allowed, try matching any part of the name.
+            # This handles cases where first/last names are swapped or only part extracted.
+            # Disabled when allow_partial_match=False (e.g. regex source) to avoid false positives.
+            #
+            # IMPORTANT: partial token matches are suggestions only (weak evidence).
+            # They should not be treated as confirmed Zotero author matches.
+            if not matches and allow_partial_match:
                 extracted_lower = extracted_name.lower()
                 # Extract all words from extracted name
                 extracted_words = [w.strip() for w in extracted_lower.replace(',', ' ').split() if len(w.strip()) >= 2]
@@ -384,7 +421,7 @@ class AuthorValidator:
                         unique_matches.append(match)
                 matches = unique_matches
             
-            if matches:
+            if matches and lastname in self.lastname_index:
                 if len(matches) == 1:
                     # Single match - use it
                     known.append({
@@ -394,13 +431,21 @@ class AuthorValidator:
                         'alternatives': []
                     })
                 else:
-                    # Multiple matches - suggest first, list alternatives
+                    # Multiple matches - keep extracted name, surface all matches as suggestions
                     known.append({
-                        'name': matches[0],
+                        'name': extracted_name,
                         'original': extracted_name,
                         'match_type': 'lastname_multiple' if lastname in self.lastname_index else 'partial_multiple',
-                        'alternatives': matches[1:]  # Other options
+                        'alternatives': matches  # All Zotero candidates for UI disambiguation
                     })
+            elif matches:
+                # Partial/token matches: keep as weak suggestions only.
+                weak_matches.append({
+                    'name': extracted_name,
+                    'original': extracted_name,
+                    'match_type': 'partial_multiple' if len(matches) > 1 else 'partial',
+                    'alternatives': matches,
+                })
             else:
                 # No match found - genuinely unknown
                 unknown.append({
@@ -422,6 +467,7 @@ class AuthorValidator:
         
         return {
             'known_authors': known,
+            'weak_author_matches': weak_matches,
             'unknown_authors': unknown,
             'ocr_corrections': corrections,
             'confidence': confidence,

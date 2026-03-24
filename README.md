@@ -55,12 +55,43 @@ For detailed development status, technical architecture, and upcoming features, 
 - ✅ **Daemon Locking** - Prevents multiple daemon instances (local and remote checking)
 - ✅ Interactive review and approval with 3-step workflow
 - ✅ Local Zotero database search with enhanced UX
+- ✅ Safer author recognition in UI (weak name-token matches are shown as unconfirmed suggestions)
+- ✅ Metadata fallback search when author-only lookup fails (DOI/URL/title/year), improving recall for older items without DOI
+- ✅ Deterministic create-item dispatch (prevents silent skip to next scan when user chooses create)
 - ✅ Metadata comparison and field-by-field merging
+- ✅ **Online enrichment (auto)** - When you pick an existing Zotero item, the daemon auto-runs online search and shows an Enrichment Review page (auto-accept applies fill-only updates by default; manual-review supports explicit choices)
 - ✅ Duplicate detection and conflict resolution
 - ✅ Smart filename generation
 - ✅ Manual processing option for ambiguous cases
 
 [Detailed scanner setup (Epson auto-trigger) →](SCANNER_SETUP.md)
+
+## GitHub SSH Setup (optional)
+
+If you prefer SSH for GitHub authentication, this repo includes scripts that:
+
+- generate an SSH key (if missing) and load it into `ssh-agent`
+- print the public key so you can add it to GitHub
+- scan your local git repos and convert GitHub HTTPS `origin` remotes to SSH
+
+### Windows (blacktower / p1)
+
+Run from the repo root in PowerShell:
+
+```powershell
+pwsh -ExecutionPolicy Bypass -File .\scripts\setup-git-ssh.ps1
+```
+
+Then copy the printed public key into GitHub:
+Settings -> SSH and GPG keys -> New SSH key.
+
+### WSL
+
+Run from the repo root inside WSL:
+
+```bash
+bash ./scripts/setup-git-ssh-wsl.sh
+```
 
 ---
 
@@ -138,10 +169,31 @@ When a Zotero match is found, users get a sophisticated 3-step process:
 - Integration with existing interactive tag system
 - Tag groups, online tags, and custom tag management
 
-#### Step 3: PDF Attachment
-- PDF conflict resolution (keep both/replace/cancel)
+#### Step 3: Filename Editing
+- Filename preview and editing before processing
+- Choose between Zotero-based or OCR-based filename
+- Terminal editing for full control
+- Automatic validation and sanitization
+
+#### Step 4: PDF Attachment
+- PDF preprocessing (border removal, splitting, trimming)
+- Preview and modify preprocessing options
+- Conflict resolution with filename editing (when file exists)
 - Smart filename generation and duplicate handling
 - Complete file management and cleanup
+
+### Enrichment behavior (existing items)
+- After selecting an existing Zotero item, the daemon automatically:
+  - Searches online (CrossRef/arXiv/etc.), evaluates with a match policy
+  - Shows an **ENRICHMENT REVIEW** page before proceeding
+    - Auto-accept: defaults to apply after timeout (or Enter)
+    - Manual review: defaults to skip after timeout; allows applying all or selecting fields (including explicit overwrites)
+
+Configuration: `config.conf [ENRICHMENT]` controls thresholds, weights, and field policy for what can be auto-filled vs manual.
+
+### PDF Splitting Notes
+- Two-up splits use content-based gutter detection with an outer-edge fallback for skewed scans
+- Splits preserve original PDF compression by clipping pages instead of rasterizing
 
 ### Current Status
 ✅ **Paper processing is fully implemented and working!** The interactive daemon provides a complete workflow for processing scanned academic papers with enhanced Zotero integration.
@@ -160,6 +212,27 @@ python scripts/process_scanned_papers.py /path/to/paper.pdf --ollama
 Notes:
 - First-page text extraction uses PyPDF2 if installed; otherwise it returns an empty string.
 - Identifier extraction uses a lightweight heuristic today and will be replaced by Ollama-based extraction in Phase 4.
+
+## JSTOR Metadata Extraction (requires session cookies)
+
+JSTOR pages are protected; you must supply your own browser cookies for the JSTOR client to fetch metadata/DOI:
+
+1. In your browser (logged into JSTOR), copy the request as cURL for a JSTOR page (e.g., `stable/353415`).
+2. Grab the entire `Cookie` header string (including HttpOnly entries) from that cURL.
+3. Run the test or any script that uses `JSTORClient` with env vars:
+
+```bash
+export JSTOR_COOKIE_HEADER="name1=value1; name2=value2; ..."
+export JSTOR_REFERER="https://www.jstor.org/stable/353415"   # optional override
+python tests/Test_JSTOR_DOI_Extraction.py
+```
+
+Advanced: to override headers (e.g., sec-ch-ua), provide JSON:
+```bash
+export JSTOR_HEADERS_JSON='{"user-agent": "...", "sec-ch-ua": "..."}'
+```
+
+The test harness mirrors browser headers by default; only cookies are mandatory for access.
 
 ## Configuration
 

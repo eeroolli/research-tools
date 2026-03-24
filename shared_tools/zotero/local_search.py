@@ -81,6 +81,29 @@ class ZoteroLocalSearch:
             except Exception:
                 pass
             self.logger.debug(f"Connected to Zotero database: {self.db_path}")
+            # #region agent log
+            try:
+                import time as _time, json as _json, os as _os
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if _os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                stat = self.db_path.stat() if self.db_path.exists() else None
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'T8',
+                        'location': 'local_search.py:connect',
+                        'message': 'Local Zotero DB opened',
+                        'data': {
+                            'db_path': str(self.db_path),
+                            'db_exists': self.db_path.exists(),
+                            'db_mtime': stat.st_mtime if stat else None,
+                            'db_size': stat.st_size if stat else None
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
     
     def disconnect(self):
         """Disconnect from database."""
@@ -725,6 +748,27 @@ class ZoteroLocalSearch:
         
         except Exception as e:
             self.logger.debug(f"Error getting tags: {e}")
+        # #region agent log
+        try:
+            import time as _time, json as _json, os as _os
+            log_path = r'f:\prog\research-tools\.cursor\debug.log' if _os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(_json.dumps({
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'T9',
+                    'location': 'local_search.py:_get_tags',
+                    'message': 'Tags loaded from local DB',
+                    'data': {
+                        'item_id': item_id,
+                        'tag_count': len(tags),
+                        'tag_preview': tags[:5]
+                    },
+                    'timestamp': int(_time.time() * 1000)
+                }) + '\n')
+        except Exception:
+            pass
+        # #endregion
         
         return tags
     

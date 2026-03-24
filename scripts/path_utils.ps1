@@ -14,7 +14,9 @@
 #   test-path <path>                      - Check if path exists (returns JSON)
 #   test-directory <path>                 - Check if directory exists and is accessible (returns JSON)
 #   ensure-directory <path>               - Create directory if it doesn't exist (returns JSON)
+#   get-file-info <path> [-Hash]          - Get file info (size/ctime/mtime/hash) (returns JSON)
 #   copy-file <source_path> <target_path> [-Replace] - Copy file with verification (returns JSON)
+#   list-pdfs <directory_path>            - List all PDF files in directory (returns JSON)
 #
 # Exit codes:
 #   0 = Success
@@ -58,11 +60,19 @@ function Convert-WSLToWindows {
         return "${driveLetter}:\${windowsPath}"
     }
     
-    # Handle other WSL paths (like /home/...)
+    # Handle other WSL paths (like /home/..., /tmp/...)
     # Try using wslpath if available, but don't fail if it's not
     try {
-        $result = wslpath -w $WSLPath 2>$null
-        if ($LASTEXITCODE -eq 0 -and $result) {
+        # Try calling wslpath via wsl.exe (works from PowerShell)
+        $wslResult = wsl wslpath -w $WSLPath 2>&1
+        $wslExitCode = $LASTEXITCODE
+        if ($wslExitCode -eq 0 -and $wslResult -and ($wslResult -notmatch '^/')) {
+            # Successfully converted - result should be Windows path
+            return $wslResult.Trim()
+        }
+        # If wslpath failed, try direct wslpath (might work in some environments)
+        $result = wslpath -w $WSLPath 2>&1
+        if ($LASTEXITCODE -eq 0 -and $result -and ($result -notmatch '^/')) {
             return $result.Trim()
         }
     } catch {
@@ -172,6 +182,51 @@ function Test-DirectoryWithResult {
     return $result
 }
 
+# Function to get file info and optional hash
+function Get-FileInfoWithResult {
+    param(
+        [string]$Path,
+        [switch]$Hash
+    )
+    
+    $exists = Test-Path -Path $Path -ErrorAction SilentlyContinue
+    $isFile = $false
+    $size = $null
+    $ctime = $null
+    $mtime = $null
+    $hashValue = $null
+    $errorMsg = $null
+    
+    if ($exists) {
+        try {
+            $item = Get-Item -Path $Path -ErrorAction Stop
+            $isFile = -not $item.PSIsContainer
+            if ($isFile) {
+                $size = $item.Length
+                $ctime = $item.CreationTimeUtc.ToString("o")
+                $mtime = $item.LastWriteTimeUtc.ToString("o")
+                if ($Hash) {
+                    $hashValue = (Get-FileHash -Path $Path -Algorithm SHA256).Hash
+                }
+            }
+        } catch {
+            $errorMsg = $_.Exception.Message
+        }
+    }
+    
+    $result = @{
+        exists = $exists
+        isFile = $isFile
+        size = $size
+        ctime = $ctime
+        mtime = $mtime
+        hash = $hashValue
+        error = $errorMsg
+    } | ConvertTo-Json -Compress
+    
+    return $result
+}
+
 # Function to ensure directory exists
 function Ensure-Directory {
     param([string]$Path)
@@ -230,6 +285,107 @@ function Copy-FileWithVerification {
             errorCode = 4
         } | ConvertTo-Json -Compress
         return $result
+    }
+    
+    # Check if target drive/path is accessible (important for cloud drives like Google Drive)
+    $targetDir = Split-Path $TargetPath -Parent
+    $targetDrive = $null
+    $isCloudDrive = $false
+    
+    # Extract drive letter or root path
+    if ($targetDir -match '^([A-Z]):') {
+        $targetDrive = $matches[1] + ':'
+    } elseif ($targetDir -match '^\\\\') {
+        # UNC path (network drive)
+        $targetDrive = Split-Path $targetDir -Qualifier
+        $isCloudDrive = $true
+    }
+    
+    # Check if target directory or drive is accessible
+    if ($targetDrive) {
+        try {
+            # Try to access the drive root
+            $driveRoot = if ($targetDrive -match '^[A-Z]:') {
+                $targetDrive + '\'
+            } else {
+                $targetDrive
+            }
+            
+            $driveTest = Test-Path -Path $driveRoot -ErrorAction Stop
+            if (-not $driveTest) {
+                # Determine if it's likely a cloud drive
+                $driveName = if ($targetDir -match 'My Drive') {
+                    "Google Drive"
+                } elseif ($targetDir -match 'OneDrive') {
+                    "OneDrive"
+                } else {
+                    "drive"
+                }
+                
+                $result = @{
+                    success = $false
+                    error = "$driveName is not available. The local sync may be paused or the drive may be disconnected. Target path: $TargetPath"
+                    errorCode = 8
+                    drive = $targetDrive
+                    isCloudDrive = $isCloudDrive
+                } | ConvertTo-Json -Compress
+                return $result
+            }
+            
+            # Try to access the target directory (or its parent if it doesn't exist yet)
+            $dirToCheck = $targetDir
+            while (-not (Test-Path $dirToCheck) -and $dirToCheck -ne $driveRoot) {
+                $dirToCheck = Split-Path $dirToCheck -Parent
+            }
+            
+            if (-not (Test-Path $dirToCheck)) {
+                $result = @{
+                    success = $false
+                    error = "Target directory is not accessible: $targetDir"
+                    errorCode = 8
+                } | ConvertTo-Json -Compress
+                return $result
+            }
+            
+            # Try to get directory info to verify accessibility
+            try {
+                Get-Item -Path $dirToCheck -ErrorAction Stop | Out-Null
+            } catch {
+                $driveName = if ($targetDir -match 'My Drive') {
+                    "Google Drive"
+                } elseif ($targetDir -match 'OneDrive') {
+                    "OneDrive"
+                } else {
+                    "Target drive"
+                }
+                
+                $result = @{
+                    success = $false
+                    error = "$driveName is not accessible. The local sync may be paused or the drive may be disconnected. Error: $_"
+                    errorCode = 8
+                    drive = $targetDrive
+                    isCloudDrive = $isCloudDrive
+                } | ConvertTo-Json -Compress
+                return $result
+            }
+        } catch {
+            $driveName = if ($targetDir -match 'My Drive') {
+                "Google Drive"
+            } elseif ($targetDir -match 'OneDrive') {
+                "OneDrive"
+            } else {
+                "Target drive"
+            }
+            
+            $result = @{
+                success = $false
+                error = "$driveName is not accessible. The local sync may be paused or the drive may be disconnected. Error: $_"
+                errorCode = 8
+                drive = $targetDrive
+                isCloudDrive = $isCloudDrive
+            } | ConvertTo-Json -Compress
+            return $result
+        }
     }
     
     # Check if target already exists
@@ -347,6 +503,57 @@ function Copy-FileWithVerification {
     return $result
 }
 
+# Function to list PDF files in a directory
+function Get-PDFFiles {
+    param(
+        [string]$DirectoryPath
+    )
+    
+    $pdfFiles = @()
+    
+    # Check if directory exists
+    if (-not (Test-Path $DirectoryPath)) {
+        $result = @{
+            success = $false
+            error = "Directory not found: $DirectoryPath"
+            pdf_files = @()
+        } | ConvertTo-Json -Compress
+        return $result
+    }
+    
+    # Check if it's actually a directory
+    if (-not (Test-Path $DirectoryPath -PathType Container)) {
+        $result = @{
+            success = $false
+            error = "Path is not a directory: $DirectoryPath"
+            pdf_files = @()
+        } | ConvertTo-Json -Compress
+        return $result
+    }
+    
+    try {
+        # Get all PDF files
+        $pdfPaths = Get-ChildItem -Path $DirectoryPath -Filter "*.pdf" -File -ErrorAction Stop
+        $pdfFiles = $pdfPaths | ForEach-Object { $_.Name }
+        
+        $result = @{
+            success = $true
+            error = $null
+            pdf_files = $pdfFiles
+            count = $pdfFiles.Count
+        } | ConvertTo-Json -Compress
+        
+        return $result
+    } catch {
+        $result = @{
+            success = $false
+            error = "Failed to list PDF files: $_"
+            pdf_files = @()
+        } | ConvertTo-Json -Compress
+        return $result
+    }
+}
+
 # Main command dispatcher
 try {
     switch ($Command.ToLower()) {
@@ -405,6 +612,21 @@ try {
             exit 0
         }
         
+        'get-file-info' {
+            if ($Arguments.Count -lt 1) {
+                Write-Host "ERROR: Missing path argument" -ForegroundColor Red
+                exit 1
+            }
+            $path = $Arguments[0]
+            $withHash = $false
+            if ($Arguments.Count -gt 1 -and $Arguments[1] -eq '-Hash') {
+                $withHash = $true
+            }
+            $result = Get-FileInfoWithResult -Path $path -Hash:$withHash
+            Write-Host $result
+            exit 0
+        }
+        
         'copy-file' {
             if ($Arguments.Count -lt 2) {
                 Write-Host "ERROR: Missing source or target path argument" -ForegroundColor Red
@@ -426,9 +648,20 @@ try {
             exit 0
         }
         
+        'list-pdfs' {
+            if ($Arguments.Count -lt 1) {
+                Write-Host "ERROR: Missing directory path argument" -ForegroundColor Red
+                exit 1
+            }
+            $directoryPath = $Arguments[0]
+            $result = Get-PDFFiles -DirectoryPath $directoryPath
+            Write-Host $result
+            exit 0
+        }
+        
         default {
             Write-Host "ERROR: Unknown command: $Command" -ForegroundColor Red
-            Write-Host "Available commands: convert-wsl-to-windows, convert-windows-to-wsl, test-path, test-directory, ensure-directory, copy-file" -ForegroundColor Yellow
+            Write-Host "Available commands: convert-wsl-to-windows, convert-windows-to-wsl, test-path, test-directory, ensure-directory, get-file-info, copy-file, list-pdfs" -ForegroundColor Yellow
             exit 1
         }
     }

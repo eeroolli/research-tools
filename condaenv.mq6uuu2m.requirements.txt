@@ -1,0 +1,8 @@
+easyocr
+paddlepaddle
+paddleocr
+pyzotero
+intel-extension-for-pytorch
+pymupdf
+fuzzywuzzy
+beautifulsoup4

@@ -485,6 +485,8 @@ class ZoteroPaperProcessor:
             True if successful, False otherwise
         """
         try:
+            normalized_field = self._normalize_field_name(field_name)
+
             # Get current item
             response = requests.get(
                 f"{self.base_url}/items/{item_key}",
@@ -498,13 +500,35 @@ class ZoteroPaperProcessor:
             item_data = response.json().get('data', {})
             
             # Check if field is empty/missing
-            current_value = item_data.get(field_name, '').strip()
+            current_value = str(item_data.get(normalized_field, '') or '').strip()
             if current_value:
                 # Field already has a value, don't update
+                # #region agent log
+                try:
+                    import time as _time, json as _json, os as _os
+                    log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                    with open(log_path, "a", encoding="utf-8") as _f:
+                        _f.write(_json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "run-enrich2",
+                            "hypothesisId": "A2",
+                            "location": "zotero/paper_processor.py:update_item_field_if_missing",
+                            "message": "skip_update_field_already_present",
+                            "data": {
+                                "item_key": item_key,
+                                "field_name": field_name,
+                                "normalized_field": normalized_field,
+                                "current_value_preview": current_value[:120],
+                            },
+                            "timestamp": int(_time.time() * 1000)
+                        }) + "\n")
+                except Exception:
+                    pass
+                # #endregion
                 return True
             
             # Update field with new value
-            item_data[field_name] = field_value
+            item_data[normalized_field] = field_value
             
             # Write changes back
             response = requests.patch(
@@ -513,12 +537,155 @@ class ZoteroPaperProcessor:
                 json=item_data,
                 timeout=10
             )
-            
-            return response.status_code == 200
+            # Zotero commonly returns 204 No Content for successful PATCH.
+            ok = response.status_code in (200, 204)
+            # #region agent log
+            try:
+                import time as _time, json as _json, os as _os
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                with open(log_path, "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run-enrich2",
+                        "hypothesisId": "A3",
+                        "location": "zotero/paper_processor.py:update_item_field_if_missing",
+                        "message": "patch_attempt",
+                        "data": {
+                            "item_key": item_key,
+                            "field_name": field_name,
+                            "normalized_field": normalized_field,
+                            "sent_value_preview": str(field_value)[:120],
+                            "status_code": response.status_code,
+                            "ok_200_or_204": ok,
+                            "resp_text_preview": (response.text or "")[:200],
+                        },
+                        "timestamp": int(_time.time() * 1000)
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            return ok
             
         except Exception as e:
             print(f"Error updating item field: {e}")
+            # #region agent log
+            try:
+                import time as _time, json as _json, os as _os
+                log_path = r"f:\prog\research-tools\.cursor\debug.log" if _os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
+                with open(log_path, "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "run-enrich2",
+                        "hypothesisId": "A3",
+                        "location": "zotero/paper_processor.py:update_item_field_if_missing",
+                        "message": "exception",
+                        "data": {
+                            "item_key": item_key,
+                            "field_name": field_name,
+                            "normalized_field": normalized_field,
+                            "error": str(e),
+                        },
+                        "timestamp": int(_time.time() * 1000)
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
             return False
+
+    def update_item_field(self, item_key: str, field_name: str, field_value) -> bool:
+        """Update (overwrite) a Zotero item field regardless of existing value.
+
+        This is used for explicitly user-approved enrichment overwrites.
+
+        Args:
+            item_key: Zotero item key
+            field_name: Field name (Zotero API key or normalized metadata key)
+            field_value: Value to set
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            normalized_field = self._normalize_field_name(field_name)
+
+            # Get current item (need version for safe patch)
+            response = requests.get(
+                f"{self.base_url}/items/{item_key}",
+                headers=self.headers,
+                timeout=10
+            )
+            if response.status_code != 200:
+                return False
+
+            item_json = response.json()
+            item_data = item_json.get('data', {})
+            version = item_json.get('version')
+            if not version:
+                # Fallback: try header-based version if present
+                version = response.headers.get('Last-Modified-Version')
+
+            item_data[normalized_field] = field_value
+
+            update_headers = {**self.headers}
+            if version is not None:
+                update_headers['If-Unmodified-Since-Version'] = str(version)
+
+            # Patch only the fields we intend to update plus key/version if available
+            patch_data = {'key': item_key, normalized_field: field_value}
+            if version is not None:
+                patch_data['version'] = int(version) if str(version).isdigit() else version
+
+            update_response = requests.patch(
+                f"{self.base_url}/items/{item_key}",
+                headers=update_headers,
+                json=patch_data,
+                timeout=10
+            )
+            # Zotero returns 204 No Content on success for key-based writes
+            return update_response.status_code in (200, 204)
+        except Exception as e:
+            print(f"Error overwriting item field: {e}")
+            return False
+
+    def _normalize_field_name(self, field_name: str) -> str:
+        """Map common metadata field names to Zotero API item data keys.
+
+        Accepts either already-correct Zotero keys (e.g., 'DOI', 'abstractNote')
+        or normalized metadata keys (e.g., 'doi', 'abstract', 'journal').
+        """
+        if not field_name:
+            return field_name
+
+        # Preserve exact Zotero keys commonly used elsewhere in this repo
+        passthrough = {
+            'url',
+            'abstractNote',
+            'publicationTitle',
+            'DOI',
+            'ISBN',
+            'ISSN',
+            'language',
+            'title',
+            'date',
+            'volume',
+            'issue',
+            'pages',
+            'publisher',
+        }
+        if field_name in passthrough:
+            return field_name
+
+        key = str(field_name)
+        lower = key.lower()
+        mapping = {
+            'doi': 'DOI',
+            'isbn': 'ISBN',
+            'issn': 'ISSN',
+            'journal': 'publicationTitle',
+            'abstract': 'abstractNote',
+            'year': 'date',
+        }
+        return mapping.get(lower, field_name)
     
     def update_item_tags(self, item_key: str, add_tags: list = None, remove_tags: list = None) -> bool:
         """Update tags on an existing Zotero item.
@@ -532,6 +699,28 @@ class ZoteroPaperProcessor:
             True if successful, False otherwise
         """
         try:
+            # #region agent log
+            try:
+                import time as _time, json as _json, os
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'T2',
+                        'location': 'paper_processor.py:update_item_tags',
+                        'message': 'Update tags entry',
+                        'data': {
+                            'item_key': item_key,
+                            'add_count': len(add_tags) if add_tags else 0,
+                            'remove_count': len(remove_tags) if remove_tags else 0
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
+
             # Get current item data
             response = requests.get(
                 f"{self.base_url}/items/{item_key}",
@@ -545,6 +734,28 @@ class ZoteroPaperProcessor:
             
             item_data = response.json()
             current_tags = item_data['data'].get('tags', [])
+            # #region agent log
+            try:
+                import time as _time, json as _json, os
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'T3',
+                        'location': 'paper_processor.py:update_item_tags',
+                        'message': 'Fetched item for tag update',
+                        'data': {
+                            'item_key': item_key,
+                            'status_code': response.status_code,
+                            'version': item_data.get('version'),
+                            'current_tag_count': len(current_tags)
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             
             # Convert current tags to list of tag names for easier manipulation
             current_tag_names = [tag['tag'] if isinstance(tag, dict) else str(tag) for tag in current_tags]
@@ -570,13 +781,42 @@ class ZoteroPaperProcessor:
                 'tags': updated_tags
             }
             
+            # Prepare headers with If-Unmodified-Since-Version for key-based writes
+            update_headers = {
+                **self.headers,
+                'If-Unmodified-Since-Version': str(item_data['version'])
+            }
+            
             # Update item
             update_response = requests.patch(
                 f"{self.base_url}/items/{item_key}",
-                headers=self.headers,
+                headers=update_headers,
                 json=update_data,
                 timeout=10
             )
+            
+            # #region agent log
+            try:
+                import time as _time, json as _json, os
+                log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(_json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'T4',
+                        'location': 'paper_processor.py:update_item_tags',
+                        'message': 'Tag update response',
+                        'data': {
+                            'item_key': item_key,
+                            'status_code': update_response.status_code,
+                            'response_text_len': len(update_response.text or ''),
+                            'response_text_preview': (update_response.text or '')[:200]
+                        },
+                        'timestamp': int(_time.time() * 1000)
+                    }) + '\n')
+            except Exception:
+                pass
+            # #endregion
             
             if update_response.status_code == 204:
                 return True

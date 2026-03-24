@@ -1,6 +1,11 @@
 
 # My Programming Preferences
 
+## Use the correct Agent
+- I want to use debug agent to find the bugs and write a report for the planning agent indicating what are the problems and possible solutions. It is extremely seldom that I want debug agent to fix something, and in these cases it has to ask for confirmation for any change. Instrumentation (logging/debug probes) is permitted without explicit approval, as long as it does not change program behavior; any functional code changes still require explicit approval.
+- I prefer to keep the codebase well strucutured and modulized, therefore planning agent is required to keep an overview of the changes and plan changes that solve the core problem, instead of just adding more and more code.
+- The coding agent is the only one that should make changes in the code, and only in cooperation with me. It should not change code by own initiative.  Always ask for permition, unless we are building a plan that I have already accepted.
+
 ## What is the problem we are trying to solve?
 - Ask questions until there is clarity. 
 - Are we working on the right problem?
@@ -46,7 +51,7 @@
 - I use Cursor. USE ide as when possible to notice problems and suggest fixes.
 - I run Win 11 with WSL2.
 - I use Zotero 7
-- I run bash, python and powershell scripts.
+- I run bash, python, CMD and powershell scripts.
 - If the project requires many installed packages, consider creating a conda environment for it.
 
 ## Avoid Bloating
@@ -75,11 +80,11 @@
 - Do not use icons! except to show errors or successful completion in messages to the user.  
 
 ## AI Workflow
-1. Problem Analysis
+1. Problem Analysis (Ask or Debug Agents)
 Analyze the issue thoroughly
 Identify root causes
 Present findings clearly
-2. Solution Proposal
+2. Solution Proposal (Planning or Debug Agents)
 Propose specific solutions
 Explain what will change
 Highlight any risks or considerations
@@ -87,7 +92,8 @@ Highlight any risks or considerations
 Always ask: "Would you like me to implement this solution?"
 Wait for your explicit approval before making any changes
 Never assume you want me to proceed
-4. Implementation Only After Approval
+If I ask you to build a plan, it is equivalent to approval.
+4. Implementation Only After Approval (Agent)
 Implement only after you say "yes" or "proceed"
 Make changes as proposed
 Confirm completion

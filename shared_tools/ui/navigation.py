@@ -9,12 +9,11 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Union
 from pathlib import Path
 from enum import Enum
+import os
+import json
+import time
 
-try:
-    import select
-    HAS_SELECT = True
-except ImportError:
-    HAS_SELECT = False
+from .input_timeout import drain_stdin, read_line_with_timeout
 
 from .colors import ColorScheme, Colors
 
@@ -100,6 +99,7 @@ class Page:
     - What inputs are valid
     - How to handle each input (handlers)
     - Navigation behavior (back page, quit action, default)
+    - Optional custom timeout (if None, uses engine timeout)
     """
     page_id: str
     title: str
@@ -110,6 +110,7 @@ class Page:
     default: Optional[str] = None  # Default choice for Enter key
     back_page: Optional[str] = None  # Page to go back to (for 'z' command)
     quit_action: Optional[Callable[[dict], NavigationResult]] = None  # Action for 'q' command
+    timeout_seconds: Optional[int] = None  # Custom timeout for this page (None = use engine timeout)
     
     def __post_init__(self):
         """Validate page configuration."""
@@ -175,6 +176,16 @@ class NavigationEngine:
         """
         self.pages = pages
         self.timeout_seconds = timeout_seconds
+
+    def _drain_stdin_nonblocking(self, *, max_lines: int = 5) -> int:
+        """Drain any buffered stdin lines (best-effort).
+        
+        This prevents "late keystrokes" after a timeout from being applied to the next page.
+        Uses a small timeout (0.05s) to catch input that's already buffered but not yet
+        detected by select() with timeout 0.
+        """
+        # Delegate to shared helper (cross-platform behavior)
+        return drain_stdin(max_lines=max_lines, timeout_per_line=0.05)
     
     def show_page(self, page_id: str, context: dict) -> NavigationResult:
         """Display a page and handle user input.
@@ -189,6 +200,10 @@ class NavigationEngine:
         page = self.pages.get(page_id)
         if not page:
             raise ValueError(f"Page not found: {page_id}")
+
+        # Drain any buffered input from previous page/timeouts.
+        # This avoids stray keystrokes being "consumed" by the next page.
+        self._drain_stdin_nonblocking(max_lines=3)
         
         # Display page
         print("\n" + "="*70)
@@ -210,31 +225,42 @@ class NavigationEngine:
             # Get input with optional timeout
             # Check if page has a default (including empty string '')
             has_default = page.default is not None
-            if self.timeout_seconds > 0 and HAS_SELECT and has_default:
-                # Use timeout with default (no warning message - just timeout if needed)
-                # Remove leading newline from prompt if present (we already have spacing)
-                prompt_text = page.prompt.lstrip('\n') if page.prompt.startswith('\n') else page.prompt
-                print(prompt_text, end='', flush=True)
-                
-                try:
-                    ready, _, _ = select.select([sys.stdin], [], [], self.timeout_seconds)
-                    if ready:
-                        user_input = sys.stdin.readline().strip()
-                    else:
-                        # Timeout - use default
+            # Use page-specific timeout if available, otherwise use engine timeout
+            timeout_to_use = page.timeout_seconds if page.timeout_seconds is not None else self.timeout_seconds
+            
+            try:
+                if timeout_to_use > 0 and has_default:
+                    # Timeout with default; helper will handle cross-platform behavior
+                    prompt_text = page.prompt.lstrip('\n') if page.prompt.startswith('\n') else page.prompt
+                    user_input = read_line_with_timeout(
+                        prompt_text,
+                        timeout=timeout_to_use,
+                        default=page.default,
+                        clear_buffered=False,
+                    )
+                    # If helper returned None, treat as timeout with no default (should not
+                    # normally happen when default is provided).
+                    if user_input is None:
                         timeout_msg = Colors.colorize("⏱️  Timeout reached - proceeding with default", ColorScheme.TIMEOUT)
                         print(f"\n{timeout_msg}")
                         user_input = page.default
-                except (KeyboardInterrupt, EOFError):
-                    print("\n❌ Cancelled")
-                    return NavigationResult.quit_scan(move_to_manual=False)
-            else:
-                # No timeout or no default - use regular input
-                try:
-                    user_input = input(page.prompt).strip()
-                except (KeyboardInterrupt, EOFError):
-                    print("\n❌ Cancelled")
-                    return NavigationResult.quit_scan(move_to_manual=False)
+                    elif user_input == page.default:
+                        # Explicit timeout case (helper applied default)
+                        timeout_msg = Colors.colorize("⏱️  Timeout reached - proceeding with default", ColorScheme.TIMEOUT)
+                        print(f"\n{timeout_msg}")
+                        # Drain any queued input that might arrive right after the timeout.
+                        self._drain_stdin_nonblocking(max_lines=3)
+                else:
+                    # No timeout or no default - use regular input
+                    user_input = read_line_with_timeout(
+                        page.prompt,
+                        timeout=None,
+                        default=None,
+                        clear_buffered=False,
+                    )
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Cancelled")
+                return NavigationResult.quit_scan(move_to_manual=False)
             
             user_input = user_input.lower() if user_input else ""
             
@@ -246,22 +272,22 @@ class NavigationEngine:
                 print(f"⚠️  Invalid choice. Valid: {', '.join(page.valid_inputs)}")
                 continue
             
-            # Handle standard commands
+            # Check for handler first - handlers take precedence over standard commands
+            handler = page.handlers.get(user_input)
+            if handler:
+                result = handler(context)
+                return result
+            
+            # Handle standard commands only if no handler exists for this input
             if user_input == 'z' and page.back_page:
                 return NavigationResult.show_page(page.back_page)
             
             if user_input == 'q' and page.quit_action:
                 return page.quit_action(context)
             
-            # Execute handler for this input
-            handler = page.handlers.get(user_input)
-            if handler:
-                result = handler(context)
-                return result
-            else:
-                # Handler not found - this shouldn't happen if page is configured correctly
-                print(f"⚠️  Handler not found for '{user_input}'")
-                continue
+            # Handler not found - this shouldn't happen if page is configured correctly
+            print(f"⚠️  Handler not found for '{user_input}'")
+            continue
     
     def standardize_input(self, raw_input: str, page: Page) -> str:
         """Normalize user input (e.g., Enter key -> default choice).
@@ -274,7 +300,8 @@ class NavigationEngine:
             Normalized input string
         """
         # Empty input (Enter key) -> use default if available
-        if not raw_input and page.default:
+        # Note: page.default can be empty string '', which is a valid default
+        if not raw_input and page.default is not None:
             return page.default
         
         return raw_input

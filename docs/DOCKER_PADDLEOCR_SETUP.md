@@ -2,7 +2,11 @@
 
 This guide helps you set up PaddleOCR in a Docker container with CUDA 12 support for your NVIDIA T1000 GPU.
 
-## Quick Start
+It is an **optional, WSL-oriented workflow** for advanced OCR experiments. The
+core Windows-native paper processor daemon (`research-tools-win` + `paper_processor_daemon.py`)
+does **not** depend on PaddleOCR or this Docker setup.
+
+## Quick Start (WSL + Docker Desktop on Windows)
 
 **If Docker Desktop is already installed on Windows (like GROBID):**
 
@@ -11,7 +15,7 @@ This guide helps you set up PaddleOCR in a Docker container with CUDA 12 support
    - Settings → Resources → WSL Integration
    - Enable your WSL2 distro → Apply & Restart
 
-2. **Verify setup:**
+2. **Verify setup from WSL2:**
    ```bash
    ./scripts/check_docker_setup.sh
    ```

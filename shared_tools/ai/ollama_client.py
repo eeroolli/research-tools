@@ -13,7 +13,7 @@ import sys
 import configparser
 import requests
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -53,11 +53,25 @@ class OllamaClient:
         self.ollama_host = config.get('OLLAMA', 'host', fallback='localhost')
         self.ollama_port = config.getint('OLLAMA', 'port', fallback=11434)
         
-        # Get model name (use override if provided, otherwise config, otherwise default)
-        default_model = model_name_override or "llama2:7b"
-        self.ollama_model = config.get('OLLAMA', 'model', fallback=default_model)
+        # Determine base model (single-model, backward compatible)
+        base_default = model_name_override or "llama2:7b"
+        base_model = config.get('OLLAMA', 'model', fallback=base_default)
         if model_name_override:
-            self.ollama_model = model_name_override
+            # Explicit override wins over config
+            base_model = model_name_override
+        self.ollama_model = base_model
+        
+        # Role-specific models (metadata vs title), falling back to base model
+        metadata_model_cfg = config.get('OLLAMA', 'metadata_model', fallback='').strip()
+        title_model_cfg = config.get('OLLAMA', 'title_model', fallback='').strip()
+        
+        if model_name_override:
+            # If caller forces a model, use it for all roles
+            self.metadata_model = base_model
+            self.title_model = base_model
+        else:
+            self.metadata_model = metadata_model_cfg or base_model
+            self.title_model = title_model_cfg or base_model
         
         # Get timeout (use override if provided, otherwise config, otherwise default)
         default_timeout = timeout_override or 180
@@ -69,8 +83,30 @@ class OllamaClient:
         self.max_retries = config.getint('OLLAMA', 'max_retries', fallback=2)
         self.retry_delay = config.getint('OLLAMA', 'retry_delay', fallback=5)
         
+        # Get title shortening configuration
+        self.title_shorten_preserve_words = config.getint('OLLAMA', 'title_shorten_preserve_words', fallback=4)
+        self.title_shorten_max_length = config.getint('OLLAMA', 'title_shorten_max_length', fallback=70)
+        
+        # Temperature configuration with safe defaults
+        def _get_float_option(section: str, option: str, default: float) -> float:
+            try:
+                raw = config.get(section, option, fallback='').strip()
+                if not raw:
+                    return default
+                return float(raw)
+            except Exception:
+                return default
+        
+        # Conservative defaults: low temperature for metadata, near-zero for filenames
+        self.metadata_temperature = _get_float_option('OLLAMA', 'metadata_temperature', 0.1)
+        self.title_temperature = _get_float_option('OLLAMA', 'title_temperature', 0.0)
+        
         # Build base URL
         self.ollama_base_url = f"http://{self.ollama_host}:{self.ollama_port}"
+        
+        # Fallback hosts from config (used when hostname doesn't resolve, e.g. host = p1)
+        fallback_str = config.get('OLLAMA', 'fallback_hosts', fallback='').strip()
+        self.fallback_hosts = [h.strip() for h in fallback_str.split(',') if h.strip()] if fallback_str else []
     
     def extract_paper_metadata(self, text: str, validate: bool = True, 
                               document_context: str = "general", language: str = None,
@@ -115,15 +151,41 @@ class OllamaClient:
                 progress_thread.start()
             
             # Use HTTP API to connect to configured Ollama host (p1 or localhost)
-            url = f"{self.ollama_base_url}/api/generate"
-            payload = {
-                "model": self.ollama_model,
-                "prompt": prompt,
-                "stream": False
-            }
+            # Try primary host first, then fallback to IPs if hostname doesn't resolve
+            hosts_to_try = [self.ollama_base_url]
+            for fallback_host in self.fallback_hosts:
+                hosts_to_try.append(f"http://{fallback_host}:{self.ollama_port}")
             
-            response = requests.post(url, json=payload, timeout=self.timeout)
-            response.raise_for_status()
+            last_error = None
+            response = None
+            for base_url in hosts_to_try:
+                try:
+                    url = f"{base_url}/api/generate"
+                    model = (getattr(self, "metadata_model", None) or self.ollama_model)
+                    temperature = getattr(self, "metadata_temperature", 0.1)
+                    payload = {
+                        "model": model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {
+                            "temperature": temperature
+                        }
+                    }
+                    
+                    response = requests.post(url, json=payload, timeout=self.timeout)
+                    response.raise_for_status()
+                    break  # Success, exit loop
+                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, 
+                        requests.exceptions.RequestException) as e:
+                    last_error = e
+                    continue  # Try next host
+            
+            if response is None:
+                # All hosts failed
+                if last_error:
+                    raise last_error
+                else:
+                    raise requests.exceptions.ConnectionError("Failed to connect to Ollama on all hosts")
             
             result = response.json()
             response_text = result.get('response', '').strip()
@@ -133,6 +195,34 @@ class OllamaClient:
             
             if not metadata:
                 return None
+            
+            # Validate authors against source text to filter out hallucinations
+            if 'authors' in metadata and isinstance(metadata.get('authors'), list):
+                original_authors = metadata.get('authors', [])
+                validated_authors = self._validate_authors_against_text(original_authors, text)
+                
+                if len(validated_authors) != len(original_authors):
+                    # Some authors were filtered out
+                    filtered_count = len(original_authors) - len(validated_authors)
+                    logger = getattr(self, 'logger', None)
+                    if logger:
+                        logger.warning(f"Filtered out {filtered_count} hallucinated author(s) that don't appear in source text")
+                    else:
+                        print(f"Warning: Filtered out {filtered_count} hallucinated author(s) that don't appear in source text")
+                
+                # Update metadata with validated authors
+                metadata['authors'] = validated_authors
+            
+            # Also validate book_authors and book_editors for book chapters
+            if 'book_authors' in metadata and isinstance(metadata.get('book_authors'), list):
+                original_book_authors = metadata.get('book_authors', [])
+                validated_book_authors = self._validate_authors_against_text(original_book_authors, text)
+                metadata['book_authors'] = validated_book_authors if validated_book_authors else None
+            
+            if 'book_editors' in metadata and isinstance(metadata.get('book_editors'), list):
+                original_book_editors = metadata.get('book_editors', [])
+                validated_book_editors = self._validate_authors_against_text(original_book_editors, text)
+                metadata['book_editors'] = validated_book_editors if validated_book_editors else None
             
             # Validate if requested
             if validate:
@@ -204,15 +294,22 @@ LANGUAGE CONTEXT: This document is in Swedish.
 - Extract authors, titles, and metadata in Swedish format
 """
         
-        # Base instructions
-        base_instructions = """CRITICAL INSTRUCTIONS:
+        # Base instructions - CRITICAL: emphasize NOT inventing authors
+        base_instructions = """CRITICAL INSTRUCTIONS - READ CAREFULLY:
 - Return ONLY information you can see in the text
 - If you cannot find a field, use null - DO NOT GUESS OR INVENT
 - DO NOT make up fake identifiers like "1234-5678" or "John Doe"
-- ONLY extract what is actually present in the text
-- FOR AUTHORS: Look for ALL authors mentioned - check title page, headers, footers, and bylines
+
+FOR AUTHORS - THIS IS CRITICAL:
+- If you see NO author names in the text, return: "authors": []
+- DO NOT invent author names like "John Smith", "Torunn Arntsen Sørheim", or any other names
+- DO NOT guess author names based on context or make assumptions
+- Empty array [] is the CORRECT response when no authors are found
+- ONLY extract author names that are explicitly written in the text
+- Look for ALL authors mentioned - check title page, headers, footers, and bylines
 - AUTHORS can be separated by commas, "and", "og" (Norwegian), "und" (German), "&", or line breaks
-- Look for patterns like "By [Name]", "Av [Name]" (Norwegian), "Von [Name]" (German), "Authors: [Names]", "[Name] and [Name]", etc."""
+- Look for patterns like "By [Name]", "Av [Name]" (Norwegian), "Von [Name]" (German), "Authors: [Names]", "[Name] and [Name]", etc.
+- If you cannot find any author names after searching thoroughly, return "authors": [] - DO NOT INVENT NAMES"""
         
         # Comprehensive hints for ALL document types (always included - Ollama uses what applies)
         comprehensive_hints = """
@@ -239,12 +336,15 @@ BOOK CHAPTERS:
 - Look for "pp." or "pages" numbers
 - Return: title (chapter), authors (chapter), book_title, book_authors, book_editors, pages, chapter_number
 - document_type: "book_chapter"
+- Ignore bibliography/references/footnotes/endnotes/etc. (particularly if the first page is a even numbered page)
 
 JOURNAL ARTICLES:
 - DOI: "DOI:", "https://doi.org/" or "10.xxxx/xxxxx"
 - Authors after title
 - Journal, volume, issue, pages, ISSN
 - document_type: "journal_article"
+- Ignore bibliography/references/footnotes/endnotes/etc. (particularly if the first page is a even numbered page)
+
 
 REPORTS:
 - ISSN or ISBN possible
@@ -278,7 +378,7 @@ Return ONLY valid JSON with these exact fields:
 - isbn (string or null) - ISBN-10 or ISBN-13
 - url (string or null) - Full URL if this is a web article/news article
 - title (string) - Document title (chapter title if book chapter)
-- authors (array of strings) - List of author names (chapter authors if book chapter), empty array if none found
+- authors (array of strings) - List of author names (chapter authors if book chapter). MUST be empty array [] if no authors found in text. DO NOT invent names.
 - journal (string or null) - Journal name, report series, or publisher
 - publisher (string or null) - Publishing organization
 - year (string or null) - Publication year
@@ -294,7 +394,71 @@ FOR BOOK CHAPTERS ONLY (if document_type is "book_chapter"):
 Text from document:
 {text[:5000]}
 
-Remember: Return ONLY the JSON object. No explanatory text before or after. Use null for missing fields."""
+Remember: Return ONLY the JSON object. No explanatory text before or after. Use null for missing fields. For authors, use [] (empty array) if no authors are found - DO NOT invent author names."""
+    
+    def _validate_authors_against_text(self, authors: List[str], text: str) -> List[str]:
+        """Validate that extracted authors actually appear in the source text.
+        
+        Filters out hallucinated author names that don't appear in the text.
+        Uses fuzzy matching to handle minor OCR errors.
+        
+        Args:
+            authors: List of author names extracted by Ollama
+            text: Source text from the document
+            
+        Returns:
+            List of authors that can be verified in the text (empty list if none found)
+        """
+        if not authors:
+            return []
+        
+        if not text:
+            # No text to validate against - return empty
+            return []
+        
+        text_lower = text.lower()
+        validated_authors = []
+        
+        for author in authors:
+            if not author or not author.strip():
+                continue
+            
+            author_clean = author.strip()
+            author_lower = author_clean.lower()
+            
+            # Check if author name appears in text (case-insensitive)
+            # Try full name first
+            if author_lower in text_lower:
+                validated_authors.append(author_clean)
+                continue
+            
+            # Try splitting name into parts (handle "First Last" or "Last, First")
+            name_parts = []
+            if ',' in author_clean:
+                # "Last, First" format
+                parts = [p.strip() for p in author_clean.split(',')]
+                name_parts = parts
+            else:
+                # "First Last" format
+                name_parts = author_clean.split()
+            
+            # Check if at least the last name appears in text
+            if len(name_parts) >= 1:
+                last_name = name_parts[-1].lower() if name_parts else ""
+                if last_name and len(last_name) > 2:  # Only check if last name is substantial
+                    if last_name in text_lower:
+                        validated_authors.append(author_clean)
+                        continue
+            
+            # If we get here, author name not found in text - likely hallucinated
+            # Log it but don't include in validated list
+            logger = getattr(self, 'logger', None)
+            if logger:
+                logger.warning(f"Author '{author_clean}' not found in source text - filtering out (likely hallucinated)")
+            else:
+                print(f"Warning: Author '{author_clean}' not found in source text - filtering out (likely hallucinated)")
+        
+        return validated_authors
     
     def _parse_ollama_response(self, response: str) -> Optional[Dict]:
         """Parse Ollama's response and extract JSON.
@@ -367,16 +531,19 @@ Remember: Return ONLY the JSON object. No explanatory text before or after. Use 
             print(f"Error extracting text from {pdf_path}: {e}")
             return None
     
-    def shorten_title(self, title: str, preserve_first_n_words: int = 4) -> Optional[str]:
+    def shorten_title(self, title: str, preserve_first_n_words: int = None) -> Optional[str]:
         """Shorten a title using Ollama API while preserving the first N words.
         
         Args:
             title: Title to shorten (already in filename format with underscores)
-            preserve_first_n_words: Number of words from the start to preserve (default: 4)
+            preserve_first_n_words: Number of words from the start to preserve (uses config default if None)
             
         Returns:
             Shortened title or None if Ollama is unavailable/fails
         """
+        # Use config value if not provided
+        if preserve_first_n_words is None:
+            preserve_first_n_words = self.title_shorten_preserve_words
         if not title:
             return None
         
@@ -395,27 +562,73 @@ Remember: Return ONLY the JSON object. No explanatory text before or after. Use 
         rest_words = words[preserve_first_n_words:]
         rest_part = '_'.join(rest_words)
         
+        # Calculate available length for shortened part
+        # Full title limit minus preserved part length minus 1 for the underscore separator
+        preserved_part_length = len(preserved_part)
+        available_length = self.title_shorten_max_length - preserved_part_length - 1
+        
+        # #region agent log
+        import json as json_module
+        from pathlib import Path
+        log_path = Path('.cursor/debug.log')
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                log_entry = {
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'E',
+                    'location': 'ollama_client.py:398',
+                    'message': 'shorten_title before Ollama call',
+                    'data': {
+                        'preserved_part': preserved_part,
+                        'preserved_part_length': preserved_part_length,
+                        'rest_part': rest_part,
+                        'full_title': title,
+                        'max_full_title_length': self.title_shorten_max_length,
+                        'available_length_for_shortened': available_length
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }
+                f.write(json_module.dumps(log_entry) + '\n')
+        except Exception:
+            pass
+        # #endregion
+        
         # Build prompt for Ollama - request JSON format for reliable parsing
         prompt = f"""Shorten this filename title part and return ONLY valid JSON.
 
 INPUT:
-- First {preserve_first_n_words} words (KEEP AS IS): {preserved_part}
+- First {preserve_first_n_words} words (KEEP AS IS): {preserved_part} (length: {preserved_part_length} chars)
 - Part to shorten: {rest_part}
+- Full title maximum length: {self.title_shorten_max_length} characters
 
 TASK:
-Shorten the "Part to shorten" using abbreviations and removing less important words.
+Shorten the "Part to shorten" so that the FULL title (preserved part + shortened part + underscore) fits within {self.title_shorten_max_length} characters total.
+The shortened part can use up to {available_length} characters (after accounting for preserved part length and underscore separator).
 Keep the first {preserve_first_n_words} words unchanged.
 
+PRIORITY RULES:
+1. ALWAYS SHORTEN well-established abbreviations: languages (Chinese->CN, Japanese->JP, English->EN, German->DE, French->FR, Spanish->ES), countries (United_States->US, United_Kingdom->UK, China->CN, Japan->JP), measurement units (kilometer->km, centimeter->cm, kilogram->kg, millimeter->mm, etc.)
+2. PRESERVE important words: proper names (people, places), specific concepts, technical terms
+3. SHORTEN common words: articles (the, a, an), prepositions (of, in, on, at), common verbs (is, are, was)
+4. Use abbreviations for common words when possible (e.g., "and" -> "&", "with" -> "w/")
+5. Remove less critical connecting words if needed so the full title stays within {self.title_shorten_max_length} characters
+
 SHORTENING EXAMPLES:
-- "Chinese" -> "Ch"
-- "Japanese" -> "Jp"  
-- "Americans" -> "Americans"
+- "Chinese" -> "CN" (language, use ISO code)
+- "Japanese" -> "JP" (language/country, use ISO code)
+- "United_States" -> "US" (country, use standard abbreviation)
+- "kilometer" -> "km" (measurement unit, use standard abbreviation)
+- "Americans" -> "Americans" (keep if it's a key concept, not a country name)
 - "among" -> "among" (or remove if not critical)
+- "the" -> remove or keep as "the" (common word)
+- "of" -> "of" or remove (common word)
+- Proper names like "Einstein", "Tokyo", "Machine_Learning" -> KEEP FULLY
 
 OUTPUT FORMAT:
 Return ONLY valid JSON with this exact structure:
 {{
-  "shortened": "Right_Spouse_Interracial_Marriage_among_Ch_and_Jp_Americans"
+  "shortened": "shortened_part_here"
 }}
 
 CRITICAL RULES:
@@ -423,12 +636,10 @@ CRITICAL RULES:
 - No text before or after the JSON
 - Use underscores between words in the shortened value
 - The "shortened" field should contain ONLY the shortened part (after first {preserve_first_n_words} words)
-
-EXAMPLE INPUT: "Right_Spouse_Interracial_Marriage_among_Chinese_and_Japanese_Americans"
-EXAMPLE OUTPUT:
-{{
-  "shortened": "Right_Spouse_Interracial_Marriage_among_Ch_and_Jp_Americans"
-}}
+- Target length: full title (preserved + shortened + underscore) must be ≤ {self.title_shorten_max_length} characters
+- Available for shortened part: up to {available_length} characters
+- DO NOT use example text - shorten the actual input provided
+- Preserve important words (names, locations, concepts) even if it means keeping them longer
 
 NOW SHORTEN THIS:
 {rest_part}
@@ -439,23 +650,67 @@ Return ONLY the JSON:"""
         # Use config values for retries
         for attempt in range(self.max_retries):
             try:
-                # Make HTTP API request to Ollama
-                url = f"{self.ollama_base_url}/api/generate"
-                payload = {
-                    "model": self.ollama_model,
-                    "prompt": prompt,
-                    "stream": False
-                }
+                # Build list of hosts to try: primary first, then fallbacks
+                hosts_to_try = [self.ollama_base_url]
+                for fallback_host in self.fallback_hosts:
+                    hosts_to_try.append(f"http://{fallback_host}:{self.ollama_port}")
                 
-                # Use configured timeout (from config, handles Docker container wake-up)
-                response = requests.post(url, json=payload, timeout=self.timeout)
-                response.raise_for_status()
+                # Try each host in order until one succeeds
+                response = None
+                last_error = None
+                for base_url in hosts_to_try:
+                    try:
+                        # Make HTTP API request to Ollama
+                        url = f"{base_url}/api/generate"
+                        model = (getattr(self, "title_model", None) or self.ollama_model)
+                        temperature = getattr(self, "title_temperature", 0.0)
+                        payload = {
+                            "model": model,
+                            "prompt": prompt,
+                            "stream": False,
+                            "options": {
+                                "temperature": temperature
+                            }
+                        }
+                        
+                        # Use configured timeout (from config, handles Docker container wake-up)
+                        response = requests.post(url, json=payload, timeout=self.timeout)
+                        response.raise_for_status()
+                        break  # Success, exit host loop
+                    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                            requests.exceptions.RequestException) as e:
+                        last_error = e
+                        continue  # Try next host
+                
+                if response is None:
+                    # All hosts failed, raise last error
+                    if last_error:
+                        raise last_error
+                    else:
+                        raise requests.exceptions.ConnectionError("Failed to connect to Ollama on all hosts")
                 
                 result = response.json()
                 response_text = result.get('response', '').strip()
                 
-                # Debug: log raw response (uncomment to debug)
-                # print(f"DEBUG: Raw Ollama response: {response_text}")
+                # #region agent log
+                try:
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        log_entry = {
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'E',
+                            'location': 'ollama_client.py:454',
+                            'message': 'Ollama raw response received',
+                            'data': {
+                                'raw_response': response_text,
+                                'raw_response_length': len(response_text)
+                            },
+                            'timestamp': int(__import__('time').time() * 1000)
+                        }
+                        f.write(json_module.dumps(log_entry) + '\n')
+                except Exception:
+                    pass
+                # #endregion
                 
                 # Try to extract JSON from the response
                 shortened_rest = None
@@ -502,6 +757,38 @@ Return ONLY the JSON:"""
                 # Reconstruct full title
                 if shortened_rest:
                     shortened_title = f"{preserved_part}_{shortened_rest}"
+                    
+                    # Validate full title length - if it exceeds limit, truncate the shortened part
+                    if len(shortened_title) > self.title_shorten_max_length:
+                        # Calculate how much we can keep from shortened_rest
+                        max_shortened_length = available_length
+                        if len(shortened_rest) > max_shortened_length:
+                            shortened_rest = shortened_rest[:max_shortened_length].rstrip('_')
+                            shortened_title = f"{preserved_part}_{shortened_rest}"
+                    
+                    # #region agent log
+                    try:
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            log_entry = {
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'E',
+                                'location': 'ollama_client.py:502',
+                                'message': 'Ollama shortened title reconstructed',
+                                'data': {
+                                    'shortened_rest': shortened_rest,
+                                    'preserved_part': preserved_part,
+                                    'final_shortened_title': shortened_title,
+                                    'final_title_length': len(shortened_title),
+                                    'max_allowed_length': self.title_shorten_max_length
+                                },
+                                'timestamp': int(__import__('time').time() * 1000)
+                            }
+                            f.write(json_module.dumps(log_entry) + '\n')
+                    except Exception:
+                        pass
+                    # #endregion
+                    
                     return shortened_title
                 else:
                     # If Ollama returned empty, return None to trigger fallback

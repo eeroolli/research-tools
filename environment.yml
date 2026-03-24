@@ -28,6 +28,7 @@ dependencies:
   - pip:
     - pyzotero  # Zotero API integration
     - psutil  # System and process monitoring for CPU throttling
+    - beautifulsoup4  # HTML parsing for JSTOR DOI extraction
     # OCR engines (install via pip as needed):
     # - easyocr  # Used in scripts/create_searchable_pdf.py (GPU-accelerated OCR)
     # - paddlepaddle-gpu  # PaddleOCR framework (for Docker container, not local install)

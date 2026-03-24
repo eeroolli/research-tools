@@ -2,7 +2,6 @@
 
 import cv2
 from pyzbar import pyzbar
-import pytesseract
 import requests
 import json
 import time
@@ -13,6 +12,13 @@ from dataclasses import dataclass
 from typing import Optional, List, Dict, Tuple
 import re
 import sys
+
+try:
+    import pytesseract  # type: ignore[import]
+    _HAS_PYTESSERACT = True
+except ImportError:  # pragma: no cover - optional OCR dependency
+    pytesseract = None  # type: ignore[assignment]
+    _HAS_PYTESSERACT = False
 
 # Add project root to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -1087,8 +1093,14 @@ class ZoteroAPIBookProcessor:
                 **current_data
             }
             
+            # Prepare headers with If-Unmodified-Since-Version for key-based writes
+            update_headers = {
+                **self.headers,
+                'If-Unmodified-Since-Version': str(item_data['version'])
+            }
+            
             update_response = requests.put(f"{self.base_url}/items/{item_key}",
-                                         headers=self.headers,
+                                         headers=update_headers,
                                          json=update_data)
             
             if update_response.status_code == 204:
@@ -1125,8 +1137,14 @@ class ZoteroAPIBookProcessor:
                     **current_data
                 }
                 
+                # Prepare headers with If-Unmodified-Since-Version for key-based writes
+                update_headers = {
+                    **self.headers,
+                    'If-Unmodified-Since-Version': str(item_data['version'])
+                }
+                
                 update_response = requests.put(f"{self.base_url}/items/{item_key}",
-                                             headers=self.headers,
+                                             headers=update_headers,
                                              json=update_data)
                 
                 if update_response.status_code == 204:
@@ -1166,8 +1184,14 @@ class ZoteroAPIBookProcessor:
                     **current_data
                 }
                 
+                # Prepare headers with If-Unmodified-Since-Version for key-based writes
+                update_headers = {
+                    **self.headers,
+                    'If-Unmodified-Since-Version': str(item_data['version'])
+                }
+                
                 update_response = requests.put(f"{self.base_url}/items/{item_key}",
-                                             headers=self.headers,
+                                             headers=update_headers,
                                              json=update_data)
                 
                 if update_response.status_code == 204:
@@ -1471,8 +1495,14 @@ class ZoteroAPIBookProcessor:
                 'tags': current_tags
             }
             
+            # Prepare headers with If-Unmodified-Since-Version for key-based writes
+            update_headers = {
+                **self.headers,
+                'If-Unmodified-Since-Version': str(item_data['version'])
+            }
+            
             update_response = requests.put(f"{self.base_url}/items/{item_key}",
-                                         headers=self.headers,
+                                         headers=update_headers,
                                          json=update_data)
             
             if update_response.status_code == 204:

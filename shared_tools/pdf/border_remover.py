@@ -20,6 +20,9 @@ import numpy as np
 from PIL import Image
 import fitz  # PyMuPDF
 import io
+import json
+import time
+import os
 
 
 class BorderRemover:
@@ -40,7 +43,7 @@ class BorderRemover:
         self.max_border_width = self.config.get('max_border_width', 300)
         # Page-edge specific configuration
         self.page_white_delta = self.config.get('page_white_delta', 8)   # tolerance below page white (tighter)
-        self.dark_threshold = self.config.get('dark_threshold', 60)       # scanner bed / dark area (stricter)
+        self.dark_threshold = self.config.get('dark_threshold', 55)       # scanner bed / dark area (stricter - lowered from 60)
         self.sustained_run = self.config.get('sustained_run', 24)         # min consecutive white pixels (stricter)
         self.sustained_text = self.config.get('sustained_text', 20)      # min consecutive text-like pixels (stricter)
         self.max_check_percentage = self.config.get('max_check_percentage', 0.25)  # scan up to 25% of side (reduced)
@@ -123,7 +126,7 @@ class BorderRemover:
         verified_borders = {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}
         
         # Sample pixels in border regions - require at least some dark pixels
-        min_dark_fraction = 0.10  # Lowered from 0.15 to 0.10 - at least 10% should be dark
+        min_dark_fraction = 0.20  # Increased from 0.10 to 0.20 - at least 20% should be dark to avoid false positives
         # For edges: check from edge inward, looking for dark borders even beyond white margins
         # White copier margins are typically 5-20 pixels, so check up to max_border_width from edge
         max_border_check = min(self.max_border_width, w // 2, h // 2)
@@ -234,11 +237,35 @@ class BorderRemover:
             
             # If initial region has enough dark pixels, scan to find exact border width
             if initial_dark_fraction >= min_dark_fraction:
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'B1',
+                            'location': 'border_remover.py:detect_borders:left',
+                            'message': 'Left border initial check passed',
+                            'data': {
+                                'initial_dark_fraction': float(initial_dark_fraction),
+                                'min_dark_fraction': float(min_dark_fraction),
+                                'dark_threshold': float(dark_threshold),
+                                'initial_check_width': int(initial_check_width),
+                                'max_border_check': int(max_border_check)
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
                 # Scan columns from left to right, find where dark pixels stop
                 dark_border_end = 0
+                col_dark_fractions = []
                 for col in range(max_border_check):
                     col_data = gray[:, col]
                     col_dark_fraction = np.sum(col_data <= dark_threshold) / col_data.size
+                    col_dark_fractions.append(float(col_dark_fraction))
                     if col_dark_fraction >= min_dark_fraction:
                         dark_border_end = col + 1
                     else:
@@ -246,8 +273,59 @@ class BorderRemover:
                         if dark_border_end > 0:
                             break
                 
+                # #region agent log
+                try:
+                    log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                    with open(log_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'sessionId': 'debug-session',
+                            'runId': 'run1',
+                            'hypothesisId': 'B1',
+                            'location': 'border_remover.py:detect_borders:left',
+                            'message': 'Left border scan complete',
+                            'data': {
+                                'dark_border_end': int(dark_border_end),
+                                'max_col_dark_fraction': float(max(col_dark_fractions)) if col_dark_fractions else 0.0,
+                                'min_col_dark_fraction': float(min(col_dark_fractions)) if col_dark_fractions else 0.0,
+                                'avg_col_dark_fraction': float(np.mean(col_dark_fractions)) if col_dark_fractions else 0.0,
+                                'first_10_cols_dark_fractions': [float(x) for x in col_dark_fractions[:10]]
+                            },
+                            'timestamp': int(time.time() * 1000)
+                        }) + '\n')
+                except Exception:
+                    pass
+                # #endregion
+                
                 if dark_border_end > 0:
                     verified_borders['left'] = dark_border_end
+                    # #region agent log
+                    try:
+                        log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+                        # Sample pixels in the detected border region to check for text
+                        border_region = gray[:, :dark_border_end]
+                        border_pixel_values = border_region.flatten()
+                        with open(log_path, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({
+                                'sessionId': 'debug-session',
+                                'runId': 'run1',
+                                'hypothesisId': 'B1',
+                                'location': 'border_remover.py:detect_borders:left',
+                                'message': 'Left border verified',
+                                'data': {
+                                    'border_width': int(dark_border_end),
+                                    'border_region_size': int(border_region.size),
+                                    'border_pixel_min': int(border_pixel_values.min()) if border_pixel_values.size > 0 else 0,
+                                    'border_pixel_max': int(border_pixel_values.max()) if border_pixel_values.size > 0 else 0,
+                                    'border_pixel_mean': float(border_pixel_values.mean()) if border_pixel_values.size > 0 else 0.0,
+                                    'border_pixel_std': float(border_pixel_values.std()) if border_pixel_values.size > 0 else 0.0,
+                                    'pixels_below_100': int(np.sum(border_pixel_values < 100)) if border_pixel_values.size > 0 else 0,
+                                    'pixels_below_150': int(np.sum(border_pixel_values < 150)) if border_pixel_values.size > 0 else 0
+                                },
+                                'timestamp': int(time.time() * 1000)
+                            }) + '\n')
+                    except Exception:
+                        pass
+                    # #endregion
                     if debug:
                         self.logger.info(f"  -> VERIFIED: dark border width={dark_border_end}px "
                                        f"(initial check: {initial_dark_fraction:.3f} >= {min_dark_fraction})")
@@ -1195,6 +1273,182 @@ class BorderRemover:
         
         return result
     
+    def detect_borders_optimized(
+        self, 
+        pdf_path: Path, 
+        sample_pages: int = 3,
+        use_content_detector: bool = True
+    ) -> Dict[str, Any]:
+        """Detect borders with optimization: calculate first 3 pages, check variation.
+        
+        If variation > 15%: calculate borders for all pages
+        If variation ≤ 15%: use consistent borders for all pages
+        Selection: Use value that gives maximum text content area + 10% buffer (not average)
+        
+        Args:
+            pdf_path: Path to PDF file
+            sample_pages: Number of pages to check initially (default: 3)
+            use_content_detector: If True, use ContentDetector for content-aware detection
+            
+        Returns:
+            Dict with:
+                - 'borders': Dict with 'top', 'bottom', 'left', 'right' (consistent or per-page)
+                - 'method': 'consistent' or 'per_page'
+                - 'variation': Coefficient of variation for each side
+                - 'pages_checked': Number of pages actually checked
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            self.logger.error("PyMuPDF not available for optimized border detection")
+            return {'borders': {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}, 'method': 'consistent', 'variation': {}, 'pages_checked': 0}
+        
+        try:
+            doc = fitz.open(str(pdf_path))
+            total_pages = len(doc)
+            if total_pages == 0:
+                doc.close()
+                return {'borders': {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}, 'method': 'consistent', 'variation': {}, 'pages_checked': 0}
+            
+            # Calculate borders for first 3 pages (or all if < 3 pages)
+            pages_to_check = min(sample_pages, total_pages)
+            border_values = {'top': [], 'bottom': [], 'left': [], 'right': []}
+            
+            for page_num in range(pages_to_check):
+                try:
+                    page = doc[page_num]
+                    zoom = 2.0
+                    mat = fitz.Matrix(zoom, zoom)
+                    pix = page.get_pixmap(matrix=mat, alpha=False)
+                    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
+                    
+                    # Convert to grayscale
+                    if len(img.shape) == 3:
+                        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                    else:
+                        gray = img
+                    
+                    # Detect borders
+                    borders = self.detect_borders(gray)
+                    border_values['top'].append(borders.get('top', 0))
+                    border_values['bottom'].append(borders.get('bottom', 0))
+                    border_values['left'].append(borders.get('left', 0))
+                    border_values['right'].append(borders.get('right', 0))
+                except Exception as e:
+                    self.logger.debug(f"Error detecting borders on page {page_num + 1}: {e}")
+                    continue
+            
+            doc.close()
+            
+            if not any(border_values.values()):
+                # No borders detected on any page
+                return {'borders': {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}, 'method': 'consistent', 'variation': {}, 'pages_checked': pages_to_check}
+            
+            # Calculate variation for each border side
+            variation = {}
+            for side in ['top', 'bottom', 'left', 'right']:
+                values = border_values[side]
+                if not values or all(v == 0 for v in values):
+                    variation[side] = 0.0
+                else:
+                    # Filter out zeros for variation calculation
+                    non_zero_values = [v for v in values if v > 0]
+                    if len(non_zero_values) > 1:
+                        mean_val = np.mean(non_zero_values)
+                        std_val = np.std(non_zero_values)
+                        cv = std_val / (mean_val + 1e-6)  # Coefficient of variation
+                        variation[side] = cv
+                    else:
+                        variation[side] = 0.0
+            
+            # Check if any side has variation > 15%
+            max_variation = max(variation.values()) if variation else 0.0
+            needs_per_page = max_variation > 0.15
+            
+            if needs_per_page:
+                # Large variation: calculate borders for all pages
+                self.logger.info(f"Border variation detected (max CV: {max_variation:.1%}) - calculating borders for all {total_pages} pages")
+                doc = fitz.open(str(pdf_path))
+                all_border_values = {'top': [], 'bottom': [], 'left': [], 'right': []}
+                
+                for page_num in range(total_pages):
+                    try:
+                        page = doc[page_num]
+                        zoom = 2.0
+                        mat = fitz.Matrix(zoom, zoom)
+                        pix = page.get_pixmap(matrix=mat, alpha=False)
+                        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
+                        
+                        if len(img.shape) == 3:
+                            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                        else:
+                            gray = img
+                        
+                        borders = self.detect_borders(gray)
+                        all_border_values['top'].append(borders.get('top', 0))
+                        all_border_values['bottom'].append(borders.get('bottom', 0))
+                        all_border_values['left'].append(borders.get('left', 0))
+                        all_border_values['right'].append(borders.get('right', 0))
+                    except Exception as e:
+                        self.logger.debug(f"Error detecting borders on page {page_num + 1}: {e}")
+                        # Use zeros if detection fails
+                        all_border_values['top'].append(0)
+                        all_border_values['bottom'].append(0)
+                        all_border_values['left'].append(0)
+                        all_border_values['right'].append(0)
+                
+                doc.close()
+                
+                # Select values that maximize content area + 10% buffer
+                # For each side, choose minimum value (removes most border, maximizes content)
+                # Then apply 10% buffer: final_value = min_value * 0.9 (move edge further out, more conservative)
+                final_borders = {}
+                for side in ['top', 'bottom', 'left', 'right']:
+                    values = all_border_values[side]
+                    non_zero_values = [v for v in values if v > 0]
+                    if non_zero_values:
+                        min_value = min(non_zero_values)
+                        # Apply 10% buffer: move edge further out (more conservative)
+                        final_borders[side] = int(min_value * 0.9)
+                    else:
+                        final_borders[side] = 0
+                
+                return {
+                    'borders': final_borders,
+                    'method': 'per_page_max_content',
+                    'variation': variation,
+                    'pages_checked': total_pages,
+                    'per_page_borders': all_border_values  # Store per-page for reference
+                }
+            else:
+                # Small variation: use consistent borders for all pages
+                self.logger.info(f"Border variation is low (max CV: {max_variation:.1%}) - using consistent borders for all pages")
+                
+                # Select values that maximize content area + 10% buffer
+                # For each side, choose minimum value (removes most border, maximizes content)
+                # Then apply 10% buffer: final_value = min_value * 0.9
+                final_borders = {}
+                for side in ['top', 'bottom', 'left', 'right']:
+                    values = border_values[side]
+                    non_zero_values = [v for v in values if v > 0]
+                    if non_zero_values:
+                        min_value = min(non_zero_values)
+                        # Apply 10% buffer: move edge further out (more conservative)
+                        final_borders[side] = int(min_value * 0.9)
+                    else:
+                        final_borders[side] = 0
+                
+                return {
+                    'borders': final_borders,
+                    'method': 'consistent_max_content',
+                    'variation': variation,
+                    'pages_checked': pages_to_check
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Error in optimized border detection: {e}")
+            return {'borders': {'top': 0, 'bottom': 0, 'left': 0, 'right': 0}, 'method': 'consistent', 'variation': {}, 'pages_checked': 0}
+    
     def process_pdf_page(self, pdf_path: Path, page_num: int, 
                         zoom: float = 2.0, debug: bool = False) -> Tuple[np.ndarray, Dict[str, int]]:
         """Process a single PDF page.
@@ -1237,7 +1491,7 @@ class BorderRemover:
             doc.close()
     
     def process_entire_pdf(self, pdf_path: Path, output_path: Path,
-                          zoom: float = 2.0, pages: Optional[list] = None) -> Dict[str, Any]:
+                          zoom: float = 2.0, pages: Optional[list] = None) -> Optional[Dict[str, Any]]:
         """Process entire PDF and save with borders removed.
         
         Args:
@@ -1300,7 +1554,21 @@ class BorderRemover:
             
             # Save output PDF
             output_doc.save(str(output_path))
+            
+            # Validate: output should have same number of pages as input
+            output_page_count = len(output_doc)
+            input_page_count = len(process_pages) if isinstance(process_pages, list) else len(doc)
             output_doc.close()
+            
+            if output_page_count != input_page_count:
+                self.logger.error(f"Border removal created {output_page_count} pages from {input_page_count} - this is a bug, skipping border removal")
+                # Delete the invalid output file
+                try:
+                    output_path.unlink()
+                except Exception as e:
+                    self.logger.warning(f"Failed to delete invalid output file: {e}")
+                doc.close()
+                return None  # Return None to skip border removal
             
             self.logger.debug(f"Processed {stats['pages_processed']} pages, "
                              f"removed {stats['total_border_pixels']} border pixels")

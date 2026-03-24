@@ -1,7 +1,7 @@
 # Paper Processor Daemon - UX Flow Chart
 
 **Last Updated:** January 2026  
-**Status:** Current implementation with color coding and timeout improvements
+**Status:** Current implementation with color coding, timeout improvements, and filename editing workflow
 
 ## Overview
 
@@ -53,6 +53,7 @@ This document describes the complete user experience flow for the paper processo
 │  5. Author Selection                                            │
 │     - Interactive author list with letters (a-z)                 │
 │     - Zotero recognition (paper counts)                         │
+│     - Weak name-only hits are marked as unconfirmed suggestions │
 │     - Options: select order, edit, add, delete                   │
 │     - Commands: 'a', 'ab', 'all', 'e', 'n', '-a', 'z', 'r'      │
 └─────────────────────────────────────────────────────────────────┘
@@ -62,6 +63,7 @@ This document describes the complete user experience flow for the paper processo
 │  6. Zotero Search                                               │
 │     - Search by selected authors + year                         │
 │     - Local Zotero database query                               │
+│     - If no author match: metadata fallback (DOI/URL/title/year)│
 │     - Results displayed with match quality scores                │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -166,19 +168,36 @@ This document describes the complete user experience flow for the paper processo
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  STEP 3: PDF Attachment                                         │
+│  STEP 3: Filename Editing                                       │
 │  ┌─────────────────────────────────────────────────────────────┐ │
-│  │  1/5 Detect landscape/two-up pages (BEFORE border removal)  │ │
+│  │  Generated filename: {author}_{year}_{title}_scan.pdf       │ │
+│  │                                                               │ │
+│  │  [Enter] = Use this filename                                 │ │
+│  │  [e] = Edit filename                                         │ │
+│  │                                                               │ │
+│  │  If editing:                                                 │ │
+│  │    [a] Default: Zotero-based filename (current)              │ │
+│  │    [b] OCR-based: Use extracted title from PDF               │ │
+│  │                                                               │ │
+│  │  Terminal editing: User can manually edit filename           │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  STEP 4: PDF Preprocessing & Attachment                         │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  1/6 Detect landscape/two-up pages (BEFORE border removal)   │ │
 │  │     ├─ Check for _double.pdf pattern                        │ │
 │  │     └─ Analyze aspect ratio and content for two-up layout   │ │
-│  │  2/5 Remove borders (consistent UX for all pages)            │ │
-│  │  3/5 Intelligent split for two-up files (if detected)       │ │
+│  │  2/6 Remove borders (consistent UX for all pages)            │ │
+│  │  3/6 Intelligent split for two-up files (if detected)       │ │
 │  │     ├─ Detect gutter position (spine or content gap)       │ │
 │  │     └─ Split at detected position                           │ │
-│  │  4/5 Trim leading pages (optional)                          │ │
-│  │  5/5 Copying to publications directory                      │ │
-│  │  6/5 Attaching to Zotero item                               │ │
-│  │  7/5 Moving original to done/                                │ │
+│  │  4/6 Trim leading pages (optional)                          │ │
+│  │  5/6 Copying to publications directory                      │ │
+│  │  6/6 Attaching to Zotero item                               │ │
+│  │  7/6 Moving original to done/                                │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -360,6 +379,23 @@ This document describes the complete user experience flow for the paper processo
   7. Move scan to done/
 - **Benefit:** Users see complete workflow before confirming, reducing surprises during processing
 
+### 9. Filename Editing Workflow (January 2026)
+- **Location:** After item confirmation, before PDF preprocessing
+- **Features:**
+  - Shows generated filename based on Zotero metadata
+  - Option to approve [Enter] or edit [e]
+  - Two filename sources:
+    - [a] Zotero-based: Uses Zotero item title (default)
+    - [b] OCR-based: Uses extracted title from PDF OCR/Ollama
+  - Terminal editing: User can manually edit the filename
+  - Filename validation: Automatically sanitizes invalid characters
+- **Conflict Handling:** When file already exists in publications directory:
+  - Shows clear message: "⚠️ This Zotero item already has a PDF attached"
+  - Displays PDF comparison (existing vs new scan)
+  - Prompts for filename editing instead of automatic `_scan_scan` suffix
+  - Loops until unique filename found or user chooses replace/skip
+- **Benefit:** Users have full control over filenames, can use OCR titles when they differ from Zotero, and can resolve conflicts with custom filenames
+
 ### 8. Filename Validation and Logging (January 2026)
 - **Defensive Checks:** Validates target filename doesn't contain temp file patterns (`_no_borders`, `_split`, etc.)
 - **Auto-Regeneration:** If temp patterns detected, regenerates filename from metadata
@@ -435,10 +471,16 @@ This document describes the complete user experience flow for the paper processo
 - **Search online** → Additional metadata sources
 - **Manual processing** → Move to manual_review/
 
-### Decision Point 3: PDF Attachment
-- **Keep both** → Add with `_scan` suffix
-- **Replace** → Overwrite existing PDF
+### Decision Point 3: Filename Editing
+- **Approve** → Use generated filename (Zotero-based)
+- **Edit** → Choose Zotero-based or OCR-based, then manually edit if needed
+- **On conflict** → Edit filename until unique, or choose replace/skip
+
+### Decision Point 4: PDF Attachment (Conflict Resolution)
+- **Edit filename** → Change filename to avoid conflict
+- **Replace** → Overwrite existing PDF with new scan
 - **Skip** → Create item without attachment
+- **Cancel** → Keep original PDF, move scan to done/
 
 ---
 
