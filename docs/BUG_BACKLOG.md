@@ -67,6 +67,26 @@ Use this template for every new bug.
 - Risk: medium
 - Effort: M
 
+### BUG-20260324-03 - New scan queue log interrupts active user prompt flow
+- Status: done
+- Severity: critical
+- Frequency: intermittent
+- Reproducibility: yes (while daemon waits for interactive prompt, a new file arrives and watcher prints `New scan queued: ...` inline with current prompt)
+- User impact: active scan flow can be disrupted and user input parsing can fail, causing crash/restart and forcing recovery work.
+- Scope: queue/watcher logging during interactive processing (`paper_processor_daemon` main loop + `PaperFileHandler`)
+- Batch tag(s): `queue-control`, `ux-navigation`, `prompt-safety`
+- Suspected root cause: watcher thread emits immediate console log during active prompt; asynchronous console output interleaves with interaction text and can be interpreted as input context.
+- Evidence:
+  - Runtime transcript on 2026-03-24 where prompt line is followed by `New scan queued: NO_20260324_0001_double.pdf`
+  - `scripts/paper_processor_daemon.py` (`PaperFileHandler.on_created`, `_run_processing_loop`)
+- Proposed fix direction: defer watcher queue notices while current file interaction is active; flush a single summary notice after processing step completes.
+- Validation:
+  - Fix applied in `scripts/paper_processor_daemon.py` by deferring watcher queue notices during active processing and flushing a summary notice afterward.
+  - Regression coverage added in `tests/test_restart_queue_behavior.py` (`test_file_handler_defers_queue_notice_during_active_processing`).
+  - Targeted validation run: `pytest -q tests/test_restart_queue_behavior.py` -> `3 passed`.
+- Risk: low (queueing behavior unchanged; only timing/format of watcher logs changes).
+- Effort: S
+
 ## Grouped Bug Clusters
 
 - `enrichment`: candidate retrieval, policy decision gates, selected-item enrichment routing

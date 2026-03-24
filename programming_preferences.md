@@ -6,6 +6,9 @@
 - I prefer to keep the codebase well strucutured and modulized, therefore planning agent is required to keep an overview of the changes and plan changes that solve the core problem, instead of just adding more and more code.
 - The coding agent is the only one that should make changes in the code, and only in cooperation with me. It should not change code by own initiative.  Always ask for permition, unless we are building a plan that I have already accepted.
 
+## Network and computer setup
+- Do not make any changes to computernames, host names, ssh, IP numbers, network connections, Shared disks etc. All this kind of issues are canonically dealt by a repo in F:\prog\ackerstr that does lot of network sysadmin. 
+
 ## What is the problem we are trying to solve?
 - Ask questions until there is clarity. 
 - Are we working on the right problem?
