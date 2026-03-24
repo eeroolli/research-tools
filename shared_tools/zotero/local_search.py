@@ -9,6 +9,7 @@ Use this for SEARCHING only - all updates go through API.
 import sqlite3
 import logging
 import re
+import time
 from pathlib import Path
 from typing import List, Dict, Optional
 from difflib import SequenceMatcher
@@ -110,6 +111,35 @@ class ZoteroLocalSearch:
         if self.db_connection:
             self.db_connection.close()
             self.db_connection = None
+
+    def _execute_with_lock_retry(
+        self,
+        cursor,
+        query: str,
+        params: tuple,
+        operation_name: str,
+        max_retries: int = 2,
+        base_sleep_seconds: float = 0.12
+    ) -> bool:
+        """Execute sqlite query with bounded retry on transient lock errors."""
+        for attempt in range(max_retries + 1):
+            try:
+                cursor.execute(query, params)
+                return True
+            except sqlite3.OperationalError as e:
+                if "database is locked" not in str(e).lower():
+                    raise
+                if attempt >= max_retries:
+                    self.logger.warning(
+                        f"Zotero DB locked during {operation_name}; retries exhausted"
+                    )
+                    return False
+                sleep_seconds = base_sleep_seconds * (attempt + 1)
+                self.logger.debug(
+                    f"Zotero DB locked during {operation_name}; retrying in {sleep_seconds:.2f}s "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(sleep_seconds)
     
     def search_by_metadata(self, metadata: Dict, max_matches: int = 5) -> List[Dict]:
         """
@@ -855,7 +885,13 @@ class ZoteroLocalSearch:
             """
             
             search_pattern = f"%{author_name}%"
-            cursor.execute(query, (search_pattern, search_pattern, limit))
+            if not self._execute_with_lock_retry(
+                cursor,
+                query,
+                (search_pattern, search_pattern, limit),
+                operation_name="author search",
+            ):
+                return None
             
             results = []
             for row in cursor.fetchall():
@@ -982,7 +1018,13 @@ class ZoteroLocalSearch:
             LIMIT ?
             """
             
-            cursor.execute(query, params)
+            if not self._execute_with_lock_retry(
+                cursor,
+                query,
+                tuple(params),
+                operation_name="ordered-author search",
+            ):
+                return None
             
             results = []
             for row in cursor.fetchall():
