@@ -258,6 +258,7 @@ def create_enrichment_review_auto_page(daemon) -> Page:
             "  (y/Enter) Apply enrichment and continue",
             ("  (m) Review optional/manual fields (authors/type/conflicts)" if manual_fields else None),
             "  (n) Skip enrichment and continue",
+            "  (z) Back to review",
             f"  (timeout) Defaults to apply after {daemon.prompt_timeout}s",
         ]
         # Print diff summary (side-effect is acceptable here for clarity)
@@ -321,17 +322,21 @@ def create_enrichment_review_auto_page(daemon) -> Page:
     def handler_m(ctx):
         # Keep enrichment context; user wants to decide manual/overwrite fields.
         return NavigationResult.show_page('enrichment_review_manual')
+    
+    def handler_z(ctx):
+        clear_enrichment_context(ctx)
+        return NavigationResult.show_page('review_and_proceed')
 
     return Page(
         page_id='enrichment_review_auto',
         title='ENRICHMENT REVIEW',
         content=content,
-        prompt='\nApply enrichment? [y/n/m]: ',
-        valid_inputs=['y', 'n', 'm'],
-        handlers={'y': handler_y, 'n': handler_n, 'm': handler_m},
+        prompt='\nApply enrichment? [y/n/m/z]: ',
+        valid_inputs=['y', 'n', 'm', 'z'],
+        handlers={'y': handler_y, 'n': handler_n, 'm': handler_m, 'z': handler_z},
         default='y',
         timeout_seconds=daemon.prompt_timeout,
-        back_page=None,
+        back_page='review_and_proceed',
         quit_action=None,
     )
 
@@ -353,6 +358,7 @@ def create_enrichment_review_manual_page(daemon) -> Page:
             "  (s) Select which fields to apply",
             "  (w) Continue (done with enrichment)",
             "  (n/Enter) Skip enrichment",
+            "  (z) Back to review",
             f"  (timeout) Defaults to skip after {daemon.prompt_timeout * 3}s",
         ]
         zotero_metadata = enrich.get('zotero_metadata') or {}
@@ -505,17 +511,21 @@ def create_enrichment_review_manual_page(daemon) -> Page:
     def handler_n(ctx):
         clear_enrichment_context(ctx)
         return NavigationResult.show_page('review_and_proceed')
+    
+    def handler_z(ctx):
+        clear_enrichment_context(ctx)
+        return NavigationResult.show_page('review_and_proceed')
 
     return Page(
         page_id='enrichment_review_manual',
         title='ENRICHMENT REVIEW',
         content=content,
-        prompt='\nApply enrichment? [a/s/w/n]: ',
-        valid_inputs=['a', 's', 'w', 'n'],
-        handlers={'a': handler_a, 's': handler_s, 'w': handler_w, 'n': handler_n},
+        prompt='\nApply enrichment? [a/s/w/n/z]: ',
+        valid_inputs=['a', 's', 'w', 'n', 'z'],
+        handlers={'a': handler_a, 's': handler_s, 'w': handler_w, 'n': handler_n, 'z': handler_z},
         default='n',
         timeout_seconds=daemon.prompt_timeout * 3,
-        back_page=None,
+        back_page='review_and_proceed',
         quit_action=None,
     )
 
