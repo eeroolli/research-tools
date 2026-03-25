@@ -68,30 +68,12 @@ For detailed development status, technical architecture, and upcoming features, 
 
 ## GitHub SSH Setup (optional)
 
-If you prefer SSH for GitHub authentication, this repo includes scripts that:
+Global GitHub SSH setup is managed centrally in the `Ackerstr` repo, not in `research-tools`.
 
-- generate an SSH key (if missing) and load it into `ssh-agent`
-- print the public key so you can add it to GitHub
-- scan your local git repos and convert GitHub HTTPS `origin` remotes to SSH
+Use the scripts in `Ackerstr/scripts`:
 
-### Windows (blacktower / p1)
-
-Run from the repo root in PowerShell:
-
-```powershell
-pwsh -ExecutionPolicy Bypass -File .\scripts\setup-git-ssh.ps1
-```
-
-Then copy the printed public key into GitHub:
-Settings -> SSH and GPG keys -> New SSH key.
-
-### WSL
-
-Run from the repo root inside WSL:
-
-```bash
-bash ./scripts/setup-git-ssh-wsl.sh
-```
+- Windows: `pwsh -ExecutionPolicy Bypass -File .\scripts\setup-git-ssh.ps1`
+- WSL: `bash ./scripts/setup-git-ssh-wsl.sh`
 
 ---
 

@@ -258,6 +258,7 @@ def create_enrichment_review_auto_page(daemon) -> Page:
             "  (y/Enter) Apply enrichment and continue",
             ("  (m) Review optional/manual fields (authors/type/conflicts)" if manual_fields else None),
             "  (n) Skip enrichment and continue",
+            "  (z) Back to review",
             f"  (timeout) Defaults to apply after {daemon.prompt_timeout}s",
         ]
         # Print diff summary (side-effect is acceptable here for clarity)
@@ -321,17 +322,21 @@ def create_enrichment_review_auto_page(daemon) -> Page:
     def handler_m(ctx):
         # Keep enrichment context; user wants to decide manual/overwrite fields.
         return NavigationResult.show_page('enrichment_review_manual')
+    
+    def handler_z(ctx):
+        clear_enrichment_context(ctx)
+        return NavigationResult.show_page('review_and_proceed')
 
     return Page(
         page_id='enrichment_review_auto',
         title='ENRICHMENT REVIEW',
         content=content,
-        prompt='\nApply enrichment? [y/n/m]: ',
-        valid_inputs=['y', 'n', 'm'],
-        handlers={'y': handler_y, 'n': handler_n, 'm': handler_m},
+        prompt='\nApply enrichment? [y/n/m/z]: ',
+        valid_inputs=['y', 'n', 'm', 'z'],
+        handlers={'y': handler_y, 'n': handler_n, 'm': handler_m, 'z': handler_z},
         default='y',
         timeout_seconds=daemon.prompt_timeout,
-        back_page=None,
+        back_page='review_and_proceed',
         quit_action=None,
     )
 
@@ -353,6 +358,7 @@ def create_enrichment_review_manual_page(daemon) -> Page:
             "  (s) Select which fields to apply",
             "  (w) Continue (done with enrichment)",
             "  (n/Enter) Skip enrichment",
+            "  (z) Back to review",
             f"  (timeout) Defaults to skip after {daemon.prompt_timeout * 3}s",
         ]
         zotero_metadata = enrich.get('zotero_metadata') or {}
@@ -505,17 +511,21 @@ def create_enrichment_review_manual_page(daemon) -> Page:
     def handler_n(ctx):
         clear_enrichment_context(ctx)
         return NavigationResult.show_page('review_and_proceed')
+    
+    def handler_z(ctx):
+        clear_enrichment_context(ctx)
+        return NavigationResult.show_page('review_and_proceed')
 
     return Page(
         page_id='enrichment_review_manual',
         title='ENRICHMENT REVIEW',
         content=content,
-        prompt='\nApply enrichment? [a/s/w/n]: ',
-        valid_inputs=['a', 's', 'w', 'n'],
-        handlers={'a': handler_a, 's': handler_s, 'w': handler_w, 'n': handler_n},
+        prompt='\nApply enrichment? [a/s/w/n/z]: ',
+        valid_inputs=['a', 's', 'w', 'n', 'z'],
+        handlers={'a': handler_a, 's': handler_s, 'w': handler_w, 'n': handler_n, 'z': handler_z},
         default='n',
         timeout_seconds=daemon.prompt_timeout * 3,
-        back_page=None,
+        back_page='review_and_proceed',
         quit_action=None,
     )
 
@@ -1035,12 +1045,23 @@ def create_proposed_actions_page(daemon) -> Page:
         target_filename = ctx.get('target_filename', 'unknown.pdf')
         publications_dir = daemon.publications_dir.name
         
+        # If the target PDF already exists in publications/, we want to avoid
+        # expensive preprocessing and let the user decide whether to skip/replace.
+        conflict_exists = False
+        try:
+            conflict_target_path = daemon.publications_dir / target_filename
+            conflict_exists = daemon._pub_exists(conflict_target_path)
+        except Exception:
+            conflict_exists = False
+        
         lines = [
             f"Scan: {pdf_path.name} ({scan_size_mb:.1f} MB)",
             "",
             "Will perform:",
-            f"  1. Check and remove dark borders (if detected)",
-            f"  2. Split landscape/two-up pages (if detected)",
+            *(["⚠️ Existing target PDF detected. Next you can choose keep/replace/keep-both."]
+              if conflict_exists else []),
+            f"  1. Split landscape/two-up pages using 50/50 geometric (fast default)",
+            f"  2. Gutter detection + border removal (only if you reject 50/50 in preview)",
             f"  3. Trim leading pages (optional)",
             f"  4. Generate filename: {target_filename}",
             f"  5. Copy to publications: {publications_dir}/",
@@ -1057,6 +1078,21 @@ def create_proposed_actions_page(daemon) -> Page:
         """Proceed - do PDF preprocessing and go to PDF PREVIEW."""
         daemon = ctx['daemon']
         pdf_path = ctx['pdf_path']
+        target_filename = ctx.get('target_filename')
+
+        # Early routing: if the target publications PDF already exists, ask how
+        # to handle it *before* preprocessing (preprocessing causes split/prep
+        # work and can lead to collisions later).
+        if target_filename:
+            try:
+                conflict_target_path = daemon.publications_dir / target_filename
+                if daemon._pub_exists(conflict_target_path):
+                    print("\n⚠️  Existing publications PDF detected before preprocessing.")
+                    print("    Routing to conflict decision...")
+                    return NavigationResult.show_page('pdf_conflict_decision')
+            except Exception:
+                # If existence check fails, fall back to original preprocessing flow.
+                pass
         
         # Step 1: Preprocess PDF with default options
         print("\n" + "="*70)
@@ -1064,8 +1100,10 @@ def create_proposed_actions_page(daemon) -> Page:
         print("="*70)
         processed_pdf, preprocessing_state = daemon._preprocess_pdf_with_options(
             pdf_path,
-            border_removal=True,
-            split_method='auto',
+            # Fast path: avoid gutter detection + border removal for speed.
+            # If the 50/50 preview looks wrong, the user can rerun the slower logic from the preview menu.
+            border_removal=False,
+            split_method='50-50',
             trim_leading=True
         )
         
@@ -1123,6 +1161,110 @@ def create_proposed_actions_page(daemon) -> Page:
         },
         default='y',
         back_page='review_and_proceed',
+        quit_action=quit_action
+    )
+
+
+def create_pdf_conflict_decision_page(daemon) -> Page:
+    """Create PDF CONFLICT decision page.
+    
+    This is shown when the target filename already exists in publications/.
+    It lets the user keep existing (skip preprocessing), or proceed with
+    replace/keep-both (preprocessing still happens only if needed).
+    """
+    def _compute_keep_both_filename(ctx) -> str:
+        from pathlib import Path
+        target_filename = ctx.get('target_filename')
+        if not target_filename:
+            return target_filename
+        
+        stem = Path(target_filename).stem
+        suffix = Path(target_filename).suffix or ".pdf"
+        
+        # Keep-both naming convention used elsewhere in this codebase.
+        candidates = [
+            f"{stem}_scanned2{suffix}",
+            f"{stem}_scanned{suffix}",
+            f"{stem}_scanned3{suffix}",
+        ]
+        for cand in candidates:
+            try:
+                if not daemon._pub_exists(daemon.publications_dir / cand):
+                    return cand
+            except Exception:
+                # If existence check fails, just return the first candidate.
+                return candidates[0]
+        return candidates[0]
+
+    def _preprocess_then_show_preview(ctx):
+        pdf_path = ctx['pdf_path']
+        processed_pdf, preprocessing_state = daemon._preprocess_pdf_with_options(
+            pdf_path,
+            border_removal=False,
+            split_method='50-50',
+            trim_leading=True
+        )
+
+        ctx['processed_pdf'] = processed_pdf
+        ctx['original_pdf'] = pdf_path
+        ctx['preprocessing_state'] = preprocessing_state
+        return NavigationResult.show_page('pdf_preview')
+
+    def content(ctx):
+        pdf_path = ctx['pdf_path']
+        target_filename = ctx.get('target_filename', 'unknown.pdf')
+        lines = [
+            "⚠️ Existing publications PDF detected",
+            "",
+            f"Existing target filename: {target_filename}",
+            f"Scan filename:            {pdf_path.name}",
+            "",
+            "Choose what to do:",
+            "  [1] Keep existing PDF (skip preprocessing; move scan to done/)",
+            "  [2] Replace existing with scan (preprocess + replace later)",
+            "  [3] Keep both (preprocess + attach scan under scanned suffix)",
+            "  (z) Go back",
+            "  (q) Quit - move to manual review",
+        ]
+        return lines
+
+    def handler_1(ctx):
+        daemon.move_to_done(ctx['pdf_path'])
+        print("✅ Kept existing PDF; skipped preprocessing.")
+        return NavigationResult.return_to_caller()
+
+    def handler_2(ctx):
+        # Store choice for later conflict handling in _process_selected_item.
+        ctx['conflict_action'] = 'replace'
+        return _preprocess_then_show_preview(ctx)
+
+    def handler_3(ctx):
+        ctx['conflict_action'] = 'keep_both'
+        ctx['target_filename'] = _compute_keep_both_filename(ctx)
+        return _preprocess_then_show_preview(ctx)
+
+    def handler_z(ctx):
+        print("⬅️  Going back to proposed actions...")
+        return NavigationResult.show_page('proposed_actions')
+
+    def quit_action(ctx):
+        print("📝 Moving to manual review")
+        return NavigationResult.quit_scan(move_to_manual=True)
+
+    return Page(
+        page_id='pdf_conflict_decision',
+        title='PDF CONFLICT',
+        content=content,
+        prompt='\nEnter your choice (timeout defaults to 1): ',
+        valid_inputs=['1', '2', '3', 'z', 'q'],
+        handlers={
+            '1': handler_1,
+            '2': handler_2,
+            '3': handler_3,
+            'z': handler_z
+        },
+        default='1',
+        back_page='proposed_actions',
         quit_action=quit_action
     )
 
@@ -1259,6 +1401,12 @@ def create_pdf_preview_page(daemon) -> Page:
         # Build dynamic options based on current state
         option_num = 1
         
+        # Fast-path split (geometric 50/50) is the default.
+        # If the preview looks wrong, rerun with gutter detection + border removal.
+        if preprocessing_state.get('split_method', 'none') == '50-50':
+            option_num += 1
+            lines.append(f"  [{option_num}] Improve split (gutter detection + border removal)")
+        
         if preprocessing_state.get('border_removal', False):
             option_num += 1
             lines.append(f"  [{option_num}] Drop border removal")
@@ -1312,6 +1460,8 @@ def create_pdf_preview_page(daemon) -> Page:
             
             if action == 'accept':
                 return handler_1(ctx)
+            elif action == 'improve_split':
+                return _handle_improve_split_gutter_and_borders(ctx, daemon)
             elif action == 'drop_border':
                 return _handle_drop_border_removal(ctx, daemon)
             elif action == 'drop_split':
@@ -1377,6 +1527,11 @@ def _get_pdf_preview_option_action(option_num: int, preprocessing_state: dict) -
         return 'accept'
     
     option_count = 1  # Option 1 is always "Accept"
+    
+    if preprocessing_state.get('split_method', 'none') == '50-50':
+        option_count += 1
+        if option_count == option_num:
+            return 'improve_split'
     
     if preprocessing_state.get('border_removal', False):
         option_count += 1
@@ -1466,6 +1621,24 @@ def _handle_use_5050_split(ctx, daemon):
     return NavigationResult.show_page('pdf_preview')
 
 
+def _handle_improve_split_gutter_and_borders(ctx, daemon):
+    """Handler for rerunning split using gutter detection + border removal."""
+    original_pdf = ctx['pdf_path']
+    preprocessing_state = ctx.get('preprocessing_state', {}).copy()
+    print("\n🔄 Improving split (gutter detection + border removal)...")
+    
+    processed_pdf, new_state = daemon._preprocess_pdf_with_options(
+        original_pdf,
+        border_removal=True,
+        split_method='auto',
+        trim_leading=preprocessing_state.get('trim_leading', True)
+    )
+    
+    ctx['processed_pdf'] = processed_pdf
+    ctx['preprocessing_state'] = new_state
+    return NavigationResult.show_page('pdf_preview')
+
+
 def _handle_drop_trimming(ctx, daemon):
     """Handler for dropping trimming - reprocess PDF."""
     original_pdf = ctx['pdf_path']
@@ -1535,7 +1708,7 @@ def _handle_manual_split(ctx, daemon):
             print("\n❌ Cancelled")
             return NavigationResult.show_page('pdf_preview')
     
-    # Get page width from PDF
+    # Get all page widths from PDF for per-page split (handles mixed page sizes)
     try:
         import fitz  # PyMuPDF
         doc = fitz.open(str(original_pdf))
@@ -1543,8 +1716,7 @@ def _handle_manual_split(ctx, daemon):
             print("❌ Error: PDF has no pages")
             doc.close()
             return NavigationResult.show_page('pdf_preview')
-        
-        page_width = doc[0].rect.width
+        page_widths = [doc[i].rect.width for i in range(len(doc))]
         doc.close()
     except ImportError:
         print("❌ Error: PyMuPDF not available")
@@ -1553,34 +1725,17 @@ def _handle_manual_split(ctx, daemon):
         print(f"❌ Error reading PDF: {e}")
         return NavigationResult.show_page('pdf_preview')
     
-    # Calculate split point
-    if border_detection_stats:
-        avg_left = border_detection_stats.get('avg_left_border_px', 0)
-        avg_right = border_detection_stats.get('avg_right_border_px', 0)
-        page_width_px = border_detection_stats.get('page_width_px', 0)
-        
-        if page_width_px > 0:
-            # Convert borders to PDF points
-            left_border_pts = (avg_left / page_width_px) * page_width
-            right_border_pts = (avg_right / page_width_px) * page_width
-            
-            # Calculate content center and manual offset
-            content_center = page_width / 2 + (left_border_pts - right_border_pts) / 2
-            manual_offset = (ratio - 50) / 100 * page_width
-            split_x = content_center + manual_offset
-            print(f"📊 Split point: {split_x:.1f} (content center: {content_center:.1f}, manual offset: {manual_offset:.1f})")
-        else:
-            # Fallback to simple calculation
-            split_x = page_width * (ratio / 100)
-            print(f"📊 Split point: {split_x:.1f} (page width: {page_width:.1f}, ratio: {ratio}%)")
-    else:
-        # No borders detected, use simple calculation
-        split_x = page_width * (ratio / 100)
-        print(f"📊 Split point: {split_x:.1f} (page width: {page_width:.1f}, ratio: {ratio}%)")
+    # Per-page gutter at requested ratio so mixed page sizes work
+    gutter_x_per_page = [w * (ratio / 100) for w in page_widths]
+    first_width = page_widths[0]
+    first_gutter = gutter_x_per_page[0]
+    print(f"📊 Split point: {first_gutter:.1f} (page width: {first_width:.1f}, ratio: {ratio}%)")
+    if len(page_widths) > 1:
+        print(f"   (per-page split applied to {len(page_widths)} pages)")
     
     # Perform split
     print("\n🔄 Performing manual split...")
-    split_path, error_msg = daemon._split_with_custom_gutter(original_pdf, split_x)
+    split_path, error_msg = daemon._split_with_custom_gutter(original_pdf, gutter_x_per_page[0], gutter_x_per_page)
     
     if split_path:
         # Update preprocessing state
@@ -1667,6 +1822,7 @@ def create_all_pages(daemon) -> Dict[str, Page]:
         'proceed_after_edit': create_proceed_after_edit_page(daemon),
         'filename_title_override': create_filename_title_override_page(daemon),
         'proposed_actions': create_proposed_actions_page(daemon),
+        'pdf_conflict_decision': create_pdf_conflict_decision_page(daemon),
         'pdf_preview': create_pdf_preview_page(daemon),
         'note_prompt': create_note_prompt_page(daemon),
         'note_input': create_note_input_page(daemon),

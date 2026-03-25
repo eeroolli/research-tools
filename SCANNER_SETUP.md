@@ -300,6 +300,33 @@ You can create similar profiles for other languages (Norwegian, German, etc.):
 
 ---
 
+## Two-up (`_double`) scans and automatic splitting
+
+Scans whose filenames contain `_double` (for example `EN_20260312-130734_001_double.pdf`)
+are treated as two-up pages and are split automatically during the PDF preprocessing step:
+
+- **When it happens**
+  - After metadata is finalized and before the PDF is copied to the publications folder / attached to Zotero, the daemon runs a **PDF PREPROCESSING** phase.
+  - If the original filename contains `_double`, preprocessing will **always attempt to split** the scan into single pages using the automatic (gutter-based) method.
+
+- **What you see in the terminal**
+  - A `PDF PREPROCESSING` header appears after the filename confirmation.
+  - For `_double` scans you should see:
+    - `Auto-splitting due to '_double' in filename...`
+  - In the preprocessing preview menu, the `Current preprocessing` section shows:
+    - `Split: ✓ Applied (gutter detection)` when the split succeeded.
+
+- **How it is logged**
+  - The CSV log at `data/logs/scanned_papers_log.csv` contains a `split` column:
+    - `"yes"`  – split was attempted and succeeded.
+    - `"failed"` – split was attempted but failed or was cancelled.
+    - `"no"`   – no split was attempted (e.g., normal single-page scans).
+
+This makes `_double` behavior predictable and lets you confirm splitting both from the
+interactive UI and from the historical log.
+
+---
+
 ## Troubleshooting
 
 ### VBS script doesn't run

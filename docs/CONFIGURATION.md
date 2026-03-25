@@ -51,7 +51,12 @@ GROBID service configuration for metadata extraction.
 - `auto_start`: Automatically start GROBID container if local (default: `true`)
 - `auto_stop`: Automatically stop GROBID container on daemon shutdown (default: `true`)
 - `container_name`: Docker container name for GROBID (default: `grobid`)
-- `handle_rotation`: Handle PDF rotation automatically (default: `true`)
+- `remote_auto_start`: If `true` and `host` is remote, run `remote_start_command` over SSH once at daemon startup (default: `false`)
+- `remote_ssh_host`: SSH host to connect to for remote start (default: same as `host`)
+- `remote_ssh_user`: SSH username (optional). If empty, uses SSH defaults / `~/.ssh/config`
+- `remote_start_command`: Command run on the remote host (default: `docker start grobid`). Safe to run even if the container is already running.
+- `tcp_precheck_timeout`: TCP connection timeout (seconds) for a fast `host:port` reachability probe before HTTP health checks (default: `1.0`)
+- `handle_rotation`: If `true`, the daemon’s GROBID client will attempt to detect and correct PDF rotation *before sending pages to GROBID* (default: `true`). Disable this if your scanner software already outputs correctly oriented PDFs (e.g., Epson Document Capture Pro), to avoid unnecessary processing or accidental double-correction.
 - `rotation_check_pages`: Number of pages to check for rotation (default: `2`)
 - `max_pages`: Maximum pages to process with GROBID (default: `2`)
 

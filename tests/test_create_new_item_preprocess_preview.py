@@ -293,3 +293,236 @@ def test_create_new_item_shows_preprocessing_preview_menu_on_accept(
     # The actual preview loop prints this header; we assert we reached it.
     assert "PDF PREVIEW" in captured.out
 
+
+def test_search_skips_broad_surname_fallback_when_author_confirmed(
+    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broad_search_calls = {"count": 0}
+
+    class _LocalZoteroStub:
+        def search_by_authors_ordered(self, *args, **kwargs):
+            return []
+
+        def search_by_author(self, *args, **kwargs):
+            broad_search_calls["count"] += 1
+            return [{"title": "Wrong Christie Match"}]
+
+        def search_by_metadata(self, *args, **kwargs):
+            return []
+
+    class _AuthorValidatorStub:
+        def get_author_info(self, author_name):
+            if author_name == "Nils Christie":
+                return {"name": "Nils Christie", "paper_count": 0}
+            return None
+
+    daemon.local_zotero = _LocalZoteroStub()
+    daemon.author_validator = _AuthorValidatorStub()
+    daemon.prompt_for_year = lambda metadata, force_prompt=False: metadata
+    daemon.select_authors_for_search = lambda authors: authors
+
+    # Final "no matches" options in search_and_display_local_zotero
+    monkeypatch.setattr(builtins, "input", lambda *_args, **_kwargs: "2")
+
+    action, item, _updated = daemon.search_and_display_local_zotero(
+        {
+            "title": "Tolv råd om skriving",
+            "authors": ["Nils Christie"],
+            "year": "1983",
+            "document_type": "journal_article",
+        }
+    )
+
+    assert action == "create"
+    assert item is None
+    assert broad_search_calls["count"] == 0
+
+
+def test_create_new_item_handles_unexpected_add_paper_result(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "EN_20260101-120000_003_double.pdf"
+    _write_dummy_pdf(pdf_path)
+
+    daemon.quick_manual_entry = lambda extracted: extracted
+    daemon.search_online_libraries = lambda _meta, pdf_path=None: None
+    daemon.edit_tags_interactively = lambda current_tags=None, online_tags=None: list(current_tags or [])
+    daemon._input_with_timeout = lambda *_args, **_kwargs: "y"
+    daemon.move_to_done = lambda _p: None
+
+    # 1) Search online libraries? [Y/n] -> n
+    # 2) Attach this PDF now? [Y/n] -> n
+    answers = iter(["n", "n"])
+    monkeypatch.setattr(builtins, "input", lambda *_args, **_kwargs: next(answers))
+
+    # Simulate malformed processor contract that previously could crash downstream code.
+    daemon.zotero_processor = SimpleNamespace(add_paper=lambda _meta, _attach: None)
+
+    ok = daemon.handle_create_new_item(
+        pdf_path,
+        {
+            "title": "A Title",
+            "authors": ["Doe, Jane"],
+            "year": "2004",
+            "document_type": "journal_article",
+            "tags": [],
+        },
+    )
+    assert ok is False
+
+
+def test_search_online_libraries_all_wrong_returns_none(
+    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _CrossRefStub:
+        def search_by_metadata(self, **_kwargs):
+            return [
+                {
+                    "title": "Unrelated result",
+                    "authors": ["Wrong, Author"],
+                    "year": "2016",
+                    "journal": "Wrong Journal",
+                    "tags": ["wrong"],
+                }
+            ]
+
+    daemon.metadata_processor = SimpleNamespace(
+        crossref=_CrossRefStub(),
+        arxiv=SimpleNamespace(search_by_metadata=lambda **_kwargs: []),
+    )
+    daemon.enrichment_workflow = SimpleNamespace(
+        choose_best=lambda _metadata, candidates: (
+            (candidates[0] if candidates else None),
+            {"status": "manual_review", "reason": "weak_composite"},
+        ),
+        plan_updates=lambda *_args, **_kwargs: {},
+    )
+
+    monkeypatch.setattr(builtins, "input", lambda *_args, **_kwargs: "w")
+
+    result = daemon.search_online_libraries(
+        {
+            "title": "Sensitive Questions in Online Surveys",
+            "authors": ["Marc Höglinger"],
+            "year": "2016",
+            "document_type": "journal_article",
+        }
+    )
+    assert result is None
+
+
+def test_create_new_item_all_wrong_online_results_do_not_leak_online_tags(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "EN_20260101-120000_004_double.pdf"
+    _write_dummy_pdf(pdf_path)
+
+    class _CrossRefStub:
+        def search_by_metadata(self, **_kwargs):
+            return [
+                {
+                    "title": "Unrelated result",
+                    "authors": ["Wrong, Author"],
+                    "year": "2016",
+                    "journal": "Wrong Journal",
+                    "tags": ["should-not-leak"],
+                }
+            ]
+
+    daemon.metadata_processor = SimpleNamespace(
+        crossref=_CrossRefStub(),
+        arxiv=SimpleNamespace(search_by_metadata=lambda **_kwargs: []),
+    )
+    daemon.enrichment_workflow = SimpleNamespace(
+        choose_best=lambda _metadata, candidates: (
+            (candidates[0] if candidates else None),
+            {"status": "manual_review", "reason": "weak_composite"},
+        ),
+        plan_updates=lambda *_args, **_kwargs: {},
+    )
+
+    daemon.quick_manual_entry = lambda extracted: extracted
+    daemon._input_with_timeout = lambda *_args, **_kwargs: "y"
+    daemon.move_to_done = lambda _p: None
+    daemon._prompt_for_note = lambda _item_key: True
+    daemon.generate_filename = lambda _meta: "Test_File"
+
+    observed_online_tags: list[list[str]] = []
+
+    def _edit_tags_stub(current_tags=None, online_tags=None):
+        observed_online_tags.append(list(online_tags or []))
+        return list(current_tags or [])
+
+    daemon.edit_tags_interactively = _edit_tags_stub
+    daemon.zotero_processor = SimpleNamespace(
+        add_paper=lambda _meta, _attach: {"success": True, "item_key": "KEY1", "action": "added_without_pdf"}
+    )
+    daemon.scanned_papers_logger = SimpleNamespace(log_processing=lambda **_kwargs: None)
+
+    # Inputs:
+    # 1) Search online libraries? [Y/n] -> y
+    # 2) online result selection -> w (all wrong)
+    # 3) Attach this PDF now? [Y/n] -> n
+    answers = iter(["y", "w", "n"])
+    monkeypatch.setattr(builtins, "input", lambda *_args, **_kwargs: next(answers))
+
+    ok = daemon.handle_create_new_item(
+        pdf_path,
+        {
+            "title": "Sensitive Questions in Online Surveys",
+            "authors": ["Marc Höglinger"],
+            "year": "2016",
+            "document_type": "journal_article",
+            "tags": [],
+        },
+    )
+
+    assert ok is True
+    assert observed_online_tags, "Tag editor should have been invoked"
+    assert observed_online_tags[0] == []
+
+
+def test_search_online_libraries_all_wrong_does_not_block_future_research(
+    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _CrossRefStub:
+        def search_by_metadata(self, title=None, **_kwargs):
+            if title == "Initial wrong query":
+                return [{"title": "Wrong match", "authors": ["Wrong, Author"], "year": "2016"}]
+            return [{"title": "Corrected match", "authors": ["Christtie, Noel"], "year": "2017"}]
+
+    daemon.metadata_processor = SimpleNamespace(
+        crossref=_CrossRefStub(),
+        arxiv=SimpleNamespace(search_by_metadata=lambda **_kwargs: []),
+    )
+    daemon.enrichment_workflow = SimpleNamespace(
+        choose_best=lambda _metadata, candidates: (
+            (candidates[0] if candidates else None),
+            {"status": "manual_review", "reason": "weak_composite"},
+        ),
+        plan_updates=lambda *_args, **_kwargs: {},
+    )
+
+    answers = iter(["w", "1"])
+    monkeypatch.setattr(builtins, "input", lambda *_args, **_kwargs: next(answers))
+
+    first = daemon.search_online_libraries(
+        {
+            "title": "Initial wrong query",
+            "authors": ["Noel Chrisitie"],
+            "year": "2016",
+            "document_type": "journal_article",
+        }
+    )
+    second = daemon.search_online_libraries(
+        {
+            "title": "Corrected query",
+            "authors": ["Noel Christtie"],
+            "year": "2017",
+            "document_type": "journal_article",
+        }
+    )
+
+    assert first is None
+    assert second is not None
+    assert second.get("title") == "Corrected match"

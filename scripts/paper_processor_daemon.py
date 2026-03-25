@@ -140,6 +140,8 @@ class PaperProcessorDaemon:
         
         # Window management
         self._terminal_window_handle = None  # Store terminal window handle for positioning
+        self._pdf_viewer_path = None
+        self._opened_pdf_paths: List[Path] = []
         
         # Initialize local Zotero search (read-only) - this is fast
         try:
@@ -187,6 +189,10 @@ class PaperProcessorDaemon:
         self.observer = None
         # Thread-safe queue for paper paths; only main thread calls process_paper()
         self._paper_queue = queue.Queue()
+        # Guard async queue notices so watcher output never interrupts active prompts.
+        self._queue_notice_lock = threading.Lock()
+        self._processing_active = False
+        self._deferred_scan_notices = 0
     
     def load_config(self):
         """Load configuration with secure loader (supports environment variables)."""
@@ -1703,6 +1709,18 @@ class PaperProcessorDaemon:
                     lastname = re.sub(r'[^\w\s\-\'\.]', '', lastname).strip()
                     
                     author_lastnames.append(lastname)
+
+                # If user selected an author we can already resolve exactly from Zotero,
+                # avoid noisy broad surname-only fallback later.
+                has_confirmed_selected_author = False
+                if self.author_validator:
+                    for selected_author in selected_authors:
+                        try:
+                            if self.author_validator.get_author_info(selected_author):
+                                has_confirmed_selected_author = True
+                                break
+                        except Exception:
+                            continue
                 
                 # Show search query before executing
                 # Arrow indicates author order: first → second → third, etc.
@@ -1783,8 +1801,9 @@ class PaperProcessorDaemon:
                         action, item = self.display_and_select_zotero_matches(normalized_matches, search_info)
                         return (action, item, metadata)
                 
-                # Fallback: search broadly by first author's last name (only if DB available)
-                if author_lastnames and not db_unavailable:
+                # Fallback: search broadly by first author's last name (only if DB available
+                # and we do not already have a confirmed Zotero author identity).
+                if author_lastnames and not db_unavailable and not has_confirmed_selected_author:
                     broad_name = author_lastnames[0]
                     print(f"\nℹ️  No ordered matches; searching broadly for last name '{broad_name}'...")
                     broad_matches = self.local_zotero.search_by_author(broad_name, limit=10)
@@ -1797,6 +1816,8 @@ class PaperProcessorDaemon:
                             search_info = f"by last name {broad_name}"
                             action, item = self.display_and_select_zotero_matches(normalized_broad, search_info)
                             return (action, item, metadata)
+                elif has_confirmed_selected_author:
+                    print("\nℹ️  Skipping broad last-name fallback because selected author is already confirmed in Zotero.")
                 
                 if db_unavailable:
                     # Special flow: DB could not be queried at all
@@ -2891,12 +2912,13 @@ class PaperProcessorDaemon:
         authors: Optional[List[str]],
         year_str: Optional[str],
         journal: Optional[str],
-    ) -> Tuple[Optional[str], Optional[List[str]], Optional[str], Optional[str], bool]:
+    ) -> Tuple[Optional[str], Optional[List[str]], Optional[str], Optional[str], bool, bool]:
         """Show search parameters and let user confirm, edit, or skip online search.
 
         Returns:
-            (title, authors, year_str, journal, skip_search)
+            (title, authors, year_str, journal, skip_search, go_back)
             skip_search is True if user chose to skip online search.
+            go_back is True if user chose to return to previous step.
         """
         def fmt(s: Optional[str]) -> str:
             return s if (s and str(s).strip()) else "(none)"
@@ -2914,25 +2936,29 @@ class PaperProcessorDaemon:
             print(f"  Title:     {fmt(title)}")
             print(f"  Journal:   {fmt(journal)}")
             print()
-            print("[Enter] = Search with these  |  [e] = Edit  |  [s] = Skip online search")
+            print("[Enter] = Search with these  |  [e] = Edit  |  [s] = Skip online search  |  [z] = Back")
             choice = self._input_with_timeout("Your choice: ", default="", clear_buffered=True)
             if choice is None:
                 choice = ""
             choice = (choice or "").strip().lower()
 
+            if choice == "z":
+                return (title, authors, year_str, journal, False, True)
             if choice == "s":
-                return (title, authors, year_str, journal, True)
+                return (title, authors, year_str, journal, True, False)
             if choice != "e":
-                return (title, authors, year_str, journal, False)
+                return (title, authors, year_str, journal, False, False)
 
             # Edit sub-menu
             while True:
-                print("\nEdit field: [1] Author(s)  [2] Year  [3] Title  [4] Journal  [Enter] Done")
+                print("\nEdit field: [1] Author(s)  [2] Year  [3] Title  [4] Journal  [Enter] Done  [z] Back")
                 field_choice = self._input_with_timeout("Your choice: ", default="", clear_buffered=True)
                 if field_choice is None:
                     field_choice = ""
                 field_choice = (field_choice or "").strip()
                 if not field_choice:
+                    break
+                if field_choice.lower() == "z":
                     break
 
                 if field_choice == "1":
@@ -4695,6 +4721,9 @@ class PaperProcessorDaemon:
             'RESTART' when the user requested restart from beginning; the caller
             should re-queue the same path and run the next item.
         """
+        # Track documents opened for this paper so we can close them precisely in finally.
+        self._opened_pdf_paths = []
+
         # Check if file exists before processing
         if not pdf_path.exists():
             self.logger.warning(f"File no longer exists, cannot process: {pdf_path}")
@@ -4857,9 +4886,12 @@ class PaperProcessorDaemon:
                     
                     # Pre-search review: let user confirm, edit, or skip online search (journal articles etc.)
                     if doc_type not in ['book', 'book_chapter'] and not skip_metadata_search:
-                        title, authors, year_str, journal, skip_search = self.review_search_params(
+                        title, authors, year_str, journal, skip_search, go_back = self.review_search_params(
                             title, authors, year_str, journal
                         )
+                        if go_back:
+                            print("⬅️  Going back to previous step...")
+                            return 'RESTART'
                         if skip_search:
                             has_search_params = False
                         else:
@@ -5215,7 +5247,10 @@ class PaperProcessorDaemon:
                         print("💡 You can type a 4-digit year to change it, or press Enter to confirm")
                         while True:
                             try:
-                                prompt_text = Colors.colorize(f"Year [{suggested_year}] (Enter=confirm, type new year, 'm'=manual entry, or 'r'=restart): ", ColorScheme.ACTION)
+                                prompt_text = Colors.colorize(
+                                    f"Year [{suggested_year}] (Enter=confirm, type new year, 'm'=manual entry, 'z'=back, or 'r'=restart): ",
+                                    ColorScheme.ACTION
+                                )
                                 year_input = self._input_with_timeout(
                                     prompt_text,
                                     timeout_seconds=self.prompt_timeout,
@@ -5239,6 +5274,9 @@ class PaperProcessorDaemon:
                                 self.logger.info(f"User confirmed year from {suggested_source}: {suggested_year}")
                                 metadata['_year_confirmed'] = True
                                 break
+                            elif year_input.lower() == 'z':
+                                print("⬅️  Going back to previous step...")
+                                return
                             elif year_input.lower() == 'r':
                                 # User wants to restart - go back to beginning of process_paper
                                 print("🔄 Restarting from beginning...")
@@ -5370,87 +5408,107 @@ class PaperProcessorDaemon:
                     
                     break
             
-            # Step 4: Handle action from Zotero search
-            action = (str(action).strip().lower() if action is not None else 'none')
-            self.logger.info(f"Zotero search action resolved to: {action}")
-            if action == 'select' and selected_item:
-                # User selected an item - offer to attach PDF
-                self.handle_item_selected(pdf_path, updated_metadata, selected_item)
-            elif action == 'search':
-                # User wants to search again - allow year editing by clearing confirmation flag
-                if updated_metadata.get('_year_confirmed'):
-                    updated_metadata.pop('_year_confirmed', None)
-                # Reset authors to full set if available, then recursive call
-                if updated_metadata.get('_all_authors'):
-                    updated_metadata['authors'] = updated_metadata['_all_authors'].copy()
-                action2, selected_item2, updated_metadata = self.search_and_display_local_zotero(updated_metadata, force_prompt_year=True)
-                if action2 == 'select' and selected_item2:
-                    result = self.handle_item_selected(pdf_path, updated_metadata, selected_item2)
-                    # Note: if user wants to go back, handle_item_selected already moved the file appropriately
-                elif action2 == 'back' or action2 == 'restart':
-                    # User went back during search - restart
-                    print("⬅️  Going back to manual processing...")
-                    self.move_to_manual_review(pdf_path)
-                elif action2 == 'quit':
-                    print("🔚 Exiting current processing per user request")
-                    return
-                # Handle other actions from second search if needed
-            elif action == 'edit':
-                # Edit metadata then search again
-                print("\n✏️  Editing metadata...")
-                edited_metadata = self.edit_metadata_interactively(updated_metadata)
-                
-                if edited_metadata:
-                    # Re-run Zotero search with edited metadata
-                    print("\n🔍 Searching Zotero with edited metadata...")
-                    action2, selected_item2, final_metadata = self.search_and_display_local_zotero(edited_metadata)
-                    
-                    if action2 == 'select' and selected_item2:
-                        result = self.handle_item_selected(pdf_path, final_metadata, selected_item2)
-                        # Note: if user wants to go back, handle_item_selected already moved the file appropriately
-                    elif action2 == 'create':
-                        # User wants to create new item after editing
-                        success = self.handle_create_new_item(pdf_path, final_metadata)
-                        if not success:
-                            print("❌ Item creation cancelled or failed; moved to manual review.")
-                            self.move_to_manual_review(pdf_path)
-                    elif action2 == 'back' or action2 == 'restart':
-                        print("⬅️  Going back...")
-                        self.move_to_manual_review(pdf_path)
-                    elif action2 == 'quit':
-                        print("🔚 Exiting current processing per user request")
-                        return
-                    else:
-                        # No action or skip
-                        self.move_to_manual_review(pdf_path)
-                else:
+            def _handle_zotero_action(action_value, selected_item_value, metadata_value):
+                """Handle a resolved Zotero action.
+
+                Returns:
+                    - 'handled': action completed for this paper
+                    - 'continue_selection': return to Zotero selection flow
+                    - 'exit': stop current paper processing
+                    - 'restart': restart current paper from beginning
+                """
+                action_value = (str(action_value).strip().lower() if action_value is not None else 'none')
+                self.logger.info(f"Zotero search action resolved to: {action_value}")
+
+                if action_value == 'select' and selected_item_value:
+                    # User selected an item - offer to attach PDF
+                    selection_outcome = self.handle_item_selected(pdf_path, metadata_value, selected_item_value)
+                    if selection_outcome == 'back_to_item_selection':
+                        return 'continue_selection'
+                    if selection_outcome == 'restart':
+                        return 'restart'
+                    if selection_outcome in ('quit_scan', 'quit_scan_manual_review'):
+                        return 'exit'
+                    return 'handled'
+                elif action_value == 'search':
+                    # User wants to search again - allow year editing by clearing confirmation flag
+                    if metadata_value.get('_year_confirmed'):
+                        metadata_value.pop('_year_confirmed', None)
+                    # Reset authors to full set if available, then recursive call
+                    if metadata_value.get('_all_authors'):
+                        metadata_value['authors'] = metadata_value['_all_authors'].copy()
+                    action2, selected_item2, metadata_value = self.search_and_display_local_zotero(
+                        metadata_value,
+                        force_prompt_year=True
+                    )
+                    action2_outcome = _handle_zotero_action(action2, selected_item2, metadata_value)
+                    if action2_outcome in ('continue_selection', 'handled'):
+                        return action2_outcome
+                    if action2_outcome == 'restart':
+                        return 'restart'
+                    return 'exit'
+                elif action_value == 'edit':
+                    # Edit metadata then search again
+                    print("\n✏️  Editing metadata...")
+                    edited_metadata = self.edit_metadata_interactively(metadata_value)
+
+                    if edited_metadata:
+                        # Re-run Zotero search with edited metadata
+                        print("\n🔍 Searching Zotero with edited metadata...")
+                        action2, selected_item2, final_metadata = self.search_and_display_local_zotero(edited_metadata)
+                        action2_outcome = _handle_zotero_action(action2, selected_item2, final_metadata)
+                        if action2_outcome in ('continue_selection', 'handled'):
+                            return action2_outcome
+                        if action2_outcome == 'restart':
+                            return 'restart'
+                        return 'exit'
+
                     # User cancelled editing
                     print("❌ Metadata editing cancelled")
                     self.move_to_manual_review(pdf_path)
-            elif action == 'create':
-                # Create new Zotero item with online library check
-                # Use updated_metadata which includes any edited authors
-                self.logger.info(
-                    f"Dispatching create flow for {pdf_path.name} "
-                    f"(title='{(updated_metadata or {}).get('title', '')[:80]}')"
-                )
-                success = self.handle_create_new_item(pdf_path, updated_metadata)
-                if not success:
-                    # User cancelled or error occurred; avoid silent "jump" to next scan.
-                    print("❌ Item creation cancelled or failed; moved to manual review.")
-                    self.move_to_manual_review(pdf_path)
-            elif action == 'skip':
-                # User wants to skip this document
-                self.move_to_skipped(pdf_path)
-            elif action == 'quit':
-                # User wants to quit current processing
-                print("🔚 Exiting current processing per user request")
-                return
-            else:  # action == 'none' or unknown
-                # No matches found - move to manual
+                    return 'handled'
+                elif action_value == 'create':
+                    # Create new Zotero item with online library check
+                    # Use metadata_value which includes any edited authors
+                    self.logger.info(
+                        f"Dispatching create flow for {pdf_path.name} "
+                        f"(title='{(metadata_value or {}).get('title', '')[:80]}')"
+                    )
+                    success = self.handle_create_new_item(pdf_path, metadata_value)
+                    if not success:
+                        # User cancelled or error occurred; avoid silent "jump" to next scan.
+                        print("❌ Item creation cancelled or failed; moved to manual review.")
+                        self.move_to_manual_review(pdf_path)
+                    return 'handled'
+                elif action_value == 'skip':
+                    # User wants to skip this document
+                    self.move_to_skipped(pdf_path)
+                    return 'handled'
+                elif action_value == 'quit':
+                    # User wants to quit current processing
+                    print("🔚 Exiting current processing per user request")
+                    return 'exit'
+                elif action_value == 'restart':
+                    # User requested full restart from within nested flow.
+                    print("🔄 Restarting from beginning...")
+                    return 'restart'
+
+                # action == 'none' or unknown
                 print("📝 Moving to manual review...")
                 self.move_to_manual_review(pdf_path)
-            
+                return 'handled'
+
+            # Step 4: Handle action from Zotero search
+            while True:
+                action_outcome = _handle_zotero_action(action, selected_item, updated_metadata)
+                if action_outcome == 'continue_selection':
+                    action, selected_item, updated_metadata = self.search_and_display_local_zotero(updated_metadata)
+                    continue
+                if action_outcome == 'restart':
+                    return 'RESTART'
+                if action_outcome == 'exit':
+                    return
+                break
         except Exception as e:
             self.logger.error(f"Processing error: {e}", exc_info=self.debug)
             self.move_to_failed(pdf_path)
@@ -8124,19 +8182,54 @@ class PaperProcessorDaemon:
         """
         while True:
             path = self._paper_queue.get()
-            self.logger.info("")
-            self.logger.info("=" * 60)
-            self.logger.info(f"Processing: {path.name}")
-            self.logger.info("=" * 60)
+            self._set_processing_active(True)
             try:
-                result = self.process_paper(path)
-                if result == 'RESTART':
-                    self._paper_queue.put(path)
-            except Exception as e:
-                self.logger.error(f"Error processing {path.name}: {e}")
-                print(f"Error processing {path.name}: {e}")
-            self.logger.info("-" * 60)
-            self.logger.info("Ready for next scan")
+                while True:
+                    self.logger.info("")
+                    self.logger.info("=" * 60)
+                    self.logger.info(f"Processing: {path.name}")
+                    self.logger.info("=" * 60)
+                    try:
+                        result = self.process_paper(path)
+                        if result == 'RESTART':
+                            # Restart should continue immediately with the same file,
+                            # not enqueue behind newly arrived scans.
+                            self.logger.info("Restart requested for current scan - reprocessing immediately")
+                            continue
+                    except Exception as e:
+                        self.logger.error(f"Error processing {path.name}: {e}")
+                        print(f"Error processing {path.name}: {e}")
+                    self.logger.info("-" * 60)
+                    self.logger.info("Ready for next scan")
+                    break
+            finally:
+                self._set_processing_active(False)
+                deferred_notice = self._consume_deferred_scan_notice()
+                if deferred_notice:
+                    self.logger.info(deferred_notice)
+
+    def _set_processing_active(self, active: bool) -> None:
+        """Track whether we're inside an active scan interaction."""
+        with self._queue_notice_lock:
+            self._processing_active = active
+
+    def _register_new_scan_notice(self, file_name: str) -> Optional[str]:
+        """Return immediate queue message, or defer while active interaction is running."""
+        with self._queue_notice_lock:
+            if self._processing_active:
+                self._deferred_scan_notices += 1
+                return None
+        return f"New scan queued: {file_name}"
+
+    def _consume_deferred_scan_notice(self) -> Optional[str]:
+        """Consume and reset deferred queue notices."""
+        with self._queue_notice_lock:
+            count = self._deferred_scan_notices
+            self._deferred_scan_notices = 0
+        if count <= 0:
+            return None
+        noun = "scan" if count == 1 else "scans"
+        return f"{count} new {noun} queued while finishing the current interaction"
     
     def _open_pdf_in_viewer(self, pdf_path: Path) -> bool:
         """Open PDF in default system viewer (non-blocking) and position window.
@@ -8164,6 +8257,7 @@ class PaperProcessorDaemon:
                         )
                         self._pdf_viewer_process = proc
                         self._pdf_viewer_path = pdf_path
+                        self._track_opened_pdf_path(pdf_path)
                         time.sleep(1.5)
                         return True
                     except FileNotFoundError:
@@ -8182,6 +8276,7 @@ class PaperProcessorDaemon:
                         )
                         self._pdf_viewer_process = proc
                         self._pdf_viewer_path = pdf_path
+                        self._track_opened_pdf_path(pdf_path)
                         time.sleep(1.5)
                         self.logger.info("PDF viewer opened via xdg-open")
                         return True
@@ -8230,6 +8325,7 @@ if ([Win32]::IsWindowVisible($terminalHwnd)) {{
                 self.logger.info(f"Opening PDF in viewer: {pdf_path}")
                 os.startfile(str(pdf_path))
                 self._pdf_viewer_path = pdf_path
+                self._track_opened_pdf_path(pdf_path)
                 
                 # Wait a moment for window to open, then position it
                 time.sleep(1.5)  # Slightly longer wait to ensure window is fully created
@@ -8243,6 +8339,136 @@ if ([Win32]::IsWindowVisible($terminalHwnd)) {{
         
         self.logger.warning("All methods to open PDF viewer failed")
         return False
+
+    def _track_opened_pdf_path(self, pdf_path: Path) -> None:
+        """Track a PDF path opened in viewer for end-of-paper cleanup."""
+        try:
+            normalized = Path(pdf_path)
+            if normalized not in self._opened_pdf_paths:
+                self._opened_pdf_paths.append(normalized)
+        except Exception:
+            # Keep tracking best-effort; viewer opening should not fail because of bookkeeping.
+            pass
+
+    def _send_sumatra_command(self, command_id: str, file_path: Optional[Path] = None) -> bool:
+        """Send a command to SumatraPDF and return True on success.
+
+        For per-document close we optionally activate/open a target file first and then
+        issue close for the current document.
+        """
+        cmd = (command_id or "").strip()
+        if not cmd:
+            return False
+
+        try:
+            ps_lines = [
+                "$ErrorActionPreference = 'Stop'",
+                "$sumatra = Get-Command SumatraPDF.exe -ErrorAction SilentlyContinue",
+                "if (-not $sumatra) { Write-Host 'NO_SUMATRA'; exit 2 }",
+                "$exe = $sumatra.Source",
+            ]
+
+            if file_path is not None:
+                open_target = str(file_path)
+                if sys.platform != 'win32':
+                    windows_path = self._to_windows_path(Path(file_path))
+                    if windows_path:
+                        open_target = windows_path
+                escaped_path = open_target.replace("'", "''")
+                ps_lines.extend([
+                    f"$targetFile = '{escaped_path}'",
+                    "& $exe -reuse-instance $targetFile | Out-Null",
+                    "Start-Sleep -Milliseconds 250",
+                ])
+
+            escaped_cmd = cmd.replace("'", "''")
+            ps_lines.extend([
+                f"$ddeCmd = '[{escaped_cmd}]'",
+                "& $exe -dde $ddeCmd | Out-Null",
+                "Write-Host 'SUCCESS'",
+            ])
+
+            ps_script = "; ".join(ps_lines)
+            result = subprocess.run(
+                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=6,
+                text=True,
+            )
+            if result.returncode == 0 and result.stdout and "SUCCESS" in result.stdout:
+                return True
+
+            if result.stdout:
+                self.logger.debug(f"Sumatra command stdout: {result.stdout.strip()}")
+            if result.stderr:
+                self.logger.debug(f"Sumatra command stderr: {result.stderr.strip()}")
+            return False
+        except Exception as e:
+            self.logger.debug(f"Failed to send Sumatra command '{cmd}': {e}")
+            return False
+
+    def _close_pdf_document(self, pdf_path: Path) -> bool:
+        """Close a specific PDF document in Sumatra by command, fallback to window close."""
+        target = Path(pdf_path)
+        self.logger.info(f"Closing PDF document in Sumatra: {target.name}")
+
+        if self._send_sumatra_command("CmdCloseCurrentDocument", target):
+            self.logger.info(f"Closed PDF document via Sumatra command: {target.name}")
+            return True
+
+        self.logger.debug(f"Sumatra command close failed for {target.name}; falling back to WM_CLOSE")
+        return self._close_pdf_document_via_window(target)
+
+    def _close_pdf_document_via_window(self, pdf_path: Path) -> bool:
+        """Fallback: close a PDF document window/tab by title match and WM_CLOSE."""
+        try:
+            if sys.platform != 'win32':
+                windows_path = self._to_windows_path(pdf_path)
+                if not windows_path:
+                    return False
+                filename = Path(windows_path).name
+            else:
+                filename = Path(pdf_path).name
+
+            ps_script = f'''
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {{
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+}}
+"@
+$filename = "{filename}"
+$WM_CLOSE = 0x0010
+$sumatraProcesses = Get-Process -Name "SumatraPDF" -ErrorAction SilentlyContinue | Where-Object {{
+    $_.MainWindowHandle -ne [IntPtr]::Zero
+}}
+$closed = $false
+foreach ($proc in $sumatraProcesses) {{
+    $title = $proc.MainWindowTitle
+    if ($title -like "*$filename*") {{
+        [Win32]::SendMessage($proc.MainWindowHandle, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+        $closed = $true
+        Start-Sleep -Milliseconds 250
+        break
+    }}
+}}
+if ($closed) {{ Write-Host "SUCCESS" }} else {{ Write-Host "NOT_FOUND" }}
+'''
+
+            result = subprocess.run(
+                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                text=True,
+            )
+            return bool(result.stdout and "SUCCESS" in result.stdout)
+        except Exception as e:
+            self.logger.debug(f"Fallback window close failed for {pdf_path}: {e}")
+            return False
     
     def _store_terminal_window_handle(self):
         """Store terminal window handle at startup for later use."""
@@ -8802,83 +9028,10 @@ public class ScreenInfo {{
         if not hasattr(self, '_pdf_viewer_path') or not self._pdf_viewer_path:
             return
         
-        previous_path = self._pdf_viewer_path
-        self.logger.info(f"Closing previous PDF file in viewer: {previous_path.name}")
-        
-        try:
-            if sys.platform != 'win32':
-                windows_path = self._to_windows_path(previous_path)
-                if not windows_path:
-                    return
-                filename = Path(windows_path).name
-            else:
-                filename = previous_path.name
-            
-            # PowerShell script to close specific file in Sumatra PDF
-            ps_script = f'''
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32 {{
-    [DllImport("user32.dll")]
-    public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-    [DllImport("user32.dll")]
-    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
-}}
-"@
-
-$filename = "{filename}"
-$WM_CLOSE = 0x0010
-
-# Find Sumatra PDF process with the specific file
-$sumatraProcesses = Get-Process -Name "SumatraPDF" -ErrorAction SilentlyContinue | Where-Object {{
-    $_.MainWindowHandle -ne [IntPtr]::Zero
-}}
-
-$closed = $false
-foreach ($proc in $sumatraProcesses) {{
-    $title = $proc.MainWindowTitle
-    # Check if this window has the filename in title
-    if ($title -like "*$filename*") {{
-        $hwnd = $proc.MainWindowHandle
-        Write-Host "Closing Sumatra PDF window: $title"
-        # Send WM_CLOSE to close just this file/tab
-        [Win32]::SendMessage($hwnd, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
-        $closed = $true
-        Start-Sleep -Milliseconds 300
-        break
-    }}
-}}
-
-# If not found by title, try closing the most recent Sumatra window
-if (!$closed -and $sumatraProcesses.Count -gt 0) {{
-    $proc = $sumatraProcesses | Sort-Object StartTime -Descending | Select-Object -First 1
-    $hwnd = $proc.MainWindowHandle
-    Write-Host "Closing most recent Sumatra PDF window: $($proc.MainWindowTitle)"
-    [Win32]::SendMessage($hwnd, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
-    $closed = $true
-}}
-
-if ($closed) {{
-    Write-Host "SUCCESS"
-}} else {{
-    Write-Host "No Sumatra PDF window found to close"
-}}
-'''
-            
-            result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
-            
-            if result.stdout and "SUCCESS" in result.stdout:
-                self.logger.info("Previous PDF file closed successfully")
-                # Wait a moment for file to close
-                time.sleep(0.3)
-            else:
-                if result.stdout:
-                    self.logger.debug(f"Close previous PDF output: {result.stdout.strip()}")
-                    
-        except Exception as e:
-            self.logger.debug(f"Could not close previous PDF file: {e}")
+        previous_path = Path(self._pdf_viewer_path)
+        if self._close_pdf_document(previous_path):
+            self.logger.info("Previous PDF file closed successfully")
+            time.sleep(0.3)
     
     def _return_focus_to_terminal(self):
         """Return focus to terminal window after PDF viewer opens."""
@@ -8968,33 +9121,22 @@ if ($hwnd -ne [IntPtr]::Zero) {{
     def _close_pdf_viewer(self):
         """Close PDF viewer window when processing completes."""
         try:
-            if not hasattr(self, '_pdf_viewer_path') or not self._pdf_viewer_path:
-                return
-            
-            pdf_path = self._pdf_viewer_path
-            
-            if sys.platform != 'win32':
-                # For WSL, close Windows viewer using PowerShell
-                windows_path = self._to_windows_path(pdf_path)
-                if not windows_path:
-                    return
-                
-                filename = Path(windows_path).name
-                ps_script = f'''$filename = "{filename}"; $processes = Get-Process | Where-Object {{ $_.MainWindowTitle -like "*$filename*" -or ($_.MainWindowTitle -like "*PDF*" -and ($_.Path -like "*Acrobat*" -or $_.Path -like "*Sumatra*" -or $_.Path -like "*Edge*")) }}; foreach ($proc in $processes) {{ if ($proc.MainWindowHandle -ne [IntPtr]::Zero) {{ $proc.CloseMainWindow(); Start-Sleep -Milliseconds 500; if (!$proc.HasExited) {{ $proc.Kill() }} }} }}'''
-                subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-            else:
-                # Windows: close using PowerShell
-                filename = pdf_path.name
-                ps_script = f'''$filename = "{filename}"; $processes = Get-Process | Where-Object {{ $_.MainWindowTitle -like "*$filename*" -or ($_.MainWindowTitle -like "*PDF*" -and ($_.Path -like "*Acrobat*" -or $_.Path -like "*Sumatra*" -or $_.Path -like "*Edge*")) }}; foreach ($proc in $processes) {{ if ($proc.MainWindowHandle -ne [IntPtr]::Zero) {{ $proc.CloseMainWindow(); Start-Sleep -Milliseconds 500; if (!$proc.HasExited) {{ $proc.Kill() }} }} }}'''
-                subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-            
+            targets: List[Path] = []
+            if self._opened_pdf_paths:
+                targets.extend([Path(p) for p in self._opened_pdf_paths])
+            elif hasattr(self, '_pdf_viewer_path') and self._pdf_viewer_path:
+                targets.append(Path(self._pdf_viewer_path))
+
+            for target in targets:
+                closed = self._close_pdf_document(target)
+                if not closed:
+                    self.logger.warning(f"Could not close PDF document: {target.name}")
+
             # Clear tracking
             if hasattr(self, '_pdf_viewer_process'):
                 delattr(self, '_pdf_viewer_process')
-            if hasattr(self, '_pdf_viewer_path'):
-                delattr(self, '_pdf_viewer_path')
+            self._pdf_viewer_path = None
+            self._opened_pdf_paths = []
                 
         except Exception as e:
             self.logger.debug(f"Could not close PDF viewer: {e}")
@@ -10668,11 +10810,22 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         # Let user select
         while True:
             try:
-                print(f"Select a result (1-{len(all_results)}) or 'n' for none:")
+                print(f"Select a result (1-{len(all_results)})")
+                print("  'n' = Use manual/extracted metadata (skip online metadata)")
+                print("  'w' = The online search results are all wrong")
                 choice = input("Enter your choice: ").strip().lower()
                 
                 if choice == 'n' or choice == 'none':
                     print("⏭️  Skipping online library results, will use manual/extracted metadata")
+                    return None
+
+                if choice in {'w', 'wrong'}:
+                    # Explicitly discard any online payload for this attempt so later steps
+                    # cannot accidentally merge online fields or tags.
+                    all_results.clear()
+                    best_candidate = None
+                    plan = None
+                    print("⏭️  Marked online results as wrong; continuing with manual/extracted metadata")
                     return None
                 
                 try:
@@ -10684,7 +10837,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     else:
                         print(f"⚠️  Please enter a number between 1 and {len(all_results)}")
                 except ValueError:
-                    print("⚠️  Please enter a number or 'n' for none")
+                    print("⚠️  Please enter a number, 'n' to skip, or 'w' for all wrong")
                     
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Cancelled")
@@ -11284,6 +11437,28 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         print("\n" + "="*60)
         print(Colors.colorize("📄 CREATE NEW ZOTERO ITEM", ColorScheme.PAGE_TITLE))
         print("="*60)
+
+        def _safe_add_paper(metadata_payload: dict, attach_target: str = None):
+            """Call zotero add_paper defensively and normalize result shape."""
+            processor = getattr(self, 'zotero_processor', None)
+            if not processor:
+                return {
+                    'success': False,
+                    'error': 'Zotero processor is not initialized'
+                }
+            add_fn = getattr(processor, 'add_paper', None)
+            if not callable(add_fn):
+                return {
+                    'success': False,
+                    'error': 'Zotero processor add_paper is not available'
+                }
+            result = add_fn(metadata_payload, attach_target)
+            if not isinstance(result, dict):
+                return {
+                    'success': False,
+                    'error': f"Unexpected add_paper response type: {type(result).__name__}"
+                }
+            return result
         
         # Step 1: Quick manual entry
         print(Colors.colorize("\n📝 Step 1: Quick Manual Entry", ColorScheme.PAGE_TITLE))
@@ -11400,8 +11575,8 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         if attach_now == 'n':
             try:
                 print("📖 Creating Zotero item without attachment...")
-                zotero_result = self.zotero_processor.add_paper(final_metadata, None)
-                if zotero_result['success']:
+                zotero_result = _safe_add_paper(final_metadata, None)
+                if zotero_result.get('success'):
                     print(f"✅ Created Zotero item (key: {zotero_result.get('item_key', 'N/A')})")
                     print("⚠️  Item created without attachment (skipped by user)")
                     
@@ -11457,6 +11632,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             processed_pdf,
             preprocessing_state
         )
+        final_state = final_state if isinstance(final_state, dict) else {}
 
         if final_pdf is None:
             # User cancelled the preview flow.
@@ -11484,8 +11660,8 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             try:
                 windows_path = self._to_windows_path(reuse_path)
                 print("📖 Creating Zotero item...")
-                zotero_result = self.zotero_processor.add_paper(final_metadata, windows_path)
-                if zotero_result['success']:
+                zotero_result = _safe_add_paper(final_metadata, windows_path)
+                if zotero_result.get('success'):
                     print(f"✅ Created Zotero item (key: {zotero_result.get('item_key', 'N/A')})")
                     action = zotero_result.get('action', 'unknown')
                     if action == 'duplicate_skipped':
@@ -11603,9 +11779,9 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         try:
             print("📖 Creating Zotero item...")
             attach_target = self._to_windows_path(final_path) if copied_ok else None
-            zotero_result = self.zotero_processor.add_paper(final_metadata, attach_target)
+            zotero_result = _safe_add_paper(final_metadata, attach_target)
             
-            if zotero_result['success']:
+            if zotero_result.get('success'):
                 print(f"✅ Created Zotero item (key: {zotero_result.get('item_key', 'N/A')})")
                 action = zotero_result.get('action', 'unknown')
                 item_key = zotero_result.get('item_key')
@@ -11755,6 +11931,14 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             pdf_path: Path to scanned PDF
             metadata: Extracted metadata
             selected_item: The Zotero item dict that was selected
+        
+        Returns:
+            One of:
+            - 'back_to_item_selection': user requested back to selection list
+            - 'quit_scan': user quit selected-item flow
+            - 'quit_scan_manual_review': user quit and file moved to manual review
+            - 'processed': PDF processing path completed/started
+            - 'error': unexpected navigation result
         """
         from shared_tools.ui.navigation import NavigationEngine, ItemSelectedContext
         from handle_item_selected_pages import create_all_pages
@@ -11825,11 +12009,12 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         # Handle navigation results
         if result.type == result.Type.RETURN_TO_CALLER:
-            return
+            return 'back_to_item_selection'
         elif result.type == result.Type.QUIT_SCAN:
             if result.move_to_manual:
                 self.move_to_manual_review(pdf_path)
-            return
+                return 'quit_scan_manual_review'
+            return 'quit_scan'
         elif result.type == result.Type.PROCESS_PDF:
             # Process the PDF
             target_filename = ctx_dict.get('target_filename')
@@ -11873,11 +12058,11 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             self._process_selected_item(pdf_path, selected_item, target_filename, metadata_to_use, 
                                       preprocessed_pdf=final_processed_pdf, 
                                       preprocessing_state=preprocessing_state_from_context)
-            return
+            return 'processed'
         
         # Should not reach here
         print("⚠️  Unexpected navigation result")
-        return
+        return 'error'
 
     def _auto_enrich_selected_item(self, extracted_metadata: dict, zotero_item: dict) -> dict | None:
         """Evaluate online enrichment for an existing Zotero item.
@@ -12274,7 +12459,6 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     break
                 
                 if conflict_action == 'keep_both':
-                    from pathlib import Path
                     stem = Path(target_filename).stem
                     suffix = Path(target_filename).suffix or ".pdf"
                     
@@ -13048,7 +13232,9 @@ class PaperFileHandler(FileSystemEventHandler):
         
         # Enqueue for main-thread processing (avoids concurrent interactive prompts)
         self.daemon._paper_queue.put(file_path)
-        self.daemon.logger.info(f"New scan queued: {file_path.name}")
+        queue_notice = self.daemon._register_new_scan_notice(file_path.name)
+        if queue_notice:
+            self.daemon.logger.info(queue_notice)
 
 
 def normalize_path_for_wsl(path_str: str) -> str:

@@ -37,6 +37,54 @@ class AuthorExtractor:
         rf'{WORD}[^\S\r\n]+[A-Z]\.[^\S\r\n]*{WORD}',   # First M. Last
     ]
 
+    @classmethod
+    def _extract_names_from_text(cls, text: str) -> List[str]:
+        """Run NAME_PATTERNS + and_pattern on text and return cleaned unique author list."""
+        if not text or not text.strip():
+            return []
+        authors = set()
+        for pattern in cls.NAME_PATTERNS:
+            matches = re.findall(pattern, text, re.UNICODE)
+            for match in matches:
+                if match and len(match.strip()) > 3:
+                    authors.add(match.strip())
+        and_pattern = rf'({cls.WORD}(?:[^\S\r\n]+{cls.WORD})*)[^\S\r\n]+(?:and|&)[^\S\r\n]+({cls.WORD}(?:[^\S\r\n]+{cls.WORD})*)'
+        for match in re.findall(and_pattern, text, re.UNICODE | re.IGNORECASE):
+            if match[0] and match[1]:
+                authors.add(match[0].strip())
+                authors.add(match[1].strip())
+        cleaned_authors = []
+        for author in authors:
+            author = re.sub(r'\s+', ' ', author.strip())
+            author = re.sub(r'^(By|Authors?|Author\(s\))\s*:?\s*', '', author, flags=re.IGNORECASE).strip()
+            if len(author) < 4:
+                continue
+            author_words_lower = set(word.lower().rstrip(',') for word in author.split())
+            if author_words_lower & cls.NON_AUTHOR_WORDS:
+                continue
+            author_lower = author.lower()
+            if re.search(r',\s*(norway|california|united|kingdom|poland|angeles)', author_lower):
+                continue
+            if re.search(r'\b(edited|series|editor|perspectives?|society|societies)\b', author_lower):
+                continue
+            if re.match(r'^(the|a|an|first|new|global|international|comparative)\s+', author_lower):
+                continue
+            words = author.split()
+            if len(words) > 4:
+                author = ' '.join(words[:2])
+                words = author.split()
+            if len(words) >= 2 and len(words[-1]) < 2:
+                continue
+            if len(author.split()) >= 2 and len(author) > 3:
+                cleaned_authors.append(author)
+        seen = set()
+        unique = []
+        for author in cleaned_authors:
+            if author.lower() not in seen:
+                seen.add(author.lower())
+                unique.append(author)
+        return unique
+
     # Words that indicate non-author entities (institutions, places, common phrases)
     NON_AUTHOR_WORDS: Set[str] = {
         'foundation', 'grant', 'national', 'science', 'association', 'stable', 'statistics',
@@ -179,82 +227,23 @@ class AuthorExtractor:
 
             return unique_authors
 
-        for pattern in cls.NAME_PATTERNS:
-            matches = re.findall(pattern, text, re.UNICODE)
-            for match in matches:
-                if match and len(match.strip()) > 3:
-                    authors.add(match.strip())
+        # Header zone: body text starts where there are >10 consecutive non-empty lines
+        lines = [ln.strip() for ln in text.splitlines()]
+        body_start = None
+        i = 0
+        while i < len(lines):
+            run = 0
+            while i + run < len(lines) and lines[i + run]:
+                run += 1
+            if run > 10:
+                body_start = i
+                break
+            i += run + 1
+        if body_start is not None and body_start > 0:
+            header_text = "\n".join(lines[:body_start])
+            if header_text.strip():
+                header_authors = cls._extract_names_from_text(header_text)
+                if header_authors:
+                    return header_authors
 
-        # "and" / "&" separated names
-        and_pattern = rf'({cls.WORD}(?:[^\S\r\n]+{cls.WORD})*)[^\S\r\n]+(?:and|&)[^\S\r\n]+({cls.WORD}(?:[^\S\r\n]+{cls.WORD})*)'
-        for match in re.findall(and_pattern, text, re.UNICODE | re.IGNORECASE):
-            if match[0] and match[1]:
-                authors.add(match[0].strip())
-                authors.add(match[1].strip())
-
-        cleaned_authors = []
-        for author in authors:
-            author = re.sub(r'\s+', ' ', author.strip())
-            author = re.sub(r'^(By|Authors?|Author\(s\))\s*:?\s*', '', author, flags=re.IGNORECASE).strip()
-
-            if len(author) < 4:
-                continue
-
-            author_words_lower = set(word.lower().rstrip(',') for word in author.split())
-            has_non_author_word = bool(author_words_lower & cls.NON_AUTHOR_WORDS)
-
-            author_lower = author.lower()
-            if re.search(r',\s*(norway|california|united|kingdom|poland|angeles)', author_lower):
-                continue
-            if re.search(r'\b(edited|series|editor|perspectives?|society|societies)\b', author_lower):
-                continue
-            if re.match(r'^(the|a|an|first|new|global|international|comparative)\s+', author_lower):
-                continue
-
-            words = author.split()
-            # If OCR glued extra words, keep only first two to avoid rejecting valid names
-            if len(words) > 4:
-                author = ' '.join(words[:2])
-                words = author.split()
-            if len(words) >= 2:
-                last_word = words[-1]
-                if len(last_word) < 2:
-                    continue
-
-            if has_non_author_word:
-                continue
-
-            if len(author.split()) >= 2 and len(author) > 3:
-                cleaned_authors.append(author)
-
-        seen = set()
-        unique_authors = []
-        for author in cleaned_authors:
-            if author.lower() not in seen:
-                seen.add(author.lower())
-                unique_authors.append(author)
-
-        # #region agent log
-        try:
-            import os, json, time as _time
-            log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
-            with open(log_path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps({
-                    "sessionId": "debug-session",
-                    "runId": "author-extractor",
-                    "hypothesisId": "A3",
-                    "location": "author_extractor.py:extract_authors_simple",
-                    "message": "Author simple extraction",
-                    "data": {
-                        "text_length": len(text) if text else 0,
-                        "raw_candidates": len(authors),
-                        "unique_authors": unique_authors[:10],
-                        "unique_count": len(unique_authors)
-                    },
-                    "timestamp": int(_time.time() * 1000)
-                }) + '\n')
-        except Exception:
-            pass
-        # #endregion
-
-        return unique_authors
+        return cls._extract_names_from_text(text)
