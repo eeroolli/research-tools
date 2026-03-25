@@ -135,7 +135,7 @@ def test_process_paper_reenters_selection_after_item_back(
     _write_dummy_pdf(pdf_path)
 
     # Keep process_paper focused on control flow under test.
-    daemon._close_previous_pdf_file = lambda: None
+    daemon._close_sumatra_all_tabs = lambda: True
     daemon._open_pdf_in_viewer = lambda *_args, **_kwargs: True
     daemon._return_focus_to_terminal = lambda: None
     daemon._close_pdf_viewer = lambda: None
@@ -188,39 +188,54 @@ def test_process_paper_reenters_selection_after_item_back(
     assert moved_manual["count"] == 0
 
 
-def test_close_pdf_viewer_closes_all_tracked_documents(daemon: PaperProcessorDaemon) -> None:
-    original_pdf = Path("C:/tmp/original.pdf")
-    preprocessed_pdf = Path("C:/tmp/preprocessed.pdf")
-    daemon._opened_pdf_paths = [original_pdf, preprocessed_pdf]
-    daemon._pdf_viewer_path = preprocessed_pdf
-
-    closed_docs: list[Path] = []
-    daemon._close_pdf_document = lambda p: (closed_docs.append(Path(p)) or True)
-
-    daemon._close_pdf_viewer()
-
-    assert closed_docs == [original_pdf, preprocessed_pdf]
-    assert daemon._opened_pdf_paths == []
-    assert daemon._pdf_viewer_path is None
-
-
-def test_close_pdf_document_uses_fallback_when_sumatra_command_fails(
+def test_close_pdf_viewer_calls_close_sumatra_all_tabs_on_windows(
     daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    target_pdf = Path("C:/tmp/example.pdf")
+    calls: list[bool] = []
 
-    monkeypatch.setattr(daemon, "_send_sumatra_command", lambda *_args, **_kwargs: False)
-
-    fallback_calls: list[Path] = []
-
-    def _fallback(path: Path) -> bool:
-        fallback_calls.append(Path(path))
+    def _close_all() -> bool:
+        calls.append(True)
         return True
 
-    monkeypatch.setattr(daemon, "_close_pdf_document_via_window", _fallback)
+    monkeypatch.setattr(daemon, "_close_sumatra_all_tabs", _close_all)
+    monkeypatch.setattr("scripts.paper_processor_daemon.sys.platform", "win32")
+    daemon._close_pdf_viewer()
+    assert calls == [True]
 
-    closed = daemon._close_pdf_document(target_pdf)
 
-    assert closed is True
-    assert fallback_calls == [target_pdf]
+def test_close_pdf_viewer_skips_sumatra_on_non_windows(
+    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[bool] = []
+
+    def _close_all() -> bool:
+        calls.append(True)
+        return True
+
+    monkeypatch.setattr(daemon, "_close_sumatra_all_tabs", _close_all)
+    monkeypatch.setattr("scripts.paper_processor_daemon.sys.platform", "linux")
+    daemon._close_pdf_viewer()
+    assert calls == []
+
+
+def test_close_sumatra_all_tabs_sends_cmd_close_all_tabs(
+    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[tuple[str, object]] = []
+
+    def _send(cmd: str, path) -> bool:
+        sent.append((cmd, path))
+        return True
+
+    monkeypatch.setattr(daemon, "_send_sumatra_command", _send)
+    monkeypatch.setattr("scripts.paper_processor_daemon.sys.platform", "win32")
+    assert daemon._close_sumatra_all_tabs() is True
+    assert sent == [("CmdCloseAllTabs", None)]
+
+
+def test_close_sumatra_all_tabs_noop_off_windows(
+    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scripts.paper_processor_daemon.sys.platform", "darwin")
+    assert daemon._close_sumatra_all_tabs() is False
 

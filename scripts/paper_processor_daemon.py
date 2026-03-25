@@ -141,8 +141,6 @@ class PaperProcessorDaemon:
         
         # Window management
         self._terminal_window_handle = None  # Store terminal window handle for positioning
-        self._pdf_viewer_path = None
-        self._opened_pdf_paths: List[Path] = []
         
         # Initialize local Zotero search (read-only) - this is fast
         try:
@@ -4722,8 +4720,9 @@ class PaperProcessorDaemon:
             'RESTART' when the user requested restart from beginning; the caller
             should re-queue the same path and run the next item.
         """
-        # Track documents opened for this paper so we can close them precisely in finally.
-        self._opened_pdf_paths = []
+        # Clear any leftover Sumatra tabs from a prior run (Windows).
+        if sys.platform == 'win32':
+            self._close_sumatra_all_tabs()
 
         # Check if file exists before processing
         if not pdf_path.exists():
@@ -4731,9 +4730,6 @@ class PaperProcessorDaemon:
             return
         
         self.logger.info(f"New scan: {pdf_path.name}")
-        
-        # Close previous PDF file in viewer before opening new one
-        self._close_previous_pdf_file()
         
         # Open PDF in default viewer (non-blocking)
         self._open_pdf_in_viewer(pdf_path)
@@ -8257,8 +8253,6 @@ class PaperProcessorDaemon:
                             stderr=subprocess.DEVNULL,
                         )
                         self._pdf_viewer_process = proc
-                        self._pdf_viewer_path = pdf_path
-                        self._track_opened_pdf_path(pdf_path)
                         time.sleep(1.5)
                         return True
                     except FileNotFoundError:
@@ -8276,8 +8270,6 @@ class PaperProcessorDaemon:
                             stderr=subprocess.DEVNULL,
                         )
                         self._pdf_viewer_process = proc
-                        self._pdf_viewer_path = pdf_path
-                        self._track_opened_pdf_path(pdf_path)
                         time.sleep(1.5)
                         self.logger.info("PDF viewer opened via xdg-open")
                         return True
@@ -8325,8 +8317,6 @@ if ([Win32]::IsWindowVisible($terminalHwnd)) {{
                 # Windows: use startfile (non-blocking)
                 self.logger.info(f"Opening PDF in viewer: {pdf_path}")
                 os.startfile(str(pdf_path))
-                self._pdf_viewer_path = pdf_path
-                self._track_opened_pdf_path(pdf_path)
                 
                 # Wait a moment for window to open, then position it
                 time.sleep(1.5)  # Slightly longer wait to ensure window is fully created
@@ -8341,21 +8331,10 @@ if ([Win32]::IsWindowVisible($terminalHwnd)) {{
         self.logger.warning("All methods to open PDF viewer failed")
         return False
 
-    def _track_opened_pdf_path(self, pdf_path: Path) -> None:
-        """Track a PDF path opened in viewer for end-of-paper cleanup."""
-        try:
-            normalized = Path(pdf_path)
-            if normalized not in self._opened_pdf_paths:
-                self._opened_pdf_paths.append(normalized)
-        except Exception:
-            # Keep tracking best-effort; viewer opening should not fail because of bookkeeping.
-            pass
-
     def _send_sumatra_command(self, command_id: str, file_path: Optional[Path] = None) -> bool:
         """Send a command to SumatraPDF and return True on success.
 
-        For per-document close we optionally activate/open a target file first and then
-        issue close for the current document.
+        If file_path is set, opens that file with -reuse-instance before sending the DDE command.
         """
         cmd = (command_id or "").strip()
         if not cmd:
@@ -8409,68 +8388,16 @@ if ([Win32]::IsWindowVisible($terminalHwnd)) {{
             self.logger.debug(f"Failed to send Sumatra command '{cmd}': {e}")
             return False
 
-    def _close_pdf_document(self, pdf_path: Path) -> bool:
-        """Close a specific PDF document in Sumatra by command, fallback to window close."""
-        target = Path(pdf_path)
-        self.logger.info(f"Closing PDF document in Sumatra: {target.name}")
-
-        if self._send_sumatra_command("CmdCloseCurrentDocument", target):
-            self.logger.info(f"Closed PDF document via Sumatra command: {target.name}")
-            return True
-
-        self.logger.debug(f"Sumatra command close failed for {target.name}; falling back to WM_CLOSE")
-        return self._close_pdf_document_via_window(target)
-
-    def _close_pdf_document_via_window(self, pdf_path: Path) -> bool:
-        """Fallback: close a PDF document window/tab by title match and WM_CLOSE."""
-        try:
-            if sys.platform != 'win32':
-                windows_path = self._to_windows_path(pdf_path)
-                if not windows_path:
-                    return False
-                filename = Path(windows_path).name
-            else:
-                filename = Path(pdf_path).name
-
-            ps_script = f'''
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32 {{
-    [DllImport("user32.dll")]
-    public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-}}
-"@
-$filename = "{filename}"
-$WM_CLOSE = 0x0010
-$sumatraProcesses = Get-Process -Name "SumatraPDF" -ErrorAction SilentlyContinue | Where-Object {{
-    $_.MainWindowHandle -ne [IntPtr]::Zero
-}}
-$closed = $false
-foreach ($proc in $sumatraProcesses) {{
-    $title = $proc.MainWindowTitle
-    if ($title -like "*$filename*") {{
-        [Win32]::SendMessage($proc.MainWindowHandle, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
-        $closed = $true
-        Start-Sleep -Milliseconds 250
-        break
-    }}
-}}
-if ($closed) {{ Write-Host "SUCCESS" }} else {{ Write-Host "NOT_FOUND" }}
-'''
-
-            result = subprocess.run(
-                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=5,
-                text=True,
-            )
-            return bool(result.stdout and "SUCCESS" in result.stdout)
-        except Exception as e:
-            self.logger.debug(f"Fallback window close failed for {pdf_path}: {e}")
+    def _close_sumatra_all_tabs(self) -> bool:
+        """Close all tabs in SumatraPDF (Windows). Requires Sumatra 3.6+."""
+        if sys.platform != 'win32':
             return False
-    
+        if self._send_sumatra_command("CmdCloseAllTabs", None):
+            self.logger.info("Closed all tabs in SumatraPDF")
+            return True
+        self.logger.debug("CmdCloseAllTabs failed (Sumatra not running, old version, or no window)")
+        return False
+
     def _store_terminal_window_handle(self):
         """Store terminal window handle at startup for later use."""
         if sys.platform != 'win32':
@@ -9021,19 +8948,6 @@ public class ScreenInfo {{
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
     
-    def _close_previous_pdf_file(self):
-        """Close previous PDF file in Sumatra PDF before opening new one.
-        
-        This closes just the file (not the entire viewer) so only one file is open at a time.
-        """
-        if not hasattr(self, '_pdf_viewer_path') or not self._pdf_viewer_path:
-            return
-        
-        previous_path = Path(self._pdf_viewer_path)
-        if self._close_pdf_document(previous_path):
-            self.logger.info("Previous PDF file closed successfully")
-            time.sleep(0.3)
-    
     def _return_focus_to_terminal(self):
         """Return focus to terminal window after PDF viewer opens."""
         self.logger.info("Returning focus to terminal window...")
@@ -9120,25 +9034,12 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             self.logger.debug(f"Could not return focus to terminal: {e}")
     
     def _close_pdf_viewer(self):
-        """Close PDF viewer window when processing completes."""
+        """Close all Sumatra tabs when processing completes (Windows); clear non-Windows viewer handle."""
         try:
-            targets: List[Path] = []
-            if self._opened_pdf_paths:
-                targets.extend([Path(p) for p in self._opened_pdf_paths])
-            elif hasattr(self, '_pdf_viewer_path') and self._pdf_viewer_path:
-                targets.append(Path(self._pdf_viewer_path))
-
-            for target in targets:
-                closed = self._close_pdf_document(target)
-                if not closed:
-                    self.logger.warning(f"Could not close PDF document: {target.name}")
-
-            # Clear tracking
+            if sys.platform == 'win32':
+                self._close_sumatra_all_tabs()
             if hasattr(self, '_pdf_viewer_process'):
                 delattr(self, '_pdf_viewer_process')
-            self._pdf_viewer_path = None
-            self._opened_pdf_paths = []
-                
         except Exception as e:
             self.logger.debug(f"Could not close PDF viewer: {e}")
     

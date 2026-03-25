@@ -925,16 +925,17 @@ class ZoteroPaperProcessor:
             windows_path = self._convert_wsl_to_windows_path(path_str)
             
             filename = ntpath.basename(windows_path)
-            title = filename.rsplit('.', 1)[0] if '.' in filename else filename
-            
+            # Match attach_pdf(): use full basename including extension so Zotero shows the PDF icon.
+            attach_title = filename or 'PDF'
+
             # Sanitize attachment title to prevent encoding errors
-            title = self._sanitize_unicode(title)
+            attach_title = self._sanitize_unicode(attach_title)
 
             # Create attachment item with Windows path
             attachment = {
                 'itemType': 'attachment',
                 'linkMode': 'linked_file',
-                'title': title,
+                'title': attach_title,
                 'path': windows_path,
                 'parentItem': item_key
             }
