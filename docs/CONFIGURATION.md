@@ -112,6 +112,24 @@ Processing configuration.
 - `tesseract_path`: Path to Tesseract OCR executable (optional)
 - Other processing settings
 
+### [TEXT_IGNORE]
+
+Configurable ignore patterns for recurring stamps/headers that should **never** be treated as metadata.
+
+- **Goal**: remove known “stamp” lines (name/phone/URL blocks, institutional footers, etc.) from extracted PDF text *before* regex extraction, GROBID structured-page pre-processing, and Ollama prompts.
+- **Format**: one regex per line in a ConfigParser multiline value (continuation lines must be indented).
+- **Safety**: prefer patterns that match a single line (use `(?m)^...$`) rather than large multi-line blocks.
+
+Example:
+
+```ini
+[TEXT_IGNORE]
+ignore_regex =
+    (?m)^\s*eero\s+olli\b.*$
+    (?m)^\s*\+?47\b.*9577.*0064.*$
+    (?m)^\s*https?://(?:www\.)?eero\.no\b.*$
+```
+
 ## Distributed Setup Configuration
 
 For distributed setup (blacktower ↔ P1):

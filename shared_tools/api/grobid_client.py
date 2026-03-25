@@ -16,6 +16,7 @@ import os
 import importlib
 
 from shared_tools.utils.path_utils import normalize_path_for_wsl
+from shared_tools.utils.text_ignore import filter_candidates, sanitize_text
 
 
 class GrobidClient:
@@ -92,7 +93,7 @@ class GrobidClient:
                 import pdfplumber
                 with pdfplumber.open(pdf_path) as pdf:
                     if len(pdf.pages) > 0:
-                        first_page_text = pdf.pages[0].extract_text()
+                        first_page_text = sanitize_text(pdf.pages[0].extract_text() or "")
                         if first_page_text:
                             # Try structured extraction
                             structured_metadata = self._extract_structured_repository_metadata(first_page_text)
@@ -171,6 +172,8 @@ class GrobidClient:
             
             # Extract metadata
             metadata = self._parse_grobid_xml(root)
+            if metadata and metadata.get("authors"):
+                metadata["authors"] = filter_candidates(metadata["authors"])
             # #region agent log
             import os, json, time
             log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
@@ -226,6 +229,7 @@ class GrobidClient:
                             root2 = ET.fromstring(resp2.text)
                             metadata2 = self._parse_grobid_xml(root2)
                             if metadata2 and metadata2.get('authors'):
+                                metadata2['authors'] = filter_candidates(metadata2['authors'])
                                 metadata2['extraction_method'] = 'grobid'
                                 metadata2['extraction_note'] = 'extracted from pages 1-4'
                                 self.logger.info(f"GROBID retry succeeded: {len(metadata2.get('authors', []))} authors from first 4 pages")

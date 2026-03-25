@@ -9,6 +9,8 @@ institution/place/title-like phrases to reduce false positives.
 import re
 from typing import List, Set
 
+from shared_tools.utils.text_ignore import filter_candidates, sanitize_text
+
 
 class AuthorExtractor:
     """Regex-based author extraction helpers."""
@@ -103,6 +105,7 @@ class AuthorExtractor:
     @classmethod
     def extract_authors_with_regex(cls, text: str) -> List[str]:
         """Extract authors using explicit author/name patterns."""
+        text = sanitize_text(text or "")
         authors = set()
 
         # Try each pattern
@@ -162,11 +165,12 @@ class AuthorExtractor:
             pass
         # #endregion
 
-        return unique_authors
+        return filter_candidates(unique_authors)
 
     @classmethod
     def extract_authors_simple(cls, text: str) -> List[str]:
         """Simple regex extraction focusing on common academic patterns."""
+        text = sanitize_text(text or "")
         authors = set()
 
         # Special-case labeled authors: capture after "Author(s):" up to newline
@@ -225,7 +229,7 @@ class AuthorExtractor:
                 pass
             # #endregion
 
-            return unique_authors
+            return filter_candidates(unique_authors)
 
         # Header zone: body text starts where there are >10 consecutive non-empty lines
         lines = [ln.strip() for ln in text.splitlines()]
@@ -244,6 +248,6 @@ class AuthorExtractor:
             if header_text.strip():
                 header_authors = cls._extract_names_from_text(header_text)
                 if header_authors:
-                    return header_authors
+                    return filter_candidates(header_authors)
 
-        return cls._extract_names_from_text(text)
+        return filter_candidates(cls._extract_names_from_text(text))

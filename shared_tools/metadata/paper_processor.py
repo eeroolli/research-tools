@@ -35,6 +35,7 @@ from shared_tools.metadata.jstor_handler import JSTORHandler
 from shared_tools.utils.author_validator import AuthorValidator
 from shared_tools.utils.journal_validator import JournalValidator
 from shared_tools.utils.author_filter import AuthorFilter
+from shared_tools.utils.text_ignore import sanitize_text
 
 
 class PaperMetadataProcessor:
@@ -414,7 +415,7 @@ class PaperMetadataProcessor:
             import pdfplumber
             with pdfplumber.open(pdf_path) as pdf:
                 if len(pdf.pages) > page_offset:
-                    first_page_text = pdf.pages[page_offset].extract_text() or ""
+                    first_page_text = sanitize_text(pdf.pages[page_offset].extract_text() or "")
                     if first_page_text:
                         regex_authors = AuthorExtractor.extract_authors_simple(first_page_text)
                         # #region agent log
@@ -598,7 +599,7 @@ class PaperMetadataProcessor:
             import pdfplumber
             with pdfplumber.open(pdf_path) as pdf:
                 if len(pdf.pages) > page_offset:
-                    text = pdf.pages[page_offset].extract_text()
+                    text = sanitize_text(pdf.pages[page_offset].extract_text() or "")
                 else:
                     text = ""
             
@@ -699,7 +700,7 @@ class PaperMetadataProcessor:
             with pdfplumber.open(pdf_path) as pdf:
                 # Extract page at offset for regex
                 if len(pdf.pages) > page_offset:
-                    text_page1 = pdf.pages[page_offset].extract_text() or ""
+                    text_page1 = sanitize_text(pdf.pages[page_offset].extract_text() or "")
                 else:
                     text_page1 = ""
             
@@ -764,7 +765,7 @@ class PaperMetadataProcessor:
                     
                     # First page at offset: extract everything
                     if len(pdf.pages) > page_offset:
-                        first_page_text = pdf.pages[page_offset].extract_text()
+                        first_page_text = sanitize_text(pdf.pages[page_offset].extract_text() or "")
                         if first_page_text:
                             pages_text.append(f"=== PAGE {page_offset + 1} ===\n{first_page_text}\n")
                     
@@ -777,7 +778,7 @@ class PaperMetadataProcessor:
                             footer = page_text[-20:].strip()
                             pages_text.append(f"=== PAGE {i+1} HEADER: {header}\nPAGE {i+1} FOOTER: {footer} ===\n")
                     
-                    text = '\n'.join(pages_text)
+                    text = sanitize_text('\n'.join(pages_text))
                 
                 # Detect language from filename if available
                 language = self._detect_language_from_filename(pdf_path)

@@ -14,6 +14,7 @@ import configparser
 from pathlib import Path
 from typing import Optional, List, Tuple
 from .isbn_matcher import ISBNMatcher
+from .text_ignore import filter_candidates, sanitize_text
 
 
 class IdentifierExtractor:
@@ -327,6 +328,7 @@ class IdentifierExtractor:
         Returns:
             List of URL strings
         """
+        text = sanitize_text(text or "")
         urls = []
         
         matches = re.finditer(cls.URL_PATTERN, text)
@@ -340,7 +342,7 @@ class IdentifierExtractor:
             if url not in urls:
                 urls.append(url)
         
-        return urls
+        return filter_candidates(urls)
     
     @classmethod
     def extract_jstor_ids(cls, text: str) -> List[str]:
@@ -655,6 +657,7 @@ class IdentifierExtractor:
         Returns:
             Dictionary with lists of found identifiers
         """
+        text = sanitize_text(text or "")
         title, journal = cls.extract_title_and_source_journal(text)
         return {
             'dois': cls.extract_dois(text),

@@ -46,6 +46,7 @@ from shared_tools.zotero.paper_processor import ZoteroPaperProcessor
 from shared_tools.zotero.local_search import ZoteroLocalSearch
 from shared_tools.utils.filename_generator import FilenameGenerator
 from shared_tools.utils.author_extractor import AuthorExtractor
+from shared_tools.utils.text_ignore import sanitize_text
 from shared_tools.utils.grobid_validator import GrobidValidator
 from shared_tools.utils.author_filter import AuthorFilter
 from shared_tools.utils.author_filter import AuthorFilter
@@ -5054,7 +5055,7 @@ class PaperProcessorDaemon:
                         import pdfplumber
                         with pdfplumber.open(pdf_to_use) as pdf:
                             if len(pdf.pages) > effective_page_offset:
-                                first_page_text = pdf.pages[effective_page_offset].extract_text() or ""
+                                first_page_text = sanitize_text(pdf.pages[effective_page_offset].extract_text() or "")
                                 if first_page_text:
                                     regex_authors = AuthorExtractor.extract_authors_simple(first_page_text)
                                     if regex_authors:
