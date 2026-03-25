@@ -103,6 +103,29 @@ def test_handle_item_selected_returns_back_status(daemon: PaperProcessorDaemon, 
     assert status == "back_to_item_selection"
 
 
+def test_handle_item_selected_resolved_no_attach_navigation_result(
+    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keeping existing PDF must not map to back_to_item_selection (scan already moved)."""
+    from shared_tools.ui import navigation as nav
+
+    monkeypatch.setattr(daemon, "_display_zotero_item_details", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(daemon, "_auto_enrich_selected_item", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        nav.NavigationEngine,
+        "run_page_flow",
+        lambda *_args, **_kwargs: nav.NavigationResult.resolved_no_attach(),
+    )
+
+    status = daemon.handle_item_selected(
+        pdf_path=Path("scan.pdf"),
+        metadata={"title": "x", "authors": ["A"], "_year_confirmed": True},
+        selected_item={"key": "K1", "title": "T", "authors": ["A"]},
+    )
+
+    assert status == "resolved_no_attach"
+
+
 def test_process_paper_reenters_selection_after_item_back(
     daemon: PaperProcessorDaemon,
     tmp_path: Path,

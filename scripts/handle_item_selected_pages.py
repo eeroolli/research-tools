@@ -1231,7 +1231,10 @@ def create_pdf_conflict_decision_page(daemon) -> Page:
     def handler_1(ctx):
         daemon.move_to_done(ctx['pdf_path'])
         print("✅ Kept existing PDF; skipped preprocessing.")
-        return NavigationResult.return_to_caller()
+        # Must not use return_to_caller(): that means "back to Zotero item list" in
+        # handle_item_selected, but the scan is already in done/ — re-entering would
+        # fail with a missing file.
+        return NavigationResult.resolved_no_attach()
 
     def handler_2(ctx):
         # Store choice for later conflict handling in _process_selected_item.

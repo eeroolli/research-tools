@@ -11935,6 +11935,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         Returns:
             One of:
             - 'back_to_item_selection': user requested back to selection list
+            - 'resolved_no_attach': flow finished without attach (e.g. kept existing PDF; scan moved to done/)
             - 'quit_scan': user quit selected-item flow
             - 'quit_scan_manual_review': user quit and file moved to manual review
             - 'processed': PDF processing path completed/started
@@ -12010,6 +12011,8 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         # Handle navigation results
         if result.type == result.Type.RETURN_TO_CALLER:
             return 'back_to_item_selection'
+        elif result.type == result.Type.RESOLVED_NO_ATTACH:
+            return 'resolved_no_attach'
         elif result.type == result.Type.QUIT_SCAN:
             if result.move_to_manual:
                 self.move_to_manual_review(pdf_path)

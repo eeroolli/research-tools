@@ -25,6 +25,11 @@ class TestNavigationResult(unittest.TestCase):
         result = NavigationResult.return_to_caller()
         self.assertEqual(result.type, NavigationResult.Type.RETURN_TO_CALLER)
     
+    def test_resolved_no_attach(self):
+        """Test resolved_no_attach result."""
+        result = NavigationResult.resolved_no_attach()
+        self.assertEqual(result.type, NavigationResult.Type.RESOLVED_NO_ATTACH)
+    
     def test_quit_scan(self):
         """Test quit_scan result."""
         result = NavigationResult.quit_scan(move_to_manual=True)

@@ -24,6 +24,7 @@ class NavigationResult:
     This class uses a factory pattern to create different result types:
     - NavigationResult.show_page(page_id) - Navigate to another page
     - NavigationResult.return_to_caller() - Return to calling function
+    - NavigationResult.resolved_no_attach() - Item selection finished without attach (e.g. kept existing PDF)
     - NavigationResult.quit_scan(move_to_manual=False) - Quit with optional manual review
     - NavigationResult.process_pdf() - Process the PDF and exit
     """
@@ -32,6 +33,7 @@ class NavigationResult:
         """Types of navigation results."""
         SHOW_PAGE = "show_page"
         RETURN_TO_CALLER = "return_to_caller"
+        RESOLVED_NO_ATTACH = "resolved_no_attach"
         QUIT_SCAN = "quit_scan"
         PROCESS_PDF = "process_pdf"
     
@@ -57,6 +59,11 @@ class NavigationResult:
     def return_to_caller(cls) -> 'NavigationResult':
         """Create a result that returns to the calling function."""
         return cls(cls.Type.RETURN_TO_CALLER)
+    
+    @classmethod
+    def resolved_no_attach(cls) -> 'NavigationResult':
+        """Item selection finished without attaching/copying a PDF (e.g. user kept existing publications PDF)."""
+        return cls(cls.Type.RESOLVED_NO_ATTACH)
     
     @classmethod
     def quit_scan(cls, move_to_manual: bool = False) -> 'NavigationResult':
@@ -86,6 +93,8 @@ class NavigationResult:
             return f"NavigationResult.show_page('{self.page_id}')"
         elif self.type == NavigationResult.Type.QUIT_SCAN:
             return f"NavigationResult.quit_scan(move_to_manual={self.move_to_manual})"
+        elif self.type == NavigationResult.Type.RESOLVED_NO_ATTACH:
+            return "NavigationResult.resolved_no_attach()"
         else:
             return f"NavigationResult.{self.type.value}()"
 
@@ -322,7 +331,7 @@ class NavigationEngine:
         """Run page flow starting from start_page.
         
         Continuously displays pages and handles navigation until a terminal
-        result is reached (RETURN_TO_CALLER, QUIT_SCAN, or PROCESS_PDF).
+        result is reached (RETURN_TO_CALLER, RESOLVED_NO_ATTACH, QUIT_SCAN, or PROCESS_PDF).
         
         Special handling for pages that need custom input collection (e.g., multi-line).
         
@@ -348,6 +357,8 @@ class NavigationEngine:
             
             # Terminal results - exit flow
             if result.type == NavigationResult.Type.RETURN_TO_CALLER:
+                return result
+            elif result.type == NavigationResult.Type.RESOLVED_NO_ATTACH:
                 return result
             elif result.type == NavigationResult.Type.QUIT_SCAN:
                 return result
