@@ -206,6 +206,11 @@ This document describes the complete user experience flow for the paper processo
 
 ## No Zotero Matches Found - User Actions
 
+Behavior note:
+- All no-match outcomes now converge to a single decision menu.
+- The daemon does not auto-advance to the next item after "no matches found."
+- The user must explicitly choose one of: search again, create new item, manual review, back, restart, or quit.
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  NO MATCHES FOUND                                               │

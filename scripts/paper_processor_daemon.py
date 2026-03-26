@@ -1456,6 +1456,39 @@ class PaperProcessorDaemon:
             return ('none', None, metadata)
         
         try:
+            def _prompt_no_match_options(author_display_text: str = "metadata provided") -> tuple:
+                """Show a unified no-match decision menu.
+
+                Returns:
+                    Tuple[action, selected_item, metadata]
+                """
+                print(f"\n❌ No matches found in Zotero after trying relaxed filters for: {author_display_text}")
+                print()
+                print(Colors.colorize("Options:", ColorScheme.ACTION))
+                print(Colors.colorize("[1] Enter a different year and search again", ColorScheme.LIST))
+                print(Colors.colorize("[2] Proceed to create new Zotero item using the current metadata (title, authors, year, DOI, etc.)", ColorScheme.LIST))
+                print(Colors.colorize("[3] Move to manual review", ColorScheme.LIST))
+                print(Colors.colorize("  (z) Back to previous step", ColorScheme.LIST))
+                print()
+
+                while True:
+                    final_choice = input("Enter your choice: ").strip().lower()
+                    if final_choice == '1':
+                        new_year = input("Enter different year (blank to clear): ").strip()
+                        if new_year:
+                            metadata['year'] = new_year
+                        else:
+                            metadata.pop('year', None)
+                        return ('search', None, metadata)
+                    elif final_choice == '2':
+                        return ('create', None, metadata)
+                    elif final_choice == '3':
+                        return ('manual', None, metadata)
+                    elif final_choice == 'z':
+                        return ('back', None, metadata)
+                    else:
+                        print_unacceptable_input()
+
             # Step 1: Ensure we have a year (prompt if missing, only once per session)
             year_result = self.prompt_for_year(metadata, force_prompt=force_prompt_year)
             # Handle special return values
@@ -1639,8 +1672,8 @@ class PaperProcessorDaemon:
                         has_author = True
                         # Continue to author-based search below
                     else:
-                        # User skipped - return with no selection
-                        return ('none', None, metadata)
+                        # User skipped author refinement - continue with unified no-match decision menu.
+                        return _prompt_no_match_options(metadata.get('title') or "metadata provided")
             else:
                 # No matches from title/year search
                 if not has_author:
@@ -1653,7 +1686,8 @@ class PaperProcessorDaemon:
                         self.logger.info(f"User provided author for refined search (no initial matches): {author_input}")
                         has_author = True
                     else:
-                        return ('none', None, metadata)
+                        # No author refinement provided - continue with unified no-match decision menu.
+                        return _prompt_no_match_options(metadata.get('title') or "metadata provided")
             
             # Step 5: Author-based search (for Priority 1, Priority 4 with author provided, or Priority 5)
             if has_author:
@@ -1869,88 +1903,7 @@ class PaperProcessorDaemon:
                             return (action, item, metadata)
 
                 # No matches after all fallbacks
-                print(f"\n❌ No matches found in Zotero after trying relaxed filters for: {author_display}")
-                print()
-                print(Colors.colorize("Options:", ColorScheme.ACTION))
-                print(Colors.colorize("[1] Enter a different year and search again", ColorScheme.LIST))
-                print(Colors.colorize("[2] Proceed to create new Zotero item using the current metadata (title, authors, year, DOI, etc.)", ColorScheme.LIST))
-                print(Colors.colorize("[3] Move to manual review", ColorScheme.LIST))
-                print(Colors.colorize("  (z) Back to previous step", ColorScheme.LIST))
-                print()
-                
-                while True:
-                    final_choice = input("Enter your choice: ").strip().lower()
-                    if final_choice == '1':
-                        new_year = input("Enter different year (blank to clear): ").strip()
-                        if new_year:
-                            metadata['year'] = new_year
-                        else:
-                            metadata.pop('year', None)
-                        return ('search', None, metadata)
-                    elif final_choice == '2':
-                        return ('create', None, metadata)
-                    elif final_choice == '3':
-                        return ('manual', None, metadata)
-                    elif final_choice == 'z':
-                        return ('back', None, metadata)
-                    else:
-                        print_unacceptable_input()
-        # ... rest of function unchanged ...
-                    normalized_broad = [self._normalize_search_result(item) for item in broad_matches]
-                    if normalized_broad:
-                        search_info = f"by last name {broad_name}"
-                        action, item = self.display_and_select_zotero_matches(normalized_broad, search_info)
-                        return (action, item, metadata)
-                
-                # Final metadata fallback before declaring no matches.
-                metadata_fallback = {
-                    'title': metadata.get('title'),
-                    'authors': metadata.get('authors', []),
-                    'year': metadata.get('year'),
-                    'doi': metadata.get('doi'),
-                    'url': metadata.get('url'),
-                    'document_type': metadata.get('document_type'),
-                }
-                if any([metadata_fallback.get('doi'), metadata_fallback.get('url'), metadata_fallback.get('title')]):
-                    print("\nℹ️  No author matches; trying metadata fallback (DOI/URL/title/year)...")
-                    metadata_matches = self.local_zotero.search_by_metadata(metadata_fallback, max_matches=10)
-                    if metadata_matches:
-                        normalized_metadata_matches = [self._normalize_search_result(item) for item in metadata_matches]
-                        if normalized_metadata_matches:
-                            action, item = self.display_and_select_zotero_matches(
-                                normalized_metadata_matches,
-                                "by metadata fallback (DOI/URL/title/year)"
-                            )
-                            return (action, item, metadata)
-
-                # No matches after all fallbacks
-                print(f"\n❌ No matches found in Zotero after trying relaxed filters for: {author_display}")
-                print()
-                print(Colors.colorize("Options:", ColorScheme.ACTION))
-                print(Colors.colorize("[1] Enter a different year and search again", ColorScheme.LIST))
-                print(Colors.colorize("[2] Proceed to create new Zotero item using the current metadata (title, authors, year, DOI, etc.)", ColorScheme.LIST))
-                print(Colors.colorize("[3] Move to manual review", ColorScheme.LIST))
-                print(Colors.colorize("  (z) Back to previous step", ColorScheme.LIST))
-                print()
-                
-                while True:
-                    final_choice = input("Enter your choice: ").strip().lower()
-                    if final_choice == '1':
-                        new_year = input("Enter different year (blank to clear): ").strip()
-                        if new_year:
-                            metadata['year'] = new_year
-                        else:
-                            metadata.pop('year', None)
-                        return ('search', None, metadata)
-                    elif final_choice == '2':
-                        return ('create', None, metadata)
-                    elif final_choice == '3':
-                        return ('none', None, metadata)
-                    elif final_choice == 'z':
-                        return ('back', None, metadata)
-                    else:
-                        print_unacceptable_input()
-            
+                return _prompt_no_match_options(author_display)
         except Exception as e:
             self.logger.error(f"Error searching Zotero database: {e}")
             print(f"❌ Error searching Zotero database: {e}")
@@ -5488,6 +5441,9 @@ class PaperProcessorDaemon:
                         # User cancelled or error occurred; avoid silent "jump" to next scan.
                         print("❌ Item creation cancelled or failed; moved to manual review.")
                         self.move_to_manual_review(pdf_path)
+                    return 'handled'
+                elif action_value == 'manual':
+                    self.move_to_manual_review(pdf_path)
                     return 'handled'
                 elif action_value == 'skip':
                     # User wants to skip this document

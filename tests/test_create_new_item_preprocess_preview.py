@@ -338,6 +338,122 @@ def test_search_skips_broad_surname_fallback_when_author_confirmed(
     assert broad_search_calls["count"] == 0
 
 
+def test_search_no_match_without_author_can_still_choose_create(
+    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _LocalZoteroStub:
+        def search_by_metadata(self, *args, **kwargs):
+            return []
+
+    daemon.local_zotero = _LocalZoteroStub()
+    daemon.prompt_for_year = lambda metadata, force_prompt=False: metadata
+
+    # 1) author refinement prompt -> Enter (skip)
+    # 2) unified no-match menu -> '2' (create)
+    answers = iter(["", "2"])
+    monkeypatch.setattr(builtins, "input", lambda *_args, **_kwargs: next(answers))
+
+    action, item, _updated = daemon.search_and_display_local_zotero(
+        {
+            "title": "A metadata-only title",
+            "authors": [],
+            "year": "2020",
+            "document_type": "journal_article",
+        }
+    )
+
+    assert action == "create"
+    assert item is None
+
+
+def test_process_paper_no_match_create_path_does_not_move_to_manual(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "EN_20260326_0001_double.pdf"
+    _write_dummy_pdf(pdf_path)
+
+    daemon._close_sumatra_all_tabs = lambda: True
+    daemon._open_pdf_in_viewer = lambda *_args, **_kwargs: True
+    daemon._return_focus_to_terminal = lambda: None
+    daemon._close_pdf_viewer = lambda: None
+    daemon.move_to_failed = lambda *_args, **_kwargs: None
+    daemon.display_metadata = lambda *_args, **_kwargs: None
+    daemon._handle_isbn_lookup_result = lambda result: result
+    daemon.prompt_for_document_type = lambda metadata: metadata
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: "")
+
+    daemon.metadata_processor = SimpleNamespace(
+        process_pdf=lambda *_args, **_kwargs: {
+            "success": True,
+            "metadata": {
+                "title": "A title",
+                "authors": ["Bean, C"],
+                "year": "1994",
+                "document_type": "journal_article",
+            },
+            "method": "grep",
+            "identifiers_found": {},
+        }
+    )
+    daemon.service_manager = SimpleNamespace(ensure_grobid_ready=lambda: False, grobid_ready=False, grobid_client=None)
+    daemon.local_zotero = object()
+    daemon.search_and_display_local_zotero = lambda metadata, force_prompt_year=False: ("create", None, metadata)
+
+    create_calls = {"count": 0}
+    manual_calls = {"count": 0}
+    daemon.handle_create_new_item = lambda *_args, **_kwargs: create_calls.__setitem__("count", create_calls["count"] + 1) or True
+    daemon.move_to_manual_review = lambda *_args, **_kwargs: manual_calls.__setitem__("count", manual_calls["count"] + 1)
+
+    result = daemon.process_paper(pdf_path)
+
+    assert result is None
+    assert create_calls["count"] == 1
+    assert manual_calls["count"] == 0
+
+
+def test_process_paper_create_failure_falls_back_to_manual_review(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "EN_20260326_0002_double.pdf"
+    _write_dummy_pdf(pdf_path)
+
+    daemon._close_sumatra_all_tabs = lambda: True
+    daemon._open_pdf_in_viewer = lambda *_args, **_kwargs: True
+    daemon._return_focus_to_terminal = lambda: None
+    daemon._close_pdf_viewer = lambda: None
+    daemon.move_to_failed = lambda *_args, **_kwargs: None
+    daemon.display_metadata = lambda *_args, **_kwargs: None
+    daemon._handle_isbn_lookup_result = lambda result: result
+    daemon.prompt_for_document_type = lambda metadata: metadata
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: "")
+
+    daemon.metadata_processor = SimpleNamespace(
+        process_pdf=lambda *_args, **_kwargs: {
+            "success": True,
+            "metadata": {
+                "title": "A title",
+                "authors": ["Bean, C"],
+                "year": "1994",
+                "document_type": "journal_article",
+            },
+            "method": "grep",
+            "identifiers_found": {},
+        }
+    )
+    daemon.service_manager = SimpleNamespace(ensure_grobid_ready=lambda: False, grobid_ready=False, grobid_client=None)
+    daemon.local_zotero = object()
+    daemon.search_and_display_local_zotero = lambda metadata, force_prompt_year=False: ("create", None, metadata)
+
+    manual_calls = {"count": 0}
+    daemon.handle_create_new_item = lambda *_args, **_kwargs: False
+    daemon.move_to_manual_review = lambda *_args, **_kwargs: manual_calls.__setitem__("count", manual_calls["count"] + 1)
+
+    result = daemon.process_paper(pdf_path)
+
+    assert result is None
+    assert manual_calls["count"] == 1
+
+
 def test_create_new_item_handles_unexpected_add_paper_result(
     daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
