@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import builtins
 
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
@@ -56,6 +57,8 @@ sys.modules.setdefault("pyzbar", pyzbar_mod)
 yaml_mod = types.ModuleType("yaml")
 yaml_mod.safe_load = lambda *_args, **_kwargs: {}
 sys.modules.setdefault("yaml", yaml_mod)
+
+from shared_tools.ui.user_feedback import UNACCEPTABLE_INPUT_MESSAGE
 
 from scripts.paper_processor_daemon import PaperProcessorDaemon
 from scripts.paper_processor_daemon import PaperFileHandler
@@ -125,6 +128,54 @@ def test_review_search_params_supports_z_back(
     assert journal == "Some Journal"
     assert skip_search is False
     assert go_back is True
+
+
+def test_review_search_params_unknown_field_choice_shows_feedback_and_keeps_year(
+    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Typing a year at the field menu (e.g. 2004) is not a field key; year must stay unchanged."""
+    answers = iter(["e", "2004", "", ""])
+
+    def _fake_input(*_args, **_kwargs):
+        return next(answers)
+
+    monkeypatch.setattr(daemon, "_input_with_timeout", _fake_input)
+    title, authors, year_str, journal, skip_search, go_back = daemon.review_search_params(
+        "Some Title",
+        ["Alice Author"],
+        "1954",
+        None,
+    )
+
+    assert year_str == "1954"
+    assert skip_search is False
+    assert go_back is False
+    out = capsys.readouterr().out
+    assert UNACCEPTABLE_INPUT_MESSAGE in out
+    assert "Tip: To change the year" in out
+
+
+def test_review_search_params_field_2_updates_year(
+    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answers = iter(["e", "2", "", ""])
+
+    def _fake_input(*_args, **_kwargs):
+        return next(answers)
+
+    monkeypatch.setattr(daemon, "_input_with_timeout", _fake_input)
+    input_answers = iter(["2004"])
+    monkeypatch.setattr(builtins, "input", lambda *_args, **_kwargs: next(input_answers))
+    title, authors, year_str, journal, skip_search, go_back = daemon.review_search_params(
+        "Some Title",
+        ["Alice Author"],
+        "1954",
+        None,
+    )
+
+    assert year_str == "2004"
+    assert skip_search is False
+    assert go_back is False
 
 
 def test_file_handler_defers_queue_notice_during_active_processing(

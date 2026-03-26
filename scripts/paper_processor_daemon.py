@@ -67,6 +67,7 @@ from shared_tools.pdf.border_remover import BorderRemover
 
 # Import color utilities
 from shared_tools.ui.colors import ColorScheme, Colors
+from shared_tools.ui.user_feedback import print_unacceptable_input
 
 # Import daemon modules
 from shared_tools.daemon.service_manager import ServiceManager
@@ -644,7 +645,7 @@ class PaperProcessorDaemon:
                 print("⚠️  Continuing with potentially inaccessible directory")
                 break
             else:
-                print("Invalid choice. Please enter 1, 2, or 3.")
+                print_unacceptable_input()
     
     def _handle_unwritable_publications_directory(self):
         """Handle case where publications directory exists but isn't writable."""
@@ -684,7 +685,7 @@ class PaperProcessorDaemon:
                 print("⚠️  Continuing with potentially unwritable directory")
                 break
             else:
-                print("Invalid choice. Please enter 1, 2, or 3.")
+                print_unacceptable_input()
     
     def setup_logging(self):
         """Setup logging configuration."""
@@ -1073,7 +1074,8 @@ class PaperProcessorDaemon:
                     metadata['_type_confirmed'] = True
                     return metadata
                 else:
-                    print("⚠️  Invalid choice, keeping detected type")
+                    print_unacceptable_input()
+                    print("Keeping the detected type.")
                     return metadata
                     
             except (KeyboardInterrupt, EOFError):
@@ -1106,7 +1108,7 @@ class PaperProcessorDaemon:
                     elif choice.lower() in ['q', 'quit', 'cancel']:
                         return None
                     else:
-                        print("⚠️  Invalid choice. Please enter 1-9 or 'q' to cancel.")
+                        print_unacceptable_input()
                         
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Cancelled")
@@ -1400,7 +1402,7 @@ class PaperProcessorDaemon:
             if choice in ['1', '2', '3', '4', '5', '6', 'q']:
                 return choice
             else:
-                print("⚠️  Invalid choice. Please enter 1-6 or 'q' to quit.")
+                print_unacceptable_input()
     
     def display_interactive_menu(self) -> str:
         """Display interactive menu and get user choice.
@@ -1424,7 +1426,7 @@ class PaperProcessorDaemon:
             if choice in ['1', '2', '3', '4', '5', '6', 'q']:
                 return choice
             else:
-                print("⚠️  Invalid choice. Please enter 1-6 or 'q' to quit.")
+                print_unacceptable_input()
     
     def search_and_display_local_zotero(self, metadata: dict, force_prompt_year: bool = False) -> tuple:
         """Interactive Zotero search with author selection and item selection.
@@ -1840,7 +1842,7 @@ class PaperProcessorDaemon:
                         elif final_choice == 'z':
                             return ('back', None, metadata)
                         else:
-                            print("Invalid choice. Please enter 1, 2, 3, or 'z'.")
+                            print_unacceptable_input()
                     # Unreachable
                 
                 # Final metadata fallback before declaring no matches.
@@ -1892,7 +1894,7 @@ class PaperProcessorDaemon:
                     elif final_choice == 'z':
                         return ('back', None, metadata)
                     else:
-                        print("Invalid choice. Please enter 1, 2, 3, or 'z'.")
+                        print_unacceptable_input()
         # ... rest of function unchanged ...
                     normalized_broad = [self._normalize_search_result(item) for item in broad_matches]
                     if normalized_broad:
@@ -1947,7 +1949,7 @@ class PaperProcessorDaemon:
                     elif final_choice == 'z':
                         return ('back', None, metadata)
                     else:
-                        print("⚠️  Invalid choice. Please enter 1-3 or 'z' to go back.")
+                        print_unacceptable_input()
             
         except Exception as e:
             self.logger.error(f"Error searching Zotero database: {e}")
@@ -2690,7 +2692,7 @@ class PaperProcessorDaemon:
             if type_choice in doc_type_map:
                 doc_type, doc_type_name = doc_type_map[type_choice]
                 break
-            print("Invalid choice. Please try again.")
+            print_unacceptable_input()
         
         print(f"\n✅ Document type: {doc_type_name}")
         
@@ -2951,6 +2953,9 @@ class PaperProcessorDaemon:
             # Edit sub-menu
             while True:
                 print("\nEdit field: [1] Author(s)  [2] Year  [3] Title  [4] Journal  [Enter] Done  [z] Back")
+                print(
+                    "Tip: To change the year, choose 2, then enter the year at the next prompt."
+                )
                 field_choice = self._input_with_timeout("Your choice: ", default="", clear_buffered=True)
                 if field_choice is None:
                     field_choice = ""
@@ -2962,12 +2967,14 @@ class PaperProcessorDaemon:
 
                 if field_choice == "1":
                     current = fmt_authors(authors)
-                    new_val = self._input_with_timeout(
-                        f"Author(s) (comma-separated) [{current}]: ",
-                        default=current,
-                        clear_buffered=True,
-                    )
-                    if new_val is not None and new_val.strip():
+                    # Free-text entry: no timeouts (user may take time to type).
+                    try:
+                        from shared_tools.ui.input_timeout import drain_stdin
+                        drain_stdin(max_lines=3, timeout_per_line=0.05)
+                        new_val = input(f"Author(s) (comma-separated) [{current}]: ")
+                    except (KeyboardInterrupt, EOFError):
+                        new_val = ""
+                    if new_val is not None and str(new_val).strip():
                         new_list = [a.strip() for a in new_val.split(",") if a.strip()]
                         if new_list and self.author_validator:
                             resolved = []
@@ -2996,31 +3003,42 @@ class PaperProcessorDaemon:
                             authors = new_list
 
                 elif field_choice == "2":
-                    new_val = self._input_with_timeout(
-                        f"Year [{fmt(year_str)}]: ",
-                        default=year_str or "",
-                        clear_buffered=True,
-                    )
+                    # Free-text entry: no timeouts (user may take time to type).
+                    try:
+                        from shared_tools.ui.input_timeout import drain_stdin
+                        drain_stdin(max_lines=3, timeout_per_line=0.05)
+                        new_val = input(f"Year [{fmt(year_str)}]: ")
+                    except (KeyboardInterrupt, EOFError):
+                        new_val = ""
                     if new_val is not None:
-                        year_str = new_val.strip() if new_val.strip() else year_str
+                        new_val = str(new_val).strip()
+                        year_str = new_val if new_val else year_str
 
                 elif field_choice == "3":
-                    new_val = self._input_with_timeout(
-                        f"Title [{fmt(title)}]: ",
-                        default=title or "",
-                        clear_buffered=True,
-                    )
+                    # Free-text entry: no timeouts (user may take time to type).
+                    try:
+                        from shared_tools.ui.input_timeout import drain_stdin
+                        drain_stdin(max_lines=3, timeout_per_line=0.05)
+                        new_val = input(f"Title [{fmt(title)}]: ")
+                    except (KeyboardInterrupt, EOFError):
+                        new_val = ""
                     if new_val is not None:
-                        title = new_val.strip() if new_val.strip() else title
+                        new_val = str(new_val).strip()
+                        title = new_val if new_val else title
 
                 elif field_choice == "4":
-                    new_val = self._input_with_timeout(
-                        f"Journal [{fmt(journal)}]: ",
-                        default=journal or "",
-                        clear_buffered=True,
-                    )
+                    # Free-text entry: no timeouts (user may take time to type).
+                    try:
+                        from shared_tools.ui.input_timeout import drain_stdin
+                        drain_stdin(max_lines=3, timeout_per_line=0.05)
+                        new_val = input(f"Journal [{fmt(journal)}]: ")
+                    except (KeyboardInterrupt, EOFError):
+                        new_val = ""
                     if new_val is not None:
-                        journal = new_val.strip() if new_val.strip() else journal
+                        new_val = str(new_val).strip()
+                        journal = new_val if new_val else journal
+                else:
+                    print_unacceptable_input()
     
     def _search_online_after_manual(self, metadata: dict) -> dict:
         """Run online lookups using manually entered metadata (papers and books)."""
@@ -3487,7 +3505,7 @@ class PaperProcessorDaemon:
                     print("✅ Continuing with current metadata")
                     break
                 else:
-                    print("❌ Invalid choice. Please try again.")
+                    print_unacceptable_input()
         
         else:
             # No online metadata AND no local metadata - but still allow manual editing
@@ -3571,9 +3589,9 @@ class PaperProcessorDaemon:
                             print(f"✅ Will use custom title for filename: {custom_title}")
                             break
                         else:
-                            print("⚠️  Custom title cannot be empty. Please enter a title or choose another option.")
+                            print_unacceptable_input()
                     else:
-                        print("⚠️  Invalid choice. Please enter 'z', 'm', 'c', or press Enter.")
+                        print_unacceptable_input()
         
         # Authors
         current_authors = ', '.join(edited.get('authors', []))
@@ -4400,7 +4418,7 @@ class PaperProcessorDaemon:
             elif choice == '10':
                 self._show_tag_group_details()
             else:
-                print("❌ Invalid choice. Please try again.")
+                print_unacceptable_input()
         
         # Convert back to dict format for Zotero
         return [{'tag': tag_name} for tag_name in working_tags if tag_name]
@@ -5248,16 +5266,10 @@ class PaperProcessorDaemon:
                                     f"Year [{suggested_year}] (Enter=confirm, type new year, 'm'=manual entry, 'z'=back, or 'r'=restart): ",
                                     ColorScheme.ACTION
                                 )
-                                year_input = self._input_with_timeout(
-                                    prompt_text,
-                                    timeout_seconds=self.prompt_timeout,
-                                    default="",
-                                    clear_buffered=True
-                                )
-                                if year_input is None:
-                                    # Timeout - use suggested year
-                                    year_input = ""
-                                year_input = year_input.strip()
+                                # Typed entry: no timeouts (user may take time to type).
+                                from shared_tools.ui.input_timeout import drain_stdin
+                                drain_stdin(max_lines=3, timeout_per_line=0.05)
+                                year_input = input(prompt_text).strip()
                             except (KeyboardInterrupt, EOFError):
                                 print("\n❌ Cancelled")
                                 self.move_to_failed(pdf_path)
@@ -5567,9 +5579,9 @@ class PaperProcessorDaemon:
                             selected_match = local_matches[idx - 1]
                             break
                         else:
-                            print("Invalid selection. Please try again.")
+                            print_unacceptable_input()
                     except ValueError:
-                        print("Please enter a number.")
+                        print_unacceptable_input()
             
             success = self.attach_to_existing_zotero_item(pdf_path, selected_match, metadata)
             if success:
@@ -6454,7 +6466,7 @@ class PaperProcessorDaemon:
                                 ratio = float(ratio_input)
                                 
                                 if ratio < 30 or ratio > 70:
-                                    print(f"⚠️  Ratio must be between 30 and 70. You entered {ratio:.1f}")
+                                    print_unacceptable_input()
                                     continue
                                 
                                 # Get all page widths from ORIGINAL PDF for per-page split (handles mixed page sizes)
@@ -6503,7 +6515,7 @@ class PaperProcessorDaemon:
                                 
                                 break  # Exit ratio input loop
                             except ValueError:
-                                print("⚠️  Please enter a valid number between 30 and 70")
+                                print_unacceptable_input()
                             except (KeyboardInterrupt, EOFError):
                                 print("\n❌ Cancelled")
                                 break  # Continue loop to show preview again
@@ -6511,9 +6523,9 @@ class PaperProcessorDaemon:
                         # Continue loop to show preview again
                     
                     else:
-                        print("⚠️  Invalid choice. Please try again.")
+                        print_unacceptable_input()
                 else:
-                    print("⚠️  Invalid choice. Please try again.")
+                    print_unacceptable_input()
             except ValueError:
                 # Not a number, check for letter choices
                 if choice == 'z':
@@ -6525,7 +6537,7 @@ class PaperProcessorDaemon:
                     return None, {'quit': True}
                 
                 else:
-                    print("⚠️  Invalid choice. Please try again.")
+                    print_unacceptable_input()
     
     def _detect_two_up_page(self, pdf_path: Path) -> tuple[bool, float, str]:
         """Heuristic detection of two-up layout on page 1.
@@ -7537,7 +7549,7 @@ class PaperProcessorDaemon:
         print("If your document starts on scan page 2, 3, 4, etc., enter that number now.")
         print()
         
-        # Use timeout if configured
+        # Choice-ish numeric prompt: keep timeout (safe default = page 1).
         timeout_seconds = self.page_offset_timeout
         
         # Small delay to ensure any previous input is cleared
@@ -7550,7 +7562,7 @@ class PaperProcessorDaemon:
                     prompt_text,
                     timeout_seconds=timeout_seconds,
                     default="",
-                    clear_buffered=True
+                    clear_buffered=True,
                 )
                 if user_input is None:
                     print("\n❌ Cancelled")
@@ -7580,7 +7592,7 @@ class PaperProcessorDaemon:
                     print(f"✅ Document will start from scan page {page_num} (skipping first {offset} scan page(s))")
                 return offset
             else:
-                print("⚠️  Please enter a number or press Enter for page 1")
+                print_unacceptable_input()
     
     def _create_pdf_from_page_offset(self, pdf_path: Path, page_offset: int) -> Optional[Path]:
         """Create a temporary PDF starting from a specific page offset.
@@ -7833,11 +7845,11 @@ class PaperProcessorDaemon:
         
         while True:
             try:
-                # Clear buffered input to prevent leftover input from previous prompts
+                # Choice-ish numeric prompt: keep timeout (safe default = keep pages).
                 response = self._input_with_timeout(
                     "Trim pages? [Enter=keep all / number=pages to drop from start / -number=pages to drop from end]: ",
                     default="",
-                    clear_buffered=True
+                    clear_buffered=True,
                 )
                 if response is None:
                     print("\n❌ Trim cancelled - keeping all pages")
@@ -7855,7 +7867,7 @@ class PaperProcessorDaemon:
             try:
                 pages_to_drop = int(response)
             except ValueError:
-                print("⚠️  Please enter a whole number (positive for leading pages, negative for trailing pages) or press Enter to keep everything.")
+                print_unacceptable_input()
                 continue
             
             if pages_to_drop == 0:
@@ -9170,7 +9182,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             if choice in ['1', '2', '3', '4', '5', '6', '7']:
                 return choice
             else:
-                print("Invalid choice. Please try again.")
+                print_unacceptable_input()
     
     def _handle_metadata_choice(self, choice: str, extracted: dict, zotero: dict, zotero_item: dict = None) -> dict:
         """Handle user's metadata comparison choice."""
@@ -9262,7 +9274,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                         merged['abstract'] = custom
                         break
                     else:
-                        print("Please enter 'e', 'z', or 'c'")
+                        print_unacceptable_input()
             else:
                 # Same abstract or Zotero has one and extracted doesn't - use Zotero
                 merged['abstract'] = zotero_abstract
@@ -9303,7 +9315,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                         merged[key] = custom
                         break
                     else:
-                        print("Please enter 'e', 'z', or 'c'")
+                        print_unacceptable_input()
         
         print("\n✅ Metadata merge complete")
         return merged
@@ -9379,7 +9391,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 print("✅ Using Zotero metadata (cancelled online)")
                 return zotero if zotero else extracted
             else:
-                print("⚠️  Invalid choice. Please enter 1-5.")
+                print_unacceptable_input()
 
         # If we have a Zotero item, offer to apply fill-only updates from online metadata
         if zotero_item and zotero_item.get('key') and online_metadata:
@@ -9686,7 +9698,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                         print("❌ Cancelled - kept originals")
                         return False
                     else:
-                        print("⚠️  Invalid choice. Please enter 1-3 or 'z'.")
+                        print_unacceptable_input()
         
         success, error_msg = self._copy_file_universal(pdf_to_copy, final_path, replace_existing=False)
         copied_ok = success
@@ -9909,7 +9921,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     if not author_info:
                         print("⚠️  No authors remaining - you can add a new author with 'n'")
                 else:
-                    print(f"⚠️  Invalid author number: '{num_to_delete}'")
+                    print_unacceptable_input()
                 print()  # Blank line before showing list again
                 continue
             elif selection_lower == 'e':
@@ -9943,7 +9955,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     else:
                         print("⚠️  No change made")
                 else:
-                    print(f"⚠️  Invalid selection")
+                    print_unacceptable_input()
                 print()  # Blank line before showing list again
                 continue
             elif selection_lower == 'n':
@@ -10019,10 +10031,10 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     elif char.isdigit():
                         # Valid digit but not in map (e.g., author number doesn't exist)
                         available = ', '.join(sorted(author_map.keys())) if author_map else 'none'
-                        print(f"⚠️  Invalid author number: '{char}' (available: {available})")
+                        print_unacceptable_input()
                     else:
                         # Non-digit, non-command character
-                        print(f"⚠️  Ignoring invalid character: '{char}'")
+                        print_unacceptable_input()
                 
                 if selected_authors:
                     author_str = ', '.join(selected_authors)
@@ -10032,7 +10044,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     # Show helpful error with available options
                     if author_map:
                         available = ', '.join(sorted(author_map.keys()))
-                        print(f"⚠️  No valid selection. Available author numbers: {available}")
+                        print_unacceptable_input()
                     else:
                         print("⚠️  No authors available. Use 'n' to add a new author.")
                     print()  # Blank line before showing list again
@@ -10200,7 +10212,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 return ('quit', None)
             else:
                 max_num = len(matches) if len(matches) <= 99 else 99
-                print(f"⚠️  Invalid choice. Please select a number 1-{max_num}, letter a-d, or 'z', 'r', 'q'.")
+                print_unacceptable_input()
     
     def quick_manual_entry(self, extracted_metadata: dict) -> dict:
         """Allow user to quickly enter missing key fields manually.
@@ -10737,9 +10749,9 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                         print(f"✅ Selected result {idx}")
                         return selected
                     else:
-                        print(f"⚠️  Please enter a number between 1 and {len(all_results)}")
+                        print_unacceptable_input()
                 except ValueError:
-                    print("⚠️  Please enter a number, 'n' to skip, or 'w' for all wrong")
+                    print_unacceptable_input()
                     
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Cancelled")
@@ -11389,7 +11401,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     print("⏭️  Skipping online library search")
                     break
                 else:
-                    print("⚠️  Please enter 'y' or 'n'")
+                    print_unacceptable_input()
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Cancelled")
                 return False
@@ -11661,7 +11673,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                         print("❌ Cancelled - kept originals")
                         return False
                     else:
-                        print("⚠️  Invalid choice. Please enter 1-3 or 'z'.")
+                        print_unacceptable_input()
         
         success, error_msg = self._copy_file_universal(final_pdf, final_path, replace_existing=False)
         copied_ok = success
