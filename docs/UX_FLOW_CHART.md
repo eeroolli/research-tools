@@ -498,6 +498,12 @@ Throughout the workflow, users can:
 
 These options are available at most decision points.
 
+Navigation semantics (must be consistent across all Zotero selection prompts):
+- **`z`**: Go back one page and stay on the current PDF (no file moves).
+- **`r`**: Restart processing from the beginning for the current PDF.
+- **`q`**: Quit the current PDF and move it to `manual_review/` (skip only via an explicit menu choice, not via `q`).
+- **Unknown/unexpected actions**: Must be non-destructive (re-prompt or return to selection; do not move the PDF).
+
 Restart behavior for the active scan:
 - When `r` is chosen during processing, the daemon immediately restarts the same
   scan file before continuing with any newly queued scans.

@@ -3343,11 +3343,15 @@ class PaperProcessorDaemon:
                 print("\n📖 Attaching PDF to existing Zotero item...")
                 zotero_key = metadata.get('zotero_key')
                 if zotero_key:
-                    attach_result = self.zotero_processor.attach_pdf_to_existing(zotero_key, final_path)
-                    if attach_result:
-                        print("✅ PDF attached to Zotero item")
-                    else:
+                    sent_path = self._windows_publications_path_for(final_path)
+                    attach_result = self.zotero_processor.attach_pdf_to_existing(zotero_key, sent_path)
+                    if not attach_result.get('ok'):
                         print("⚠️  Could not attach PDF to Zotero")
+                        self.move_to_manual_review(pdf_path)
+                        return False
+                    print("✅ PDF attached to Zotero item")
+                    if not self._verify_pdf_linkage(zotero_key, attach_result['sent_path'], pdf_path):
+                        return False
             else:
                 # New metadata - ask about Zotero
                 # Ensure language is detected from filename and added to metadata if not already present
@@ -5354,21 +5358,40 @@ class PaperProcessorDaemon:
             updated_metadata = metadata.copy()  # Track any edits made during search
             should_restart_search = False
             
-            if self.local_zotero:
+            def _run_zotero_selection_loop(starting_metadata: dict, *, force_prompt_year: bool = False):
+                """Run Zotero selection/search loop with consistent z/r/q semantics.
+
+                Semantics:
+                - back: go back one page (stay on this PDF) -> re-enter selection
+                - restart: restart processing for this same PDF -> signal caller
+                - quit: quit this PDF -> move to manual review
+                """
+                current_metadata = starting_metadata
                 while True:
-                    action, selected_item, updated_metadata = self.search_and_display_local_zotero(updated_metadata)
-                    
-                    # Handle back/restart actions - allow user to go back and restart
-                    if action == 'back':
-                        print("⬅️  Going back to author selection...")
-                        # Loop will restart and prompt again
+                    action_value, selected_item_value, current_metadata = self.search_and_display_local_zotero(
+                        current_metadata,
+                        force_prompt_year=force_prompt_year,
+                    )
+
+                    if action_value == 'back':
+                        print("⬅️  Going back to previous step...")
                         continue
-                    elif action == 'restart':
-                        # User wants to restart processing this file from the very beginning
+                    if action_value == 'restart':
                         print("🔄 Restarting from beginning...")
-                        return 'RESTART'
-                    
-                    break
+                        return ('restart', None, current_metadata)
+                    if action_value == 'quit':
+                        print("📝 Quitting current PDF; moving to manual review...")
+                        self.move_to_manual_review(pdf_path)
+                        return ('handled', None, current_metadata)
+
+                    return (action_value, selected_item_value, current_metadata)
+
+            if self.local_zotero:
+                action, selected_item, updated_metadata = _run_zotero_selection_loop(updated_metadata)
+                if action == 'restart':
+                    return 'RESTART'
+                if action == 'handled':
+                    return
             
             def _handle_zotero_action(action_value, selected_item_value, metadata_value):
                 """Handle a resolved Zotero action.
@@ -5399,9 +5422,9 @@ class PaperProcessorDaemon:
                     # Reset authors to full set if available, then recursive call
                     if metadata_value.get('_all_authors'):
                         metadata_value['authors'] = metadata_value['_all_authors'].copy()
-                    action2, selected_item2, metadata_value = self.search_and_display_local_zotero(
+                    action2, selected_item2, metadata_value = _run_zotero_selection_loop(
                         metadata_value,
-                        force_prompt_year=True
+                        force_prompt_year=True,
                     )
                     action2_outcome = _handle_zotero_action(action2, selected_item2, metadata_value)
                     if action2_outcome in ('continue_selection', 'handled'):
@@ -5417,7 +5440,7 @@ class PaperProcessorDaemon:
                     if edited_metadata:
                         # Re-run Zotero search with edited metadata
                         print("\n🔍 Searching Zotero with edited metadata...")
-                        action2, selected_item2, final_metadata = self.search_and_display_local_zotero(edited_metadata)
+                        action2, selected_item2, final_metadata = _run_zotero_selection_loop(edited_metadata)
                         action2_outcome = _handle_zotero_action(action2, selected_item2, final_metadata)
                         if action2_outcome in ('continue_selection', 'handled'):
                             return action2_outcome
@@ -5450,24 +5473,28 @@ class PaperProcessorDaemon:
                     self.move_to_skipped(pdf_path)
                     return 'handled'
                 elif action_value == 'quit':
-                    # User wants to quit current processing
-                    print("🔚 Exiting current processing per user request")
-                    return 'exit'
+                    # Quit must be explicit and destructive (move to manual review)
+                    print("📝 Quitting current PDF; moving to manual review...")
+                    self.move_to_manual_review(pdf_path)
+                    return 'handled'
                 elif action_value == 'restart':
                     # User requested full restart from within nested flow.
                     print("🔄 Restarting from beginning...")
                     return 'restart'
 
                 # action == 'none' or unknown
-                print("📝 Moving to manual review...")
-                self.move_to_manual_review(pdf_path)
-                return 'handled'
+                print("⚠️  Unrecognized action; returning to Zotero selection (no file move).")
+                return 'continue_selection'
 
             # Step 4: Handle action from Zotero search
             while True:
                 action_outcome = _handle_zotero_action(action, selected_item, updated_metadata)
                 if action_outcome == 'continue_selection':
-                    action, selected_item, updated_metadata = self.search_and_display_local_zotero(updated_metadata)
+                    action, selected_item, updated_metadata = _run_zotero_selection_loop(updated_metadata)
+                    if action == 'restart':
+                        return 'RESTART'
+                    if action == 'handled':
+                        return
                     continue
                 if action_outcome == 'restart':
                     return 'RESTART'
@@ -6203,13 +6230,19 @@ class PaperProcessorDaemon:
         Returns:
             Tuple of (final_pdf_path, final_preprocessing_state) or (None, {}) if user quits
         """
+        last_previewed_pdf: Optional[Path] = None
         while True:
             # Open PDF in viewer
             print("\n" + "="*70)
             print("PDF PREVIEW")
             print("="*70)
-            print(f"Opening processed PDF in viewer...")
-            self._open_pdf_in_viewer(processed_pdf)
+            current_preview_pdf = Path(processed_pdf)
+            if last_previewed_pdf != current_preview_pdf:
+                print(f"Opening processed PDF in viewer...")
+                self._open_pdf_in_viewer(current_preview_pdf)
+                last_previewed_pdf = current_preview_pdf
+            else:
+                self.logger.debug(f"Skipping duplicate preview open: {current_preview_pdf.name}")
             
             # Display current preprocessing state
             print("\nCurrent preprocessing:")
@@ -8309,12 +8342,28 @@ if ([Win32]::IsWindowVisible($terminalHwnd)) {{
             return False
 
         try:
+            configured_exe = ""
+            try:
+                configured_exe = self.config.get("PDF_VIEWER", "sumatra_exe", fallback="").strip().strip('"')
+            except Exception:
+                configured_exe = ""
+
             ps_lines = [
                 "$ErrorActionPreference = 'Stop'",
-                "$sumatra = Get-Command SumatraPDF.exe -ErrorAction SilentlyContinue",
-                "if (-not $sumatra) { Write-Host 'NO_SUMATRA'; exit 2 }",
-                "$exe = $sumatra.Source",
             ]
+
+            if configured_exe:
+                escaped_exe = configured_exe.replace("'", "''")
+                ps_lines.extend([
+                    f"$exe = '{escaped_exe}'",
+                    "if (-not (Test-Path -LiteralPath $exe)) { Write-Host 'NO_SUMATRA'; exit 2 }",
+                ])
+            else:
+                ps_lines.extend([
+                    "$sumatra = Get-Command SumatraPDF.exe -ErrorAction SilentlyContinue",
+                    "if (-not $sumatra) { Write-Host 'NO_SUMATRA'; exit 2 }",
+                    "$exe = $sumatra.Source",
+                ])
 
             if file_path is not None:
                 open_target = str(file_path)
@@ -8357,9 +8406,7 @@ if ([Win32]::IsWindowVisible($terminalHwnd)) {{
             return False
 
     def _close_sumatra_all_tabs(self) -> bool:
-        """Close all tabs in SumatraPDF (Windows). Requires Sumatra 3.6+."""
-        if sys.platform != 'win32':
-            return False
+        """Close all tabs in SumatraPDF. Requires Sumatra 3.6+."""
         if self._send_sumatra_command("CmdCloseAllTabs", None):
             self.logger.info("Closed all tabs in SumatraPDF")
             return True
@@ -9002,10 +9049,9 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             self.logger.debug(f"Could not return focus to terminal: {e}")
     
     def _close_pdf_viewer(self):
-        """Close all Sumatra tabs when processing completes (Windows); clear non-Windows viewer handle."""
+        """Close all Sumatra tabs when processing completes."""
         try:
-            if sys.platform == 'win32':
-                self._close_sumatra_all_tabs()
+            self._close_sumatra_all_tabs()
             if hasattr(self, '_pdf_viewer_process'):
                 delattr(self, '_pdf_viewer_process')
         except Exception as e:
@@ -9516,12 +9562,15 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             print(f"✅ Existing identical file found: {reuse_path.name} — skipping copy/attachment of new scan")
             print("📎 Attaching existing file to Zotero item...")
             try:
-                attach_target = self._to_windows_path(reuse_path)
-                attach_result = self.zotero_processor.attach_pdf_to_existing(item_key, attach_target)
-                if attach_result:
-                    print("✅ PDF attached to Zotero item")
-                else:
+                sent_path = self._windows_publications_path_for(reuse_path)
+                attach_result = self.zotero_processor.attach_pdf_to_existing(item_key, sent_path)
+                if not attach_result.get('ok'):
                     print("⚠️  Could not attach PDF to Zotero")
+                    self.move_to_manual_review(pdf_path)
+                    return False
+                print("✅ PDF attached to Zotero item")
+                if not self._verify_pdf_linkage(item_key, attach_result['sent_path'], pdf_path):
+                    return False
                 self.move_to_done(pdf_path)
                 print("✅ Processing complete!")
                 return True
@@ -9664,21 +9713,26 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             print(f"❌ File copy failed: {error_msg}")
             print("Proceeding to attach without copying...")
         
-        # Attach to Zotero (linked file if possible)
+        # Attach to Zotero (linked file only when copy succeeded)
+        if not copied_ok:
+            print("⚠️  Attachment skipped (file copy failed). You can attach manually from:", str(final_path))
+            self.move_to_manual_review(pdf_path)
+            return False
+
         try:
             print("📖 Attaching to Zotero item...")
-            attach_target = self._to_windows_path(final_path) if copied_ok else None
-            attach_result = self.zotero_processor.attach_pdf_to_existing(item_key, attach_target)
-            
-            if attach_result:
-                print("✅ PDF attached to Zotero item")
-            else:
-                if copied_ok:
-                    print("⚠️  Could not attach PDF to Zotero (but file copied)")
-                else:
-                    print("⚠️  Attachment skipped (file copy failed). You can attach manually from:", str(final_path))
-            
-            # Move original to done/
+            sent_path = self._windows_publications_path_for(final_path)
+            attach_result = self.zotero_processor.attach_pdf_to_existing(item_key, sent_path)
+
+            if not attach_result.get('ok'):
+                print("⚠️  Could not attach PDF to Zotero (but file copied)")
+                self.move_to_manual_review(pdf_path)
+                return False
+
+            print("✅ PDF attached to Zotero item")
+            if not self._verify_pdf_linkage(item_key, attach_result['sent_path'], pdf_path):
+                return False
+
             self.move_to_done(pdf_path)
             print("✅ Processing complete!")
             return True
@@ -9687,6 +9741,64 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             print(f"❌ Error: {e}")
             return False
     
+    # ------------------------------------------------------------------
+    # Zotero attach helpers (path conversion + post-attach verification)
+    # ------------------------------------------------------------------
+
+    def _windows_publications_path_for(self, path) -> str:
+        """Return a Zotero-usable Windows path string for a publications file.
+
+        Always uses the daemon's ``_to_windows_path`` so the conversion is
+        consistent across every call site.  Accepts a ``str`` or ``Path``.
+        """
+        if not path:
+            return ""
+        return self._to_windows_path(Path(path))
+
+    def _verify_pdf_linkage(
+        self,
+        parent_key: str,
+        sent_path: str,
+        scan_path,
+    ) -> bool:
+        """Confirm Zotero stored a linked-file PDF child matching *sent_path*.
+
+        Fetches the parent's children via the Zotero API and checks with an
+        exact-or-suffix match.  If no matching child is found the scan is
+        moved to ``manual_review/`` and ``False`` is returned so callers can
+        propagate the failure without repeating the move logic.
+
+        Args:
+            parent_key:  Zotero parent item key.
+            sent_path:   The ``path`` field that was sent to Zotero (Windows
+                         format, e.g. ``I:\\publications\\Foo.pdf``).
+            scan_path:   Path to the original scan file (used for
+                         ``move_to_manual_review``).
+        """
+        try:
+            children = self.zotero_processor.fetch_item_children(parent_key)
+        except Exception as exc:
+            print(f"⚠️  Could not fetch Zotero children for {parent_key}: {exc}")
+            self.move_to_manual_review(scan_path)
+            return False
+
+        if self.zotero_processor.linked_pdf_exists(children, sent_path):
+            return True
+
+        # Verification failed — print a clear diagnostic summary.
+        linked_paths = [
+            c.get("data", {}).get("path", "")
+            for c in children
+            if c.get("data", {}).get("itemType") == "attachment"
+        ]
+        print(f"\n⚠️  Zotero linkage verification FAILED")
+        print(f"   Parent key : {parent_key}")
+        print(f"   Expected   : {sent_path}")
+        print(f"   Zotero has : {linked_paths or 'no attachment children'}")
+        print(f"   Moving scan to manual_review/ for retry")
+        self.move_to_manual_review(scan_path)
+        return False
+
     def move_to_manual_review(self, pdf_path: Path) -> bool:
         """Move PDF to manual review directory.
         
@@ -11528,21 +11640,26 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         if reuse_path:
             print(f"✅ Existing identical file found: {reuse_path.name} — skipping copy")
             try:
-                windows_path = self._to_windows_path(reuse_path)
+                windows_path = self._windows_publications_path_for(reuse_path)
                 print("📖 Creating Zotero item...")
                 zotero_result = _safe_add_paper(final_metadata, windows_path)
                 if zotero_result.get('success'):
                     print(f"✅ Created Zotero item (key: {zotero_result.get('item_key', 'N/A')})")
                     action = zotero_result.get('action', 'unknown')
+                    item_key = zotero_result.get('item_key')
+
                     if action == 'duplicate_skipped':
                         print("⚠️  Item already exists in Zotero - skipped duplicate")
                     elif action == 'added_with_pdf':
                         print("✅ PDF attached to new Zotero item")
+                        sent_path = zotero_result.get('sent_path', '')
+                        if item_key and sent_path:
+                            if not self._verify_pdf_linkage(item_key, sent_path, pdf_path):
+                                action = 'added_without_pdf'  # treat as failed for logging
                     elif action == 'added_without_pdf':
                         print("⚠️  Item created without attachment")
 
                     # Offer to add a handwritten note
-                    item_key = zotero_result.get('item_key')
                     if item_key:
                         self._prompt_for_note(item_key)
 
@@ -11553,13 +11670,18 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                             original_filename = Path(self._original_scan_path).name
                         self.scanned_papers_logger.log_processing(
                             original_filename=original_filename,
-                            status='success',
+                            status='manual_review' if action == 'added_without_pdf' else 'success',
                             final_filename=reuse_path.name,
                             split=split_status,
                             borders=borders_status,
                             trim=trim_status,
                             zotero_item_code=item_key
                         )
+
+                    if action == 'added_without_pdf':
+                        # Item exists, but Zotero has no verified linked PDF.
+                        # Caller moves scan to manual_review.
+                        return False
 
                     self.move_to_done(pdf_path)
                     print("✅ Processing complete!")
@@ -11645,29 +11767,34 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             if detected_language:
                 final_metadata['language'] = detected_language
         
-        # Create Zotero item (linked file if copy succeeded)
+        # Create Zotero item (linked file only when copy succeeded)
         try:
             print("📖 Creating Zotero item...")
-            attach_target = self._to_windows_path(final_path) if copied_ok else None
+            attach_target = self._windows_publications_path_for(final_path) if copied_ok else None
             zotero_result = _safe_add_paper(final_metadata, attach_target)
-            
+
             if zotero_result.get('success'):
                 print(f"✅ Created Zotero item (key: {zotero_result.get('item_key', 'N/A')})")
                 action = zotero_result.get('action', 'unknown')
                 item_key = zotero_result.get('item_key')
-                
+
                 if action == 'duplicate_skipped':
                     print("⚠️  Item already exists in Zotero - skipped duplicate")
-                    # Still consider this a success - item exists in Zotero
                     self.move_to_done(pdf_path)
                     print("✅ Processing complete!")
                     return True
                 elif action == 'added_with_pdf':
                     print("✅ PDF attached to new Zotero item")
+                    sent_path = zotero_result.get('sent_path', '')
+                    if item_key and sent_path:
+                        if not self._verify_pdf_linkage(item_key, sent_path, pdf_path):
+                            action = 'added_without_pdf'  # treat as failed for logging below
+
+                if action == 'added_with_pdf':
                     # Offer to add a handwritten note
                     if item_key:
                         self._prompt_for_note(item_key)
-                    
+
                     # Log to CSV
                     if hasattr(self, 'scanned_papers_logger'):
                         original_filename = pdf_path.name
@@ -11682,40 +11809,38 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                             trim=trim_status,
                             zotero_item_code=item_key
                         )
-                    
-                    # Move original to done/
+
                     self.move_to_done(pdf_path)
                     print("✅ Processing complete!")
                     return True
-                elif action == 'added_without_pdf':
+
+                if action == 'added_without_pdf':
                     if copied_ok:
                         print("⚠️  Item created but PDF attachment failed")
                     else:
                         print("⚠️  Item created without attachment (file copy failed)")
-                
+
                     # Offer to add a handwritten note
                     if item_key:
                         self._prompt_for_note(item_key)
-                    
-                    # Log to CSV (no preprocessing in handle_create_new_item)
+
+                    # Log to CSV
                     if hasattr(self, 'scanned_papers_logger'):
                         original_filename = pdf_path.name
                         if hasattr(self, '_original_scan_path') and self._original_scan_path:
                             original_filename = Path(self._original_scan_path).name
                         self.scanned_papers_logger.log_processing(
                             original_filename=original_filename,
-                            status='success',
+                            status='manual_review',
                             final_filename=final_path.name,
                             split=split_status,
                             borders=borders_status,
                             trim=trim_status,
                             zotero_item_code=item_key
                         )
-                    
-                    # Move original to done/
-                    self.move_to_done(pdf_path)
-                    print("✅ Processing complete!")
-                    return True
+
+                    # Do not mark scan as done when Zotero lacks the PDF attachment.
+                    return False
                 else:
                     # Unknown action but success=True - still treat as success
                     self.logger.warning(f"Unknown action '{action}' but zotero_result['success'] is True")
@@ -12504,15 +12629,19 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         self.logger.debug(f"Attaching {target_path.name} to Zotero item {item_key}")
         
         try:
-            result = self.zotero_processor.attach_pdf_to_existing(item_key, target_path)
-            
-            if not result:
+            sent_path = self._windows_publications_path_for(target_path)
+            result = self.zotero_processor.attach_pdf_to_existing(item_key, sent_path)
+
+            if not result.get('ok'):
                 print("❌ Zotero attachment failed")
                 print(f"⚠️  PDF copied but not attached: {target_path}")
                 print("📝 Moving scan to manual review")
                 self.move_to_manual_review(pdf_path)
                 return
-            
+
+            if not self._verify_pdf_linkage(item_key, result['sent_path'], pdf_path):
+                return
+
             print("✅ Attached to Zotero")
             
             # Update URL field if metadata has URL and item doesn't have it yet
