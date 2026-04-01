@@ -365,6 +365,45 @@ Behavior note:
 - **Workflow:** Landscape detection → Border removal → Intelligent splitting
 - **Fallback:** Uses geometric split (50%) if detection fails
 - **Benefit:** Significantly improves splitting accuracy for physical book scans with visible spines, works correctly even after border removal
+
+### 6b. Document Separator Splitting (one scan PDF → multiple papers)
+
+Some scans contain multiple scientific papers in one PDF, separated by a physical separator sheet (colored paper) inserted during scanning.
+
+- **User-visible label:** “Separate this PDF into files (two or more papers)”
+- **Entry points:**
+  - **Early (automatic):** before metadata extraction (before GREP/GROBID/search). If separator pages are detected, the daemon proposes a split and asks for confirmation.
+  - **Late (manual):** from the `PDF PREVIEW` menu (PDF preprocessing/attachment stage), to recover when the scan contains multiple papers.
+
+#### Separator detection (reliable + cheap)
+
+The daemon uses a conservative detector to avoid false positives:
+
+- **Short-text gate:** only considers pages with very small extracted text (separator pages usually have only a few words).
+- **Token check:** the page text contains `SEPARATOR` and/or `DOCUMENT SEPARATOR`.
+- **Vivid background heuristic:** separator sheets are typically bright colored. A low-res thumbnail render is used to detect “vivid/non-white dominant” pages.
+- **Duplex/back-side rule:** if a **vivid blank page** exists adjacent to a separator page (colored back side not removed by the scanner), it is **always dropped** automatically.
+
+#### Manual split plan syntax (keyboard-friendly)
+
+If the proposed split is wrong (or auto-detection is unavailable), you can enter a manual split plan.
+
+- **Groups:** separated by `;`
+- **Keep group (creates an output file):** `1-12` or `1-3,8-10`
+- **Drop group (pages to remove):** `-13` or `-(13-14)`
+- **Shorthand:** `;-13;` means “drop page 13 and keep the rest split around it”
+- **Keep-only mode:** `;;` means “keep only the listed groups; implicitly drop all other pages”
+
+Examples:
+- `1-12;-13;14-31` → output1 pages 1–12, drop 13, output2 pages 14–31
+- `1-5;-6;7-10;-11;12-31` → multiple outputs, drop separator pages
+- `1-12;;14-31` → keep-only mode (drop everything except the kept groups)
+
+#### File handling and reprocessing behavior
+
+- Outputs are written into the **watch folder** as `__partN` files (preserving the scan prefix like `EN_...`), so they are picked up by the normal processing flow.
+- Only after outputs are created does the daemon move the original scan to `done/`.
+- The daemon then re-queues (or the watcher picks up) the new PDFs so each part is processed from the beginning.
 - **Handles:** `/tmp/` paths, cloud drive paths, path conversion failures
 
 ### 6. Path Validation
