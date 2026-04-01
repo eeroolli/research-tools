@@ -11,10 +11,41 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
-from scripts.paper_processor_daemon import PaperProcessorDaemon
+# Import-time dependency stubs (tests should run without watchdog installed)
+watchdog_mod = types.ModuleType("watchdog")
+watchdog_observers_mod = types.ModuleType("watchdog.observers")
+watchdog_polling_mod = types.ModuleType("watchdog.observers.polling")
+watchdog_events_mod = types.ModuleType("watchdog.events")
+
+
+class _DummyPollingObserver:
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+
+watchdog_polling_mod.PollingObserver = _DummyPollingObserver
+
+
+class _DummyEventHandler:
+    pass
+
+
+watchdog_events_mod.FileSystemEventHandler = _DummyEventHandler
+
+sys.modules.setdefault("watchdog", watchdog_mod)
+sys.modules.setdefault("watchdog.observers", watchdog_observers_mod)
+sys.modules.setdefault("watchdog.observers.polling", watchdog_polling_mod)
+sys.modules.setdefault("watchdog.events", watchdog_events_mod)
+
+try:
+    from scripts.paper_processor_daemon import PaperProcessorDaemon
+except ModuleNotFoundError as exc:
+    pytest.skip(f"Optional dependency missing for daemon import: {exc}", allow_module_level=True)
 
 
 def _make_dummy_pdf(path: Path) -> None:

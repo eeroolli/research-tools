@@ -47,7 +47,14 @@ requests_mod.Session = lambda: SimpleNamespace(headers={}, get=lambda *a, **k: S
 sys.modules.setdefault("requests", requests_mod)
 
 sys.modules.setdefault("cv2", types.ModuleType("cv2"))
-sys.modules.setdefault("fitz", types.ModuleType("fitz"))
+try:
+    import importlib.util as _importlib_util
+
+    if _importlib_util.find_spec("fitz") is None:
+        sys.modules.setdefault("fitz", types.ModuleType("fitz"))
+except ImportError:
+    # Extremely minimal Python env; fall back to stubbing.
+    sys.modules.setdefault("fitz", types.ModuleType("fitz"))
 bs4_mod = types.ModuleType("bs4")
 bs4_mod.BeautifulSoup = object
 sys.modules.setdefault("bs4", bs4_mod)

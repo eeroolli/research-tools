@@ -64,6 +64,14 @@ from shared_tools.utils.isbn_matcher import ISBNMatcher
 
 # Import border remover for scanned documents
 from shared_tools.pdf.border_remover import BorderRemover
+from shared_tools.pdf.separator_splitter import (
+    SplitPlanError,
+    build_plan_from_drop_pages,
+    detect_separator_pages,
+    format_split_plan,
+    parse_split_plan,
+    save_as_documents,
+ )
 
 # Import color utilities
 from shared_tools.ui.colors import ColorScheme, Colors
@@ -4683,6 +4691,194 @@ class PaperProcessorDaemon:
         if name_lower.endswith('_split.pdf'):
             return False
         return any(filename.startswith(p) for p in prefixes)
+
+    # ------------------------
+    # Document separator splitting (one PDF -> multiple PDFs)
+    # ------------------------
+
+    @staticmethod
+    def _split_prefix_and_stem(filename: str) -> tuple[str, str]:
+        """Return (scan_prefix, base_stem_without_prefix_and_ext).
+
+        Scan prefix must be one of: NO_, EN_, DE_, SV_, FI_, DA_.
+        """
+        name = str(filename)
+        prefix_candidates = ("NO_", "EN_", "DE_", "SV_", "FI_", "DA_")
+        prefix = ""
+        for p in prefix_candidates:
+            if name.startswith(p):
+                prefix = p
+                break
+        stem = Path(name).stem
+        if prefix and stem.startswith(prefix):
+            stem = stem[len(prefix):]
+        return prefix, stem
+
+    def _document_split_output_paths(self, pdf_path: Path, parts: int) -> list[Path]:
+        """Create output paths in watch folder using __part{n} suffix.
+
+        Guardrails:
+        - preserve scan prefix so watcher will process
+        - avoid *_split.pdf suffix (watcher ignores it)
+        """
+        prefix, stem = self._split_prefix_and_stem(pdf_path.name)
+        if not prefix:
+            # Fallback: preserve filename as-is; still avoid *_split.pdf suffix.
+            prefix = ""
+        base = (stem or Path(pdf_path.name).stem)
+        # Ensure base doesn't already end with __partN to avoid runaway nesting.
+        base = re.sub(r"__part\d+$", "", base)
+
+        out: list[Path] = []
+        for i in range(1, parts + 1):
+            candidate = pdf_path.parent / f"{prefix}{base}__part{i}.pdf"
+            # Resolve collisions deterministically.
+            if candidate.exists():
+                counter = 2
+                while True:
+                    c2 = pdf_path.parent / f"{prefix}{base}__part{i}_{counter}.pdf"
+                    if not c2.exists():
+                        candidate = c2
+                        break
+                    counter += 1
+            out.append(candidate)
+        return out
+
+    def _separate_pdf_into_files_interactive(self, pdf_path: Path) -> Optional[list[Path]]:
+        """Interactive splitter: auto-detect separators, then confirm or manual plan."""
+        if not pdf_path.exists():
+            print("❌ File no longer exists.")
+            return None
+
+        # Determine page count for plan validation.
+        try:
+            import fitz
+            with fitz.open(str(pdf_path)) as doc:
+                total_pages = len(doc)
+        except Exception as e:
+            print(f"❌ Could not open PDF for splitting: {e}")
+            return None
+
+        if total_pages < 2:
+            print("ℹ️  PDF has < 2 pages; nothing to split.")
+            return None
+
+        # Auto-detect: separator pages + adjacent vivid blanks to drop.
+        try:
+            sep_0, drop_0 = detect_separator_pages(pdf_path)
+        except Exception as e:
+            self.logger.debug(f"Separator detection failed: {e}")
+            sep_0, drop_0 = ([], set())
+
+        sep_1 = [p + 1 for p in sep_0]
+        drop_1 = sorted({p + 1 for p in drop_0})
+
+        proposed_plan = None
+        if sep_1 or drop_1:
+            # Prefer split around drop pages (separator + vivid blank neighbors).
+            try:
+                proposed_plan = build_plan_from_drop_pages(total_pages=total_pages, drop_pages_1based=drop_1)
+            except Exception:
+                proposed_plan = None
+
+        print("\n" + "=" * 70)
+        print("Separate this PDF into files")
+        print("=" * 70)
+        print(f"PDF: {pdf_path.name}")
+        print(f"Scan pages: {total_pages} (counting physical scan pages in this PDF)")
+        if sep_1:
+            print(f"Detected separator pages: {sep_1}")
+        if drop_1:
+            print(f"Auto-drop pages: {drop_1}")
+        print()
+
+        if proposed_plan:
+            print("Proposed split plan:")
+            print(format_split_plan(proposed_plan))
+            print()
+            print("Options:")
+            print("  [1] Accept and split as proposed")
+            print("  [2] Enter a manual split plan")
+            print("  [3] Cancel (no split)")
+            choice = input("Enter choice [1/2/3]: ").strip() or "1"
+            if choice == "3":
+                return None
+            if choice == "2":
+                proposed_plan = None  # fall through to manual
+        else:
+            print("No reliable separator auto-detection found.")
+            print("You can still enter a manual split plan.")
+            print()
+
+        # Manual plan entry (or override)
+        if proposed_plan is None:
+            print("Manual split plan syntax:")
+            print("  - Groups separated by ';'")
+            print("  - Keep group: 1-12 or 1-3,8-10")
+            print("  - Drop group: -13 or -(13-14)")
+            print("  - Keep-only mode: ';;' (keeps listed groups, drops all others)")
+            print("Examples:")
+            print("  1-12;-13;14-N  (with N = total scan pages)")
+            print("  ;-13;          (drop page 13; keep the rest split around it)")
+            print()
+            manual = input("Enter split plan: ").strip()
+            if not manual:
+                print("Cancelled.")
+                return None
+            try:
+                proposed_plan = parse_split_plan(manual, total_pages=total_pages)
+            except SplitPlanError as e:
+                print(f"❌ Invalid split plan: {e}")
+                return None
+
+            print("\nInterpreted plan:")
+            print(format_split_plan(proposed_plan))
+            confirm = input("Proceed with this split? [y/N]: ").strip().lower()
+            if confirm != "y":
+                print("Cancelled.")
+                return None
+
+        # Write outputs into the watch folder and verify they exist.
+        out_paths = self._document_split_output_paths(pdf_path, len(proposed_plan.kept_outputs))
+        try:
+            written = save_as_documents(pdf_path, proposed_plan, out_dir=pdf_path.parent, output_paths=out_paths)
+        except Exception as e:
+            print(f"❌ Split failed: {e}")
+            return None
+
+        print("\n✅ Split created:")
+        for p in written:
+            print(f"  - {p.name}")
+        return written
+
+    def _maybe_auto_split_separator_documents(self, pdf_path: Path) -> bool:
+        """Early hook: detect separators, confirm, split, enqueue new PDFs, move original to done/.
+
+        Returns True if current pdf was handled (split+queued) and should not continue.
+        """
+        try:
+            sep_0, drop_0 = detect_separator_pages(pdf_path)
+        except Exception:
+            return False
+        if not sep_0:
+            return False
+
+        # Offer user the proposed split, with manual override.
+        written = self._separate_pdf_into_files_interactive(pdf_path)
+        if not written:
+            return False
+
+        # Enqueue new PDFs so they are processed from the beginning.
+        for p in written:
+            if p.exists() and self.should_process(p.name):
+                self._paper_queue.put(p)
+                self.logger.info(f"Queued split output: {p.name}")
+            else:
+                self.logger.info(f"Split output not queued (prefix/suffix rule): {p.name}")
+
+        # Only after outputs are created and queued, move the original to done/.
+        self.move_to_done(pdf_path, log_entry={"status": "success", "split": "documents"})
+        return True
     
     def process_paper(self, pdf_path: Path):
         """Process a single paper with full user interaction.
@@ -4718,6 +4914,10 @@ class PaperProcessorDaemon:
 
         # UI simplification: we treat scan page 1 as document start.
         # This removes the extra prompt and avoids unnecessary re-creating PDFs.
+        # Early: split multiple papers if separator pages are detected.
+        if self._maybe_auto_split_separator_documents(pdf_path):
+            return
+
         pdf_to_use = pdf_path
         temp_pdf_path = None
         effective_page_offset = 0
@@ -6328,6 +6528,11 @@ class PaperProcessorDaemon:
             else:
                 option_map[option_num] = 'manual_split'
                 print(Colors.colorize(f"  [{option_num}] Split by manual definition (e.g., 55/45)", ColorScheme.LIST))
+
+            # Manual document split (one PDF -> multiple PDFs) - always available
+            option_num += 1
+            option_map[option_num] = 'split_documents'
+            print(Colors.colorize(f"  [{option_num}] Separate this PDF into files (two or more papers)", ColorScheme.LIST))
             
             print(Colors.colorize("  [z] Go back to metadata", ColorScheme.LIST))
             print(Colors.colorize("  [q] Quit - move to manual review", ColorScheme.LIST))
@@ -6510,6 +6715,16 @@ class PaperProcessorDaemon:
                                 break  # Continue loop to show preview again
                         
                         # Continue loop to show preview again
+
+                    elif action == 'split_documents':
+                        written = self._separate_pdf_into_files_interactive(original_pdf)
+                        if written:
+                            for p in written:
+                                if p.exists() and self.should_process(p.name):
+                                    self._paper_queue.put(p)
+                            self.move_to_done(original_pdf, log_entry={"status": "success", "split": "documents"})
+                            return None, {"restart": True, "split_documents_written": [str(p) for p in written]}
+                        # cancelled -> continue preview
                     
                     else:
                         print_unacceptable_input()
@@ -9615,6 +9830,10 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         # Handle user choices from preview menu
         if final_pdf is None:
+            if final_state.get('restart'):
+                # Split-into-documents path already queued outputs and moved original.
+                print("\n🔄 Restarting: split documents were queued for processing.")
+                return True
             if final_state.get('back'):
                 # User wants to go back - this should be handled by caller
                 print("\n⬅️  Going back...")
@@ -11618,6 +11837,9 @@ if ($hwnd -ne [IntPtr]::Zero) {{
 
         if final_pdf is None:
             # User cancelled the preview flow.
+            if final_state.get('restart'):
+                print("\n🔄 Restarting: split documents were queued for processing.")
+                return True
             if final_state.get('quit'):
                 moved = self.move_to_manual_review(pdf_path)
                 if moved:
@@ -12344,6 +12566,9 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             
             # Handle user choices
             if final_pdf is None:
+                if final_state.get('restart'):
+                    print("\n🔄 Restarting: split documents were queued for processing.")
+                    return
                 if final_state.get('back'):
                     # User wants to go back to metadata
                     print("\n⬅️  Going back to metadata...")
