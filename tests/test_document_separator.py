@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from shared_tools.pdf.separator_splitter import (
-    SplitPlanError,
+from shared_tools.pdf.document_separator import (
+    SeparationPlanError,
     build_plan_from_drop_pages,
     detect_separator_pages,
-    format_split_plan,
-    parse_split_plan,
+    format_separation_plan,
+    parse_separation_plan,
     save_as_documents,
 )
 
@@ -43,36 +43,54 @@ def _make_pdf(tmp_path: Path, *, pages: list[dict]) -> Path:
     return out
 
 
-class TestParseSplitPlan:
+class TestParseSeparationPlan:
     def test_explicit_partition(self):
-        plan = parse_split_plan("1-12;-13;14-31", total_pages=31)
+        plan = parse_separation_plan("1-12;-13;14-31", total_pages=31)
         assert len(plan.kept_outputs) == 2
         assert plan.kept_outputs[0][0] == 1 and plan.kept_outputs[0][-1] == 12
         assert 13 in plan.dropped_pages
         assert plan.kept_outputs[1][0] == 14 and plan.kept_outputs[1][-1] == 31
 
     def test_multiple_outputs_drop_separators(self):
-        plan = parse_split_plan("1-5;-6;7-10;-11;12-31", total_pages=31)
+        plan = parse_separation_plan("1-5;-6;7-10;-11;12-31", total_pages=31)
         assert len(plan.kept_outputs) == 3
         assert plan.dropped_pages == {6, 11}
 
     def test_drop_only_shorthand(self):
-        plan = parse_split_plan(";-13;", total_pages=31)
+        plan = parse_separation_plan(";-13;", total_pages=31)
         assert len(plan.kept_outputs) == 2
         assert plan.dropped_pages == {13}
         assert plan.kept_outputs[0] == list(range(1, 13))
         assert plan.kept_outputs[1] == list(range(14, 32))
 
     def test_keep_only_mode(self):
-        plan = parse_split_plan("1-12;;14-31", total_pages=31)
+        plan = parse_separation_plan("1-12;;14-31", total_pages=31)
         assert plan.keep_only is True
         assert plan.kept_outputs[0] == list(range(1, 13))
         assert plan.kept_outputs[1] == list(range(14, 32))
         assert 13 in plan.dropped_pages
 
     def test_reject_missing_pages_in_explicit_mode(self):
-        with pytest.raises(SplitPlanError):
-            parse_split_plan("1-3;-4", total_pages=10)
+        with pytest.raises(SeparationPlanError):
+            parse_separation_plan("1-3;-4", total_pages=10)
+
+
+class TestFormatSeparationPlan:
+    def test_singleton_output_not_shown_as_duplicate_range(self):
+        """Avoid 'pages 12–12', which reads like a length of 12."""
+        plan = parse_separation_plan(";-11;", total_pages=12)
+        txt = format_separation_plan(plan)
+        assert "scan page 12 only" in txt
+        assert "12–12" not in txt
+        assert "12-12" not in txt
+        assert "Total pages in this scan: 12" in txt
+        assert "before writing separate outputs" in txt
+
+    def test_range_output_shows_scan_span_and_count(self):
+        plan = parse_separation_plan(";-13;", total_pages=31)
+        txt = format_separation_plan(plan)
+        assert "scan pages 14–31" in txt
+        assert "(18 pages in this output PDF)" in txt
 
 
 class TestDetectSeparatorPages:
@@ -136,6 +154,5 @@ class TestSaveAsDocuments:
             d2.close()
 
         # Smoke: formatted plan includes drop page
-        txt = format_split_plan(plan)
+        txt = format_separation_plan(plan)
         assert "Drop" in txt
-

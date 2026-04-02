@@ -1439,6 +1439,9 @@ def create_pdf_preview_page(daemon) -> Page:
         else:
             lines.append(f"  [{option_num}] Split by manual definition (e.g., 55/45)")
         
+        option_num += 1
+        lines.append(f"  [{option_num}] Separate this PDF into files (two or more papers)")
+        
         lines.append("  [z] Go back to proposed actions")
         lines.append("  [q] Quit - move to manual review")
         
@@ -1477,6 +1480,8 @@ def create_pdf_preview_page(daemon) -> Page:
                 return _handle_add_trimming(ctx, daemon)
             elif action == 'manual_split':
                 return _handle_manual_split(ctx, daemon)
+            elif action == 'separate_documents':
+                return _handle_separate_documents(ctx, daemon)
             else:
                 print("⚠️  Invalid choice.")
                 return NavigationResult.show_page('pdf_preview')
@@ -1487,6 +1492,9 @@ def create_pdf_preview_page(daemon) -> Page:
     handler_4 = make_handler(4)
     handler_5 = make_handler(5)
     handler_6 = make_handler(6)
+    handler_7 = make_handler(7)
+    handler_8 = make_handler(8)
+    handler_9 = make_handler(9)
     
     def handler_z(ctx):
         """Go back to PROPOSED ACTIONS."""
@@ -1504,7 +1512,7 @@ def create_pdf_preview_page(daemon) -> Page:
         title='PDF PREVIEW',
         content=content,
         prompt='\nEnter your choice: ',
-        valid_inputs=['1', '2', '3', '4', '5', '6', 'z', 'q'],
+        valid_inputs=['1', '2', '3', '4', '5', '6', '7', '8', '9', 'z', 'q'],
         handlers={
             '1': handler_1,
             '2': handler_2,
@@ -1512,6 +1520,9 @@ def create_pdf_preview_page(daemon) -> Page:
             '4': handler_4,
             '5': handler_5,
             '6': handler_6,
+            '7': handler_7,
+            '8': handler_8,
+            '9': handler_9,
             'z': handler_z
         },
         default='1',
@@ -1524,7 +1535,8 @@ def create_pdf_preview_page(daemon) -> Page:
 def _get_pdf_preview_option_action(option_num: int, preprocessing_state: dict) -> str:
     """Determine what action corresponds to an option number based on current state.
     
-    Returns: 'accept', 'drop_border', 'drop_split', 'use_5050', 'drop_trim', 'add_trim', 'manual_split', or None
+    Returns: 'accept', 'drop_border', 'drop_split', 'use_5050', 'drop_trim', 'add_trim',
+    'manual_split', 'separate_documents', or None
     """
     if option_num == 1:
         return 'accept'
@@ -1564,7 +1576,33 @@ def _get_pdf_preview_option_action(option_num: int, preprocessing_state: dict) -
     if option_count == option_num:
         return 'manual_split'
     
+    # Document separator (one scan -> multiple PDFs) — always available
+    option_count += 1
+    if option_count == option_num:
+        return 'separate_documents'
+    
     return None
+
+
+def _handle_separate_documents(ctx, daemon):
+    """Run interactive document-separator flow; page indices match PDF PREVIEW (preprocessed file when set)."""
+    from pathlib import Path
+
+    pdf_path = ctx['pdf_path']
+    proc = ctx.get('processed_pdf')
+    if proc and Path(proc).exists():
+        written = daemon._separate_pdf_into_files_interactive(
+            pdf_path, page_source_pdf=Path(proc)
+        )
+    else:
+        written = daemon._separate_pdf_into_files_interactive(pdf_path)
+    if not written:
+        return NavigationResult.show_page('pdf_preview')
+    for p in written:
+        if p.exists() and daemon.should_process(p.name):
+            daemon._paper_queue.put(p)
+    daemon.move_to_done(pdf_path, log_entry={"status": "success", "split": "document_separator"})
+    return NavigationResult.separate_documents_queued()
 
 
 def _handle_drop_border_removal(ctx, daemon):

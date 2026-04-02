@@ -6,13 +6,13 @@ from typing import Iterable, List, Optional, Sequence, Set, Tuple
 
 
 # -----------------------------------------------------------------------------
-# Split plan model
+# Document separation plan model (distinct from landscape/two-up page splitting)
 # -----------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class SplitPlan:
-    """A fully-interpreted split plan for a PDF with N scan pages (1-based).
+class SeparationPlan:
+    """A fully-interpreted separation plan for a PDF with N scan pages (1-based).
 
     - kept_outputs: each inner list is the ordered list of scan page numbers
       that will be written into one output PDF.
@@ -32,12 +32,12 @@ class SplitPlan:
         return s
 
 
-class SplitPlanError(ValueError):
+class SeparationPlanError(ValueError):
     pass
 
 
 # -----------------------------------------------------------------------------
-# Manual plan parser
+# Separation plan parser
 # -----------------------------------------------------------------------------
 
 
@@ -54,15 +54,15 @@ def _expand_range_token(tok: str) -> List[int]:
         a_str = a_str.strip()
         b_str = b_str.strip()
         if not a_str.isdigit() or not b_str.isdigit():
-            raise SplitPlanError(f"Invalid range token: {tok!r}")
+            raise SeparationPlanError(f"Invalid range token: {tok!r}")
         a = int(a_str)
         b = int(b_str)
         if a <= b:
             return list(range(a, b + 1))
         # allow descending? prefer to reject to avoid surprises
-        raise SplitPlanError(f"Descending range not allowed: {tok!r}")
+        raise SeparationPlanError(f"Descending range not allowed: {tok!r}")
     if not tok.isdigit():
-        raise SplitPlanError(f"Invalid page token: {tok!r}")
+        raise SeparationPlanError(f"Invalid page token: {tok!r}")
     return [int(tok)]
 
 
@@ -83,11 +83,11 @@ def _parse_page_list(expr: str) -> List[int]:
 def _validate_pages_in_range(pages: Iterable[int], total_pages: int, *, label: str) -> None:
     for p in pages:
         if p < 1 or p > total_pages:
-            raise SplitPlanError(f"{label}: page {p} out of range 1..{total_pages}")
+            raise SeparationPlanError(f"{label}: page {p} out of range 1..{total_pages}")
 
 
-def parse_split_plan(plan: str, total_pages: int) -> SplitPlan:
-    """Parse manual split plan syntax.
+def parse_separation_plan(plan: str, total_pages: int) -> SeparationPlan:
+    """Parse manual document-separation plan syntax.
 
     Syntax:
       - groups separated by ';'
@@ -97,14 +97,14 @@ def parse_split_plan(plan: str, total_pages: int) -> SplitPlan:
 
     Special shorthand:
       - If there are NO explicit keep groups, drop-only plans like ';-13;' imply
-        keeping the remaining pages split around the dropped pages.
+        keeping the remaining pages grouped around the dropped pages.
     """
     if total_pages < 1:
-        raise SplitPlanError("total_pages must be >= 1")
+        raise SeparationPlanError("total_pages must be >= 1")
 
     raw = (plan or "").strip()
     if not raw:
-        raise SplitPlanError("Empty split plan")
+        raise SeparationPlanError("Empty separation plan")
 
     keep_only = ";;" in raw
     tokens = [t.strip() for t in raw.split(";")]
@@ -122,7 +122,7 @@ def parse_split_plan(plan: str, total_pages: int) -> SplitPlan:
             inner = inner[1:-1].strip()
         pages = _parse_page_list(inner)
         if not pages:
-            raise SplitPlanError(f"Empty drop group: {tok!r}")
+            raise SeparationPlanError(f"Empty drop group: {tok!r}")
         _validate_pages_in_range(pages, total_pages, label="drop")
         return pages
 
@@ -139,14 +139,14 @@ def parse_split_plan(plan: str, total_pages: int) -> SplitPlan:
 
             pages = _parse_page_list(tok)
             if not pages:
-                raise SplitPlanError(f"Empty keep group: {tok!r}")
+                raise SeparationPlanError(f"Empty keep group: {tok!r}")
             _validate_pages_in_range(pages, total_pages, label="keep")
             keep_groups.append(pages)
 
         kept_set = set().union(*(set(g) for g in keep_groups)) if keep_groups else set()
         if kept_set & drop_pages:
             overlap = sorted(kept_set & drop_pages)
-            raise SplitPlanError(f"Pages appear in both keep and drop: {overlap}")
+            raise SeparationPlanError(f"Pages appear in both keep and drop: {overlap}")
 
         if keep_only:
             # Implicitly drop everything not kept.
@@ -157,19 +157,19 @@ def parse_split_plan(plan: str, total_pages: int) -> SplitPlan:
             covered = kept_set | drop_pages
             if covered != set(range(1, total_pages + 1)):
                 missing = sorted(set(range(1, total_pages + 1)) - covered)
-                raise SplitPlanError(
+                raise SeparationPlanError(
                     "Plan does not cover all pages (use keep-only mode ';;' to allow omissions). "
                     f"Missing: {missing}"
                 )
 
-        return SplitPlan(total_pages=total_pages, kept_outputs=keep_groups, dropped_pages=drop_pages, keep_only=keep_only)
+        return SeparationPlan(total_pages=total_pages, kept_outputs=keep_groups, dropped_pages=drop_pages, keep_only=keep_only)
 
     # Drop-only shorthand: build keep groups as complement segments in ascending order.
     for tok in tokens:
         if not tok:
             continue
         if not tok.startswith("-"):
-            raise SplitPlanError(f"Drop-only plan cannot contain keep group: {tok!r}")
+            raise SeparationPlanError(f"Drop-only plan cannot contain keep group: {tok!r}")
         pages = parse_drop(tok)
         drop_pages.update(pages)
 
@@ -177,9 +177,9 @@ def parse_split_plan(plan: str, total_pages: int) -> SplitPlan:
     keep_pages = [p for p in all_pages if p not in drop_pages]
 
     if not keep_pages:
-        raise SplitPlanError("Plan drops all pages; no outputs would be created")
+        raise SeparationPlanError("Plan drops all pages; no outputs would be created")
 
-    # Split into contiguous segments.
+    # Divide kept pages into contiguous output segments.
     segments: List[List[int]] = []
     cur: List[int] = []
     last: Optional[int] = None
@@ -193,20 +193,35 @@ def parse_split_plan(plan: str, total_pages: int) -> SplitPlan:
     if cur:
         segments.append(cur)
 
-    return SplitPlan(total_pages=total_pages, kept_outputs=segments, dropped_pages=drop_pages, keep_only=False)
+    return SeparationPlan(total_pages=total_pages, kept_outputs=segments, dropped_pages=drop_pages, keep_only=False)
 
 
-def format_split_plan(plan: SplitPlan) -> str:
-    """Return a human-readable multi-line plan summary (1-based scan pages)."""
+def _format_output_line(i: int, group: List[int]) -> str:
+    """One summary line for a kept group; always uses *scan* page numbering (source PDF)."""
+    if len(group) == 1:
+        return f"Output {i}: scan page {group[0]} only (single page in this output PDF)"
+    if _is_contiguous(group):
+        a, b = group[0], group[-1]
+        n = len(group)
+        return f"Output {i}: scan pages {a}–{b} ({n} pages in this output PDF)"
+    return f"Output {i}: scan pages {group}"
+
+
+def format_separation_plan(plan: SeparationPlan) -> str:
+    """Return a human-readable multi-line plan summary (1-based scan pages in the source PDF)."""
     lines: List[str] = []
-    lines.append(f"Total scan pages: {plan.total_pages}")
+    lines.append(f"Total pages in this scan: {plan.total_pages}")
+    lines.append(
+        "(Numbers below are positions in this scan PDF before writing separate outputs, "
+        "not page counts inside each output file.)"
+    )
     for i, group in enumerate(plan.kept_outputs, 1):
         if not group:
             continue
-        lines.append(f"Output {i}: pages {group[0]}–{group[-1]}" if _is_contiguous(group) else f"Output {i}: pages {group}")
+        lines.append(_format_output_line(i, group))
     if plan.dropped_pages:
         dropped = sorted(plan.dropped_pages)
-        lines.append(f"Drop: {dropped}")
+        lines.append(f"Drop from scan (page numbers): {dropped}")
     if plan.keep_only:
         lines.append("Mode: keep-only (implicit drop of all other pages)")
     return "\n".join(lines)
@@ -342,13 +357,13 @@ def detect_separator_pages(pdf_path: Path) -> Tuple[List[int], Set[int]]:
         doc.close()
 
 
-def build_plan_from_drop_pages(*, total_pages: int, drop_pages_1based: Sequence[int]) -> SplitPlan:
-    """Build a plan that keeps all pages except the dropped ones, splitting into outputs."""
+def build_plan_from_drop_pages(*, total_pages: int, drop_pages_1based: Sequence[int]) -> SeparationPlan:
+    """Build a plan that keeps all pages except the dropped ones, as separate output PDFs."""
     drop_set = set(int(p) for p in drop_pages_1based)
     _validate_pages_in_range(drop_set, total_pages, label="drop")
     keep_pages = [p for p in range(1, total_pages + 1) if p not in drop_set]
     if not keep_pages:
-        raise SplitPlanError("Dropping all pages would create no outputs")
+        raise SeparationPlanError("Dropping all pages would create no outputs")
     # contiguous segments
     segments: List[List[int]] = []
     cur: List[int] = []
@@ -362,10 +377,10 @@ def build_plan_from_drop_pages(*, total_pages: int, drop_pages_1based: Sequence[
         last = p
     if cur:
         segments.append(cur)
-    return SplitPlan(total_pages=total_pages, kept_outputs=segments, dropped_pages=drop_set, keep_only=False)
+    return SeparationPlan(total_pages=total_pages, kept_outputs=segments, dropped_pages=drop_set, keep_only=False)
 
 
-def build_plan_from_separators(*, total_pages: int, separator_pages_1based: Sequence[int]) -> SplitPlan:
+def build_plan_from_separators(*, total_pages: int, separator_pages_1based: Sequence[int]) -> SeparationPlan:
     """Canonical plan: keep around separators; drop separators (and nothing else)."""
     return build_plan_from_drop_pages(total_pages=total_pages, drop_pages_1based=list(separator_pages_1based))
 
@@ -377,38 +392,40 @@ def build_plan_from_separators(*, total_pages: int, separator_pages_1based: Sequ
 
 def save_as_documents(
     pdf_path: Path,
-    split_plan: SplitPlan,
+    separation_plan: SeparationPlan,
     *,
     out_dir: Path,
     output_paths: Sequence[Path],
 ) -> List[Path]:
-    """Write outputs according to split_plan into the provided output_paths.
+    """Write outputs according to separation_plan into the provided output_paths.
 
-    output_paths length must equal len(split_plan.kept_outputs).
+    output_paths length must equal len(separation_plan.kept_outputs).
     """
     try:
         import fitz  # type: ignore
     except Exception as exc:
         raise RuntimeError("PyMuPDF (fitz) is required for PDF slicing") from exc
 
-    if len(output_paths) != len(split_plan.kept_outputs):
-        raise SplitPlanError("output_paths count must match number of output groups")
+    if len(output_paths) != len(separation_plan.kept_outputs):
+        raise SeparationPlanError("output_paths count must match number of output groups")
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     src = fitz.open(str(pdf_path))
     try:
-        if len(src) != split_plan.total_pages:
+        if len(src) != separation_plan.total_pages:
             # Allow mismatch only if caller derived plan from a different view; treat as hard error for safety.
-            raise SplitPlanError(
-                f"PDF page count changed: plan={split_plan.total_pages} actual={len(src)}"
+            raise SeparationPlanError(
+                f"PDF page count changed: plan={separation_plan.total_pages} actual={len(src)}"
             )
 
         written: List[Path] = []
-        for group_idx, (pages_1based, out_path) in enumerate(zip(split_plan.kept_outputs, output_paths), 1):
+        for group_idx, (pages_1based, out_path) in enumerate(
+            zip(separation_plan.kept_outputs, output_paths), 1
+        ):
             if not pages_1based:
-                raise SplitPlanError(f"Output group {group_idx} is empty")
+                raise SeparationPlanError(f"Output group {group_idx} is empty")
             out_path = Path(out_path)
             new_doc = fitz.open()
             try:
@@ -419,7 +436,7 @@ def save_as_documents(
                 new_doc.close()
 
             if not out_path.exists():
-                raise SplitPlanError(f"Failed to write output PDF: {out_path}")
+                raise SeparationPlanError(f"Failed to write output PDF: {out_path}")
             written.append(out_path)
         return written
     finally:

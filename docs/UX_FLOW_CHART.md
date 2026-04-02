@@ -349,6 +349,13 @@ Behavior note:
 - **Method:** `_copy_file_universal()` - Tries native Python first, falls back to PowerShell
 - **Benefit:** Fast for local paths, robust for cloud drives
 
+### Terminology: **split** vs **separation**
+
+These words mean different things in this codebase and in the UX:
+
+- **Split (landscape / two-up):** Preprocessing that **reformats layout** inside one PDF—e.g. turning a landscape two-up scan into portrait-oriented pages (gutter detection, geometric 50/50, `_double` filename rule, “Split” lines on PDF PREVIEW). It is about **how each physical page is cut**, not about producing multiple library items from one file.
+- **Separation (document separator):** Taking **one scan PDF** and writing **several output PDFs** (different papers/items), using separator sheets and/or a manual **separation plan** (`shared_tools/pdf/document_separator.py`). It applies whether the file is already portrait or still two-up; plan page numbers follow the file shown in **PDF PREVIEW** (often the preprocessed, post-split layout).
+
 ### 6. Intelligent Two-Up Page Splitting
 - **Landscape Detection:** Happens BEFORE border removal to ensure accurate detection even if border removal changes dimensions
 - **Detection Methods:**
@@ -366,14 +373,14 @@ Behavior note:
 - **Fallback:** Uses geometric split (50%) if detection fails
 - **Benefit:** Significantly improves splitting accuracy for physical book scans with visible spines, works correctly even after border removal
 
-### 6b. Document Separator Splitting (one scan PDF → multiple papers)
+### 6b. Document separator (one scan PDF → multiple papers)
 
 Some scans contain multiple scientific papers in one PDF, separated by a physical separator sheet (colored paper) inserted during scanning.
 
 - **User-visible label:** “Separate this PDF into files (two or more papers)”
 - **Entry points:**
-  - **Early (automatic):** before metadata extraction (before GREP/GROBID/search). If separator pages are detected, the daemon proposes a split and asks for confirmation.
-  - **Late (manual):** from the `PDF PREVIEW` menu (PDF preprocessing/attachment stage), to recover when the scan contains multiple papers.
+  - **Early (automatic):** before metadata extraction (before GREP/GROBID/search). If separator pages are detected, the daemon proposes separation and asks for confirmation.
+  - **Late (manual):** from the `PDF PREVIEW` menu during PDF preprocessing or attachment: both the **new-scan** preprocessing preview (`paper_processor_daemon`) and the **item-selected** preview (`handle_item_selected_pages`, e.g. after `PROPOSED ACTIONS` → PDF conflict → preprocessing) offer the same option, so you can separate a multi-paper scan when attaching to an existing Zotero item.
 
 #### Separator detection (reliable + cheap)
 
@@ -384,14 +391,14 @@ The daemon uses a conservative detector to avoid false positives:
 - **Vivid background heuristic:** separator sheets are typically bright colored. A low-res thumbnail render is used to detect “vivid/non-white dominant” pages.
 - **Duplex/back-side rule:** if a **vivid blank page** exists adjacent to a separator page (colored back side not removed by the scanner), it is **always dropped** automatically.
 
-#### Manual split plan syntax (keyboard-friendly)
+#### Manual separation plan syntax (keyboard-friendly)
 
-If the proposed split is wrong (or auto-detection is unavailable), you can enter a manual split plan.
+If the proposed separation is wrong (or auto-detection is unavailable), you can enter a manual **separation plan** (not the same thing as landscape/two-up **page** splitting).
 
 - **Groups:** separated by `;`
 - **Keep group (creates an output file):** `1-12` or `1-3,8-10`
 - **Drop group (pages to remove):** `-13` or `-(13-14)`
-- **Shorthand:** `;-13;` means “drop page 13 and keep the rest split around it”
+- **Shorthand:** `;-13;` means “drop page 13 and keep the rest grouped into outputs around it”
 - **Keep-only mode:** `;;` means “keep only the listed groups; implicitly drop all other pages”
 
 Examples:
@@ -401,9 +408,11 @@ Examples:
 
 #### File handling and reprocessing behavior
 
+- From **PDF PREVIEW**, page numbers in the plan match the **preprocessed file** you see there (e.g. after `_double` / 50–50 **landscape split**). Output filenames still use the **original** watch-folder scan stem (`EN_...__partN.pdf`).
 - Outputs are written into the **watch folder** as `__partN` files (preserving the scan prefix like `EN_...`), so they are picked up by the normal processing flow.
 - Only after outputs are created does the daemon move the original scan to `done/`.
 - The daemon then re-queues (or the watcher picks up) the new PDFs so each part is processed from the beginning.
+- After you enter a manual separation plan, confirmation defaults to **yes** (`Proceed with this separation? [Y/n]:`, Enter proceeds).
 - **Handles:** `/tmp/` paths, cloud drive paths, path conversion failures
 
 ### 6. Path Validation

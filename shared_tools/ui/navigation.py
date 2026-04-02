@@ -27,6 +27,7 @@ class NavigationResult:
     - NavigationResult.resolved_no_attach() - Item selection finished without attach (e.g. kept existing PDF)
     - NavigationResult.quit_scan(move_to_manual=False) - Quit with optional manual review
     - NavigationResult.process_pdf() - Process the PDF and exit
+    - NavigationResult.separate_documents_queued() - Document separator outputs queued; original scan moved to done (item-selected flow)
     """
     
     class Type(Enum):
@@ -36,6 +37,7 @@ class NavigationResult:
         RESOLVED_NO_ATTACH = "resolved_no_attach"
         QUIT_SCAN = "quit_scan"
         PROCESS_PDF = "process_pdf"
+        SEPARATE_DOCUMENTS_QUEUED = "separate_documents_queued"
     
     def __init__(self, result_type: Type, page_id: Optional[str] = None, 
                  move_to_manual: bool = False):
@@ -79,6 +81,11 @@ class NavigationResult:
         """Create a result that processes the PDF and exits."""
         return cls(cls.Type.PROCESS_PDF)
     
+    @classmethod
+    def separate_documents_queued(cls) -> 'NavigationResult':
+        """Document separator flow finished: new PDFs queued, original scan moved to done/."""
+        return cls(cls.Type.SEPARATE_DOCUMENTS_QUEUED)
+    
     def __eq__(self, other):
         """Compare navigation results."""
         if not isinstance(other, NavigationResult):
@@ -95,6 +102,8 @@ class NavigationResult:
             return f"NavigationResult.quit_scan(move_to_manual={self.move_to_manual})"
         elif self.type == NavigationResult.Type.RESOLVED_NO_ATTACH:
             return "NavigationResult.resolved_no_attach()"
+        elif self.type == NavigationResult.Type.SEPARATE_DOCUMENTS_QUEUED:
+            return "NavigationResult.separate_documents_queued()"
         else:
             return f"NavigationResult.{self.type.value}()"
 
@@ -331,7 +340,8 @@ class NavigationEngine:
         """Run page flow starting from start_page.
         
         Continuously displays pages and handles navigation until a terminal
-        result is reached (RETURN_TO_CALLER, RESOLVED_NO_ATTACH, QUIT_SCAN, or PROCESS_PDF).
+        result is reached (RETURN_TO_CALLER, RESOLVED_NO_ATTACH, QUIT_SCAN,
+        PROCESS_PDF, or SEPARATE_DOCUMENTS_QUEUED).
         
         Special handling for pages that need custom input collection (e.g., multi-line).
         
@@ -363,6 +373,8 @@ class NavigationEngine:
             elif result.type == NavigationResult.Type.QUIT_SCAN:
                 return result
             elif result.type == NavigationResult.Type.PROCESS_PDF:
+                return result
+            elif result.type == NavigationResult.Type.SEPARATE_DOCUMENTS_QUEUED:
                 return result
             elif result.type == NavigationResult.Type.SHOW_PAGE:
                 # Navigate to next page
