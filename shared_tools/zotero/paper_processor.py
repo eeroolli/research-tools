@@ -15,7 +15,7 @@ import sys
 import requests
 import configparser
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 import ntpath
 from difflib import SequenceMatcher
 
@@ -178,21 +178,25 @@ class ZoteroPaperProcessor:
                 return result
             
             # Step 3: Attach PDF
-            pdf_attached = False
             skipped_attachment = pdf_path is None
+            attach_result: Optional[Dict] = None
             if not skipped_attachment:
-                pdf_attached = self.attach_pdf(item_key, pdf_path, title)
-            
-            if pdf_attached:
+                attach_result = self.attach_pdf(item_key, pdf_path, title)
+
+            if attach_result and attach_result.get("ok"):
                 result['success'] = True
                 result['item_key'] = item_key
                 result['action'] = 'added_with_pdf'
+                result['attachment_keys'] = attach_result.get('attachment_keys', [])
+                result['sent_path'] = attach_result.get('sent_path', '')
             else:
                 result['success'] = True
                 result['item_key'] = item_key
                 result['action'] = 'added_without_pdf'
                 if not skipped_attachment:
-                    result['error'] = "PDF attachment failed"
+                    error_detail = (attach_result or {}).get('error', 'PDF attachment failed')
+                    result['error'] = error_detail
+                    result['attach_result'] = attach_result
             
             return result
             
@@ -427,51 +431,150 @@ class ZoteroPaperProcessor:
         except Exception:
             return None
     
-    def attach_pdf(self, item_key: str, pdf_path: Union[str, Path], title: str) -> bool:
-        """Attach PDF to Zotero item as linked file.
-        
-        Args:
-            item_key: Zotero item key
-            pdf_path: Path to PDF file
-            title: PDF title
-            
-        Returns:
-            True if successful
-        """
-        try:
-            # Convert WSL path to Windows path for Zotero (runs on Windows)
-            path_str = str(pdf_path)
-            windows_path = self._convert_wsl_to_windows_path(path_str)
-            
-            filename = ntpath.basename(windows_path)
-            attach_title = filename or (title or 'PDF')
-            
-            # Sanitize attachment title to prevent encoding errors
-            attach_title = self._sanitize_unicode(attach_title)
+    # ------------------------------------------------------------------
+    # Attachment result helpers
+    # ------------------------------------------------------------------
 
-            # Create attachment item with Windows path
-            attachment = {
-                'itemType': 'attachment',
-                'linkMode': 'linked_file',
-                'title': attach_title,
-                'path': windows_path,
-                'parentItem': item_key
-            }
-            
-            # Sanitize entire attachment dict
-            attachment = self._sanitize_dict(attachment)
-            
+    @staticmethod
+    def _make_attach_result(
+        *,
+        ok: bool,
+        attachment_keys: Optional[List[str]] = None,
+        sent_path: str = "",
+        http_status: Optional[int] = None,
+        response_body: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build a structured attachment-result dict.
+
+        Fields:
+          ok             – True only when Zotero confirmed the item was created.
+          attachment_keys – Keys of created attachment items (populated on success).
+          sent_path      – The exact `path` string that was POSTed to Zotero.
+          http_status    – HTTP status code from the API response.
+          response_body  – Parsed JSON response body (may be None on network errors).
+          error          – Human-readable reason for failure (None on success).
+        """
+        return {
+            "ok": ok,
+            "attachment_keys": attachment_keys or [],
+            "sent_path": sent_path,
+            "http_status": http_status,
+            "response_body": response_body,
+            "error": error,
+        }
+
+    @staticmethod
+    def _parse_attach_response(body: Any) -> tuple:
+        """Return (attachment_keys, failed_items) from a Zotero batch-write body."""
+        if not isinstance(body, dict):
+            return [], []
+        successful = body.get("successful") or {}
+        failed = body.get("failed") or {}
+        # Zotero returns `successful` as a dict keyed by index (e.g. {"0": {...}})
+        # or occasionally as a list; handle both.
+        if isinstance(successful, dict):
+            keys = [v.get("key") for v in successful.values() if isinstance(v, dict) and v.get("key")]
+        elif isinstance(successful, list):
+            keys = [v.get("key") for v in successful if isinstance(v, dict) and v.get("key")]
+        else:
+            keys = []
+        if isinstance(failed, dict):
+            failed_items = list(failed.values())
+        elif isinstance(failed, list):
+            failed_items = list(failed)
+        else:
+            failed_items = []
+        return keys, failed_items
+
+    def _post_attachment(self, attachment_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST a single attachment item to Zotero and return a structured result."""
+        sent_path = attachment_payload.get("path", "")
+        try:
             response = requests.post(
                 f"{self.base_url}/items",
                 headers=self.headers,
-                json=[attachment],
-                timeout=10
+                json=[attachment_payload],
+                timeout=10,
             )
-            
-            return response.status_code == 200
-            
-        except Exception:
-            return False
+            http_status = response.status_code
+            try:
+                body = response.json() if response.content else {}
+            except Exception:
+                body = {}
+
+            if http_status not in (200, 201):
+                msg = f"HTTP {http_status}"
+                print(f"Zotero attach HTTP error: {http_status}  sent_path={sent_path!r}  body={body}")
+                return self._make_attach_result(
+                    ok=False,
+                    sent_path=sent_path,
+                    http_status=http_status,
+                    response_body=body,
+                    error=msg,
+                )
+
+            keys, failed_items = self._parse_attach_response(body)
+            if failed_items:
+                print(f"Zotero attach failed items: {failed_items}  sent_path={sent_path!r}")
+                return self._make_attach_result(
+                    ok=False,
+                    sent_path=sent_path,
+                    http_status=http_status,
+                    response_body=body,
+                    error=f"Zotero per-item failure: {failed_items}",
+                )
+            if keys:
+                return self._make_attach_result(
+                    ok=True,
+                    attachment_keys=keys,
+                    sent_path=sent_path,
+                    http_status=http_status,
+                    response_body=body,
+                )
+            # HTTP OK but Zotero returned neither successful nor failed items.
+            # Treat as success with an unknown key (unusual but not fatal).
+            return self._make_attach_result(
+                ok=True,
+                sent_path=sent_path,
+                http_status=http_status,
+                response_body=body,
+            )
+        except Exception as exc:
+            print(f"Zotero attach exception: {exc}  sent_path={sent_path!r}")
+            return self._make_attach_result(
+                ok=False,
+                sent_path=sent_path,
+                error=str(exc),
+            )
+
+    def attach_pdf(self, item_key: str, pdf_path: Union[str, Path], title: str) -> Dict[str, Any]:
+        """Attach PDF to Zotero item as linked file.
+
+        Args:
+            item_key: Zotero item key
+            pdf_path: Path to PDF file (WSL or Windows format)
+            title: PDF title (fallback when basename cannot be derived)
+
+        Returns:
+            Structured attachment result dict with fields:
+              ok, attachment_keys, sent_path, http_status, response_body, error
+        """
+        path_str = str(pdf_path)
+        windows_path = self._convert_wsl_to_windows_path(path_str)
+
+        filename = ntpath.basename(windows_path)
+        attach_title = self._sanitize_unicode(filename or (title or "PDF"))
+
+        attachment = self._sanitize_dict({
+            "itemType": "attachment",
+            "linkMode": "linked_file",
+            "title": attach_title,
+            "contentType": "application/pdf",
+            "path": windows_path,
+            "parentItem": item_key,
+        })
+        return self._post_attachment(attachment)
 
     def update_item_field_if_missing(self, item_key: str, field_name: str, field_value: str) -> bool:
         """Update a Zotero item field if it's currently empty/missing.
@@ -906,61 +1009,90 @@ class ZoteroPaperProcessor:
             print(f"Error adding note: {e}")
             return False
     
-    def attach_pdf_to_existing(self, item_key: str, pdf_path: Union[str, Path]) -> bool:
-        """Attach PDF to existing Zotero item.
-        
-        This is used when user selects an existing Zotero item from local search
-        and wants to attach the scanned PDF to it.
-        
+    def attach_pdf_to_existing(self, item_key: str, pdf_path: Union[str, Path]) -> Dict[str, Any]:
+        """Attach PDF to an existing Zotero item as a linked file.
+
+        Used when the user selects an existing Zotero item and wants to attach the
+        scanned PDF to it.
+
         Args:
-            item_key: Zotero item key
-            pdf_path: Path to PDF file (can be WSL or Windows format)
-            
+            item_key: Zotero item key of the parent item
+            pdf_path: Path to PDF file (WSL or Windows format)
+
         Returns:
-            True if successful
+            Structured attachment result dict with fields:
+              ok, attachment_keys, sent_path, http_status, response_body, error
+        """
+        path_str = str(pdf_path)
+        windows_path = self._convert_wsl_to_windows_path(path_str)
+
+        filename = ntpath.basename(windows_path)
+        attach_title = self._sanitize_unicode(filename or "PDF")
+
+        attachment = self._sanitize_dict({
+            "itemType": "attachment",
+            "linkMode": "linked_file",
+            "title": attach_title,
+            "contentType": "application/pdf",
+            "path": windows_path,
+            "parentItem": item_key,
+        })
+        return self._post_attachment(attachment)
+
+    def fetch_item_children(self, parent_key: str) -> List[Dict[str, Any]]:
+        """Fetch all child items for a Zotero parent item.
+
+        Args:
+            parent_key: Zotero item key of the parent
+
+        Returns:
+            List of child item dicts as returned by the Zotero API.
+            Empty list on error.
         """
         try:
-            # Convert WSL path to Windows path for Zotero (runs on Windows)
-            path_str = str(pdf_path)
-            windows_path = self._convert_wsl_to_windows_path(path_str)
-            
-            filename = ntpath.basename(windows_path)
-            # Match attach_pdf(): use full basename including extension so Zotero shows the PDF icon.
-            attach_title = filename or 'PDF'
-
-            # Sanitize attachment title to prevent encoding errors
-            attach_title = self._sanitize_unicode(attach_title)
-
-            # Create attachment item with Windows path
-            attachment = {
-                'itemType': 'attachment',
-                'linkMode': 'linked_file',
-                'title': attach_title,
-                'path': windows_path,
-                'parentItem': item_key
-            }
-            
-            # Sanitize entire attachment dict
-            attachment = self._sanitize_dict(attachment)
-            
-            response = requests.post(
-                f"{self.base_url}/items",
+            response = requests.get(
+                f"{self.base_url}/items/{parent_key}/children",
                 headers=self.headers,
-                json=[attachment],
-                timeout=10
+                timeout=30,
             )
-            
-            if response.status_code == 200:
+            if response.status_code != 200:
+                print(f"Zotero fetch_children HTTP {response.status_code} for parent={parent_key}")
+                return []
+            return response.json() or []
+        except Exception as exc:
+            print(f"Zotero fetch_children error for parent={parent_key}: {exc}")
+            return []
+
+    @staticmethod
+    def linked_pdf_exists(
+        children: List[Dict[str, Any]],
+        expected_path: str,
+    ) -> bool:
+        """Return True if any child is a linked-file PDF matching expected_path.
+
+        Matching rule: exact OR suffix match of ``data.path`` against ``expected_path``.
+        This tolerates Zotero storing paths as relative, absolute, or mixed-case.
+
+        Args:
+            children: Child items from ``fetch_item_children``.
+            expected_path: The Windows path that was sent to Zotero (e.g.
+                ``I:\\publications\\Foo.pdf``).
+        """
+        basename = ntpath.basename(expected_path)
+        expected_norm = expected_path.replace("/", "\\").lower().strip()
+        for child in children:
+            data = child.get("data") or {}
+            if data.get("itemType") != "attachment":
+                continue
+            if data.get("linkMode") != "linked_file":
+                continue
+            child_path = (data.get("path") or "").replace("/", "\\").strip()
+            child_norm = child_path.lower()
+            if child_norm == expected_norm:
                 return True
-            else:
-                # Log error for debugging
-                print(f"Zotero API error: {response.status_code}")
-                print(f"Response: {response.text}")
-                return False
-                
-        except Exception as e:
-            print(f"Error attaching PDF: {e}")
-            return False
+            if child_norm.endswith("\\" + basename.lower()) or child_norm == basename.lower():
+                return True
+        return False
 
     def delete_item(self, item_key: str) -> bool:
         """Delete a Zotero item (e.g., an attachment) by key via Zotero API.
