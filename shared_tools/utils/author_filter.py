@@ -14,6 +14,8 @@ import configparser
 from pathlib import Path
 from typing import Optional, List
 
+from shared_tools.config.io import read_config_files
+
 from .grobid_validator import GrobidValidator
 from .author_validator import AuthorValidator
 
@@ -60,7 +62,7 @@ class AuthorFilter:
                 try:
                     config = configparser.ConfigParser()
                     root_dir = Path(__file__).parent.parent.parent
-                    config.read([
+                    read_config_files(config, [
                         root_dir / 'config.conf',
                         root_dir / 'config.personal.conf'
                     ])
@@ -326,7 +328,7 @@ class AuthorFilter:
         config = configparser.ConfigParser()
         # Get root directory (assuming this is in shared_tools/utils/)
         root_dir = Path(__file__).parent.parent.parent
-        config.read([
+        read_config_files(config, [
             root_dir / 'config.conf',
             root_dir / 'config.personal.conf'
         ])

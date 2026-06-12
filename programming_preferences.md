@@ -62,6 +62,7 @@
 - Do not just add new functions and more code. Perhaps the problem is better solved by changing the old code. 
 - Bigger is not better. Less code is usually a good thing.
 - Perhaps there is a design problem or logical problem that needs to be solved. Not everything should be fixed by adding code. 
+- It is Always better to fix the logic than write new code that deals with the "exceptions" as they are not exceptions, but flaws in the logic in the first place. Keep the code short and clear. My future me, needs to understand the code.
 
 ## Commit Messages
 - Use project-wide prefixes in commit messages for consistency:

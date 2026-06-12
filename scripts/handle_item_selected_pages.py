@@ -1782,6 +1782,7 @@ def _handle_manual_split(ctx, daemon):
         # Update preprocessing state
         preprocessing_state['split_method'] = 'manual'
         preprocessing_state['split_attempted'] = True
+        preprocessing_state['split_succeeded'] = True
         preprocessing_state['manual_split_ratio'] = ratio
         preprocessing_state['border_detection_stats'] = border_detection_stats  # Preserve border stats
         

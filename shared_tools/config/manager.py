@@ -6,6 +6,8 @@ import configparser
 from typing import Dict, Any, Optional
 from pathlib import Path
 
+from shared_tools.config.io import read_config_file
+
 
 class ConfigManager:
     """Centralized configuration management."""
@@ -30,7 +32,7 @@ class ConfigManager:
     def _load_config(self):
         """Load configuration from file."""
         if os.path.exists(self.config_file):
-            self.config.read(self.config_file)
+            read_config_file(self.config, self.config_file)
         else:
             # Create default configuration
             self._create_default_config()

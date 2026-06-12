@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - optional OCR dependency
 # Add project root to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from shared_tools.config.io import read_config_file
 from shared_tools.utils.isbn_matcher import ISBNMatcher
 
 @dataclass
@@ -530,11 +531,11 @@ class ZoteroAPIBookProcessor:
         
         # Load default config if it exists
         if default_config_path.exists():
-            config.read(default_config_path)
+            read_config_file(config, default_config_path)
         
         # Load personal config to override defaults
         if personal_config_path.exists():
-            config.read(personal_config_path)
+            read_config_file(config, personal_config_path)
         else:
             raise FileNotFoundError(f"Personal config file not found: {self.config_file}")
         
@@ -570,11 +571,11 @@ class ZoteroAPIBookProcessor:
         
         # Load default config if it exists
         if default_config_path.exists():
-            config.read(default_config_path)
+            read_config_file(config, default_config_path)
         
         # Load personal config to override defaults
         if personal_config_path.exists():
-            config.read(personal_config_path)
+            read_config_file(config, personal_config_path)
         
         tag_groups = {}
         
@@ -663,11 +664,11 @@ class ZoteroAPIBookProcessor:
         
         # Load default config if it exists
         if default_config_path.exists():
-            config.read(default_config_path)
+            read_config_file(config, default_config_path)
         
         # Load personal config to override defaults
         if personal_config_path.exists():
-            config.read(personal_config_path)
+            read_config_file(config, personal_config_path)
         
         actions = {}
         
@@ -703,11 +704,11 @@ class ZoteroAPIBookProcessor:
         
         # Load default config if it exists
         if default_config_path.exists():
-            config.read(default_config_path)
+            read_config_file(config, default_config_path)
         
         # Load personal config to override defaults
         if personal_config_path.exists():
-            config.read(personal_config_path)
+            read_config_file(config, personal_config_path)
         
         menu_options = {}
         

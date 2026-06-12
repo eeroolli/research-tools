@@ -13,6 +13,8 @@ import time
 import configparser
 from pathlib import Path
 from typing import Optional, List, Tuple
+from shared_tools.config.io import read_config_files
+
 from .isbn_matcher import ISBNMatcher
 from .text_ignore import filter_candidates, sanitize_text
 
@@ -30,7 +32,7 @@ class IdentifierExtractor:
         try:
             config = configparser.ConfigParser()
             root_dir = Path(__file__).parent.parent.parent
-            config.read([
+            read_config_files(config, [
                 root_dir / 'config.conf',
                 root_dir / 'config.personal.conf'
             ])

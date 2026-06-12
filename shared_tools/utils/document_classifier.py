@@ -7,6 +7,8 @@ import configparser
 from pathlib import Path
 from typing import Optional
 
+from shared_tools.config.io import read_config_files
+
 from .identifier_extractor import IdentifierExtractor
 
 
@@ -19,7 +21,7 @@ class DocumentClassifier:
         try:
             config = configparser.ConfigParser()
             root_dir = Path(__file__).parent.parent.parent
-            config.read([
+            read_config_files(config, [
                 root_dir / 'config.conf',
                 root_dir / 'config.personal.conf'
             ])

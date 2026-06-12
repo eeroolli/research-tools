@@ -30,6 +30,7 @@ from typing import Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from shared_tools.config.io import read_config_files
 from shared_tools.metadata.paper_processor import PaperMetadataProcessor
 
 
@@ -122,7 +123,7 @@ class ScannedPaperProcessor:
         config = configparser.ConfigParser()
         root_dir = Path(__file__).parent.parent
         
-        config.read([
+        read_config_files(config, [
             root_dir / 'config.conf',
             root_dir / 'config.personal.conf'
         ])
@@ -495,7 +496,7 @@ def main():
     # Load configuration to get scanner directory
     config = configparser.ConfigParser()
     root_dir = Path(__file__).parent.parent
-    config.read([
+    read_config_files(config, [
         root_dir / 'config.conf',
         root_dir / 'config.personal.conf'
     ])

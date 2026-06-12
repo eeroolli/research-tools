@@ -408,9 +408,10 @@ def test_close_sumatra_all_tabs_attempts_off_windows(
     assert sent == [("CmdCloseAllTabs", None)]
 
 
-def test_preview_loop_dedupes_same_processed_pdf_open(
+def test_preview_loop_reopens_after_reprocess_same_path(
     daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """After reprocessing to the same output path, preview must reopen the viewer."""
     original_pdf = tmp_path / "orig.pdf"
     processed_pdf = tmp_path / "processed.pdf"
     _write_dummy_pdf(original_pdf)
@@ -445,5 +446,5 @@ def test_preview_loop_dedupes_same_processed_pdf_open(
     )
 
     assert final_pdf == processed_pdf
-    assert open_calls == [processed_pdf]
+    assert open_calls == [processed_pdf, processed_pdf]
 

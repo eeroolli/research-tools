@@ -3,8 +3,10 @@
 Tests for PDF preprocessing split behavior in PaperProcessorDaemon.
 
 Focuses on:
-- `_double` filenames: must always trigger a split when split_method='auto'
-- Non-`_double` filenames: must *not* split unless two-up detection says so
+- `*_double.pdf` (suffix only): must trigger filename-based split when split_method='auto'
+- Names containing `_double` but not ending in `_double.pdf` (e.g. `..._double__part1.pdf`):
+  must *not* use the filename rule — same rule as `_preprocess_split_if_needed`
+- Other filenames: must *not* split unless two-up detection says so
 """
 
 from __future__ import annotations
@@ -98,7 +100,7 @@ def daemon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PaperProcessorDae
 
 
 def test_double_filename_always_triggers_split_auto(daemon: PaperProcessorDaemon, tmp_path: Path) -> None:
-    """Files with `_double` in the name must always trigger a split with method 'auto'."""
+    """Files whose name ends with `_double.pdf` trigger the filename split rule."""
     pdf_path = tmp_path / "EN_20260101-120000_001_double.pdf"
     _make_dummy_pdf(pdf_path)
 
@@ -109,13 +111,70 @@ def test_double_filename_always_triggers_split_auto(daemon: PaperProcessorDaemon
         trim_leading=False,
     )
 
-    # With `_double` in the name, split must be attempted and succeed
+    # Suffix `_double.pdf` => split must be attempted and succeed
     assert state.get("split_attempted") is True
     assert state.get("split_succeeded") is True
     assert state.get("split_method") == "auto"
     assert state.get("split_reason") == "filename_double"
     assert processed is not None
     assert processed != pdf_path
+
+
+def test_double_in_name_without_double_pdf_suffix_no_filename_split(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`..._double__part1.pdf` does not end with `_double.pdf` — no filename-forced split."""
+    pdf_path = tmp_path / "EN_20260101-120000_001_double__part1.pdf"
+    _make_dummy_pdf(pdf_path)
+
+    monkeypatch.setattr(
+        daemon,
+        "_detect_two_up_page",
+        lambda path: (False, 0.0, "none"),
+    )
+
+    processed, state = daemon._preprocess_pdf_with_options(
+        pdf_path,
+        border_removal=False,
+        split_method="auto",
+        trim_leading=False,
+    )
+
+    assert state.get("split_attempted") is False
+    assert state.get("split_succeeded") is not True
+    assert processed == pdf_path
+
+
+def test_substring_double_not_suffix_does_not_trigger_filename_split(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_double` in the middle of the name is not the scanner `*_double.pdf` convention."""
+    pdf_path = tmp_path / "EN_20260101-120000_001_double_scan.pdf"
+    _make_dummy_pdf(pdf_path)
+
+    monkeypatch.setattr(
+        daemon,
+        "_detect_two_up_page",
+        lambda path: (False, 0.0, "none"),
+    )
+
+    processed, state = daemon._preprocess_pdf_with_options(
+        pdf_path,
+        border_removal=False,
+        split_method="auto",
+        trim_leading=False,
+    )
+
+    assert state.get("split_reason") != "filename_double"
+    assert state.get("split_attempted") is False
+    assert processed == pdf_path
+
+
+def test_stem_for_preprocessed_artifacts_strips_trailing_double() -> None:
+    p = Path("/tmp/EN_x_004_double.pdf")
+    assert PaperProcessorDaemon._stem_for_preprocessed_artifacts(p) == "EN_x_004"
+    p2 = Path("/tmp/EN_x_004_double__part1.pdf")
+    assert PaperProcessorDaemon._stem_for_preprocessed_artifacts(p2) == "EN_x_004_double__part1"
 
 
 def test_non_double_filename_does_not_split_without_two_up(daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

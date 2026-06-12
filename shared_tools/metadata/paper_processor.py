@@ -20,6 +20,7 @@ from typing import Optional, Dict, List
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from shared_tools.config.io import read_config_files
 from shared_tools.utils.identifier_extractor import IdentifierExtractor
 from shared_tools.utils.identifier_validator import IdentifierValidator
 from shared_tools.utils.api_priority_manager import APIPriorityManager
@@ -88,7 +89,7 @@ class PaperMetadataProcessor:
             
             # Read both config files (personal overrides main)
             root_dir = Path(__file__).parent.parent.parent
-            config.read([
+            read_config_files(config, [
                 root_dir / 'config.conf',
                 root_dir / 'config.personal.conf'
             ])

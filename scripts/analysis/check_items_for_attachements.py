@@ -22,6 +22,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from shared_tools.config.io import read_config_files
+
 
 DEFAULT_QUERIES: List[Tuple[str, str]] = [
     ("doi", "10.1037/0022-3514.74.6.1464"),
@@ -47,7 +49,7 @@ def _get_db_path_from_config() -> Path:
     """Resolve PATHS.zotero_db_path from config.conf + config.personal.conf."""
     config = configparser.ConfigParser()
     root_dir = Path(__file__).resolve().parent.parent.parent
-    config.read([root_dir / "config.conf", root_dir / "config.personal.conf"])
+    read_config_files(config, [root_dir / "config.conf", root_dir / "config.personal.conf"])
     if config.has_option("PATHS", "zotero_db_path"):
         raw = config.get("PATHS", "zotero_db_path").strip()
         if not raw:

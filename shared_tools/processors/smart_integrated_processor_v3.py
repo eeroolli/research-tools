@@ -15,6 +15,7 @@ from collections import Counter
 import concurrent.futures
 import signal
 import configparser
+from ..config.io import read_config_file
 from ..utils.thread_pool_manager import thread_pool_manager
 
 try:
@@ -58,7 +59,7 @@ class SmartIntegratedProcessorV3:
         
         # Load configuration
         config = configparser.ConfigParser()
-        config.read("config/process_books.conf")
+        read_config_file(config, "config/process_books.conf")
         self.ocr_timeout = config.getint('processing', 'ocr_timeout', fallback=60)
         
         # Initialize CPU throttling

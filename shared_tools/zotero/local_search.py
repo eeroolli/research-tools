@@ -15,6 +15,7 @@ from typing import List, Dict, Optional
 from difflib import SequenceMatcher
 import configparser
 
+from shared_tools.config.io import read_config_file, read_config_files
 from shared_tools.utils.isbn_matcher import ISBNMatcher
 
 
@@ -53,15 +54,15 @@ class ZoteroLocalSearch:
         
         # Try process_papers config first
         process_papers_config = root_dir / 'process_papers' / 'config' / 'process_papers.conf'
-        if process_papers_config.exists():
-            config.read(process_papers_config)
+        if process_papers_config.is_file():
+            read_config_file(config, process_papers_config)
             if config.has_option('PATHS', 'zotero_db_path'):
                 db_path = config.get('PATHS', 'zotero_db_path')
                 if db_path:
                     return db_path
         
         # Fallback to main config
-        config.read([
+        read_config_files(config, [
             root_dir / 'config.conf',
             root_dir / 'config.personal.conf'
         ])

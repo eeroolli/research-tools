@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from shared_tools.config.io import read_config_files
 from shared_tools.utils.identifier_validator import IdentifierValidator
 
 
@@ -44,7 +45,7 @@ class OllamaClient:
         config = configparser.ConfigParser()
         root_dir = Path(__file__).parent.parent.parent
         
-        config.read([
+        read_config_files(config, [
             root_dir / 'config.conf',
             root_dir / 'config.personal.conf'
         ])

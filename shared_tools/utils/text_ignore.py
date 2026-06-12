@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import configparser
 import re
+
+from shared_tools.config.io import read_config_files
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Pattern
@@ -62,7 +64,7 @@ def get_ignore_patterns(force_reload: bool = False) -> List[Pattern[str]]:
 
     cfg = configparser.ConfigParser()
     root = _repo_root()
-    cfg.read([root / "config.conf", root / "config.personal.conf"])
+    read_config_files(cfg, [root / "config.conf", root / "config.personal.conf"])
 
     lines = _load_ignore_regex_lines(cfg)
     patterns = _compile_patterns(lines)

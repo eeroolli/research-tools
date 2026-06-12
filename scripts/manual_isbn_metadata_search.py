@@ -28,6 +28,7 @@ from difflib import SequenceMatcher
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+from shared_tools.config.io import read_config_file
 from shared_tools.utils.isbn_matcher import ISBNMatcher
 from add_or_remove_books_zotero import DetailedISBNLookupService
 
@@ -80,7 +81,7 @@ class ManualISBNMetadataSearch:
     def load_config(self):
         """Load main configuration from config file"""
         config = configparser.ConfigParser()
-        config.read(self.config_file)
+        read_config_file(config, self.config_file)
         
         # Get data directory
         self.data_dir = Path(config.get('PATHS', 'data_folder', fallback='data'))
@@ -98,7 +99,7 @@ class ManualISBNMetadataSearch:
         
         try:
             config = configparser.ConfigParser()
-            config.read(self.zotero_config_file)
+            read_config_file(config, self.zotero_config_file)
             
             api_key = config.get('zotero', 'zotero_api_key', fallback='').strip()
             library_id = config.get('zotero', 'zotero_library_id', fallback='').strip()

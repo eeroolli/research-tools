@@ -41,6 +41,7 @@ from watchdog.events import FileSystemEventHandler
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from shared_tools.config.io import read_config_files
 from shared_tools.metadata.paper_processor import PaperMetadataProcessor
 from shared_tools.zotero.paper_processor import ZoteroPaperProcessor
 from shared_tools.zotero.local_search import ZoteroLocalSearch
@@ -4241,7 +4242,7 @@ class PaperProcessorDaemon:
         root_dir = Path(__file__).parent.parent
         
         config = configparser.ConfigParser()
-        config.read([
+        read_config_files(config, [
             root_dir / 'config.conf',
             root_dir / 'config.personal.conf'
         ])
@@ -4867,6 +4868,11 @@ class PaperProcessorDaemon:
         print("\n✅ Separation complete — outputs:")
         for p in written:
             print(f"  - {p.name}")
+        if len(written) > 1:
+            print(
+                "ℹ️  Later parts may start with a separator/blank page — use trim (PDF preview) "
+                "to drop leading pages per file."
+            )
         return written
 
     def _maybe_auto_document_separator_early(self, pdf_path: Path) -> bool:
@@ -6242,6 +6248,14 @@ class PaperProcessorDaemon:
     # ------------------------
     # Two-up split pre-processing
     # ------------------------
+    @staticmethod
+    def _stem_for_preprocessed_artifacts(pdf_path: Path) -> str:
+        """Stem for PREPROCESSED_* temp files; strip trailing `_double` so names match post-split state."""
+        stem = pdf_path.stem
+        if stem.lower().endswith("_double"):
+            return stem[: -len("_double")]
+        return stem
+
     def _preprocess_split_if_needed(self, pdf_path: Path) -> Optional[Path]:
         """Detect and split two-up pages when appropriate.
         
@@ -6355,12 +6369,14 @@ class PaperProcessorDaemon:
             landscape_width = None
             landscape_height = None
             
-            # 1) Filename-based rule: any occurrence of '_double' forces a split
-            if '_double' in name_lower:
+            # 1) Filename: same rule as _preprocess_split_if_needed — only *._double.pdf, not substring.
+            if name_lower.endswith("_double.pdf"):
                 needs_split = True
-                preprocessing_state['split_reason'] = 'filename_double'
-                self.logger.info(f"_double detected in original filename '{pdf_path.name}' - will split via filename rule")
-                print("Auto-splitting due to '_double' in filename...")
+                preprocessing_state["split_reason"] = "filename_double"
+                self.logger.info(
+                    f"_double.pdf filename rule: will split '{pdf_path.name}'"
+                )
+                print("Auto-splitting due to '_double.pdf' filename...")
             else:
                 # 2) Aspect ratio + gutter-based rule (may depend on pdfplumber)
                 try:
@@ -6586,6 +6602,7 @@ class PaperProcessorDaemon:
                             trim_leading=new_state.get('trim_leading', True)
                         )
                         preprocessing_state = new_state
+                        last_previewed_pdf = None
                         # Continue loop to show preview again
                     
                     elif action == 'improve_split':
@@ -6599,6 +6616,7 @@ class PaperProcessorDaemon:
                             trim_leading=new_state.get('trim_leading', True)
                         )
                         preprocessing_state = new_state
+                        last_previewed_pdf = None
                         # Continue loop to show preview again
                     
                     elif action == 'drop_split':
@@ -6613,6 +6631,7 @@ class PaperProcessorDaemon:
                             trim_leading=new_state.get('trim_leading', True)
                         )
                         preprocessing_state = new_state
+                        last_previewed_pdf = None
                         # Continue loop to show preview again
                     
                     elif action == 'use_5050':
@@ -6627,6 +6646,7 @@ class PaperProcessorDaemon:
                             trim_leading=new_state.get('trim_leading', True)
                         )
                         preprocessing_state = new_state
+                        last_previewed_pdf = None
                         # Continue loop to show preview again
                     
                     elif action == 'drop_trim':
@@ -6641,6 +6661,7 @@ class PaperProcessorDaemon:
                             trim_leading=False
                         )
                         preprocessing_state = new_state
+                        last_previewed_pdf = None
                         # Continue loop to show preview again
                     
                     elif action == 'add_trim':
@@ -6655,6 +6676,7 @@ class PaperProcessorDaemon:
                             trim_leading=True
                         )
                         preprocessing_state = new_state
+                        last_previewed_pdf = None
                         # Continue loop to show preview again
                     
                     elif action == 'manual_split':
@@ -6716,10 +6738,12 @@ class PaperProcessorDaemon:
                                     # Update preprocessing state
                                     preprocessing_state['split_method'] = 'manual'
                                     preprocessing_state['split_attempted'] = True
+                                    preprocessing_state['split_succeeded'] = True
                                     preprocessing_state['manual_split_ratio'] = ratio
                                     preprocessing_state['border_detection_stats'] = border_detection_stats  # Preserve border stats
                                     
                                     processed_pdf = split_path
+                                    last_previewed_pdf = None
                                     print(f"✅ Manual split completed: {ratio:.0f}/{100-ratio:.0f}")
                                 else:
                                     if error_msg:
@@ -7225,6 +7249,33 @@ class PaperProcessorDaemon:
         
         return is_valid, warnings
     
+    def _save_preprocessed_pdf(self, doc, out_path: Path) -> None:
+        """Save a PyMuPDF document to a preprocessed temp path, overwriting safely on Windows.
+
+        Saves to a sibling .tmp.pdf file then atomically replaces the target so Sumatra
+        (or other viewers) do not block in-place overwrites.
+        """
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if out_path.exists():
+            self._close_pdf_viewer()
+
+        tmp_path = out_path.with_suffix('.tmp.pdf')
+        try:
+            doc.save(str(tmp_path))
+            try:
+                tmp_path.replace(out_path)
+            except PermissionError:
+                self._close_pdf_viewer()
+                time.sleep(0.2)
+                tmp_path.replace(out_path)
+        except Exception:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            raise
+    
     def _split_with_custom_gutter(self, pdf_path: Path, gutter_x: float, gutter_x_per_page: Optional[List[float]] = None) -> Tuple[Optional[Path], Optional[str]]:
         """Split a two-up PDF at a custom X coordinate using PyMuPDF.
         
@@ -7487,10 +7538,9 @@ class PaperProcessorDaemon:
             import tempfile
             temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
             temp_dir.mkdir(parents=True, exist_ok=True)
-            out_path = temp_dir / f"PREPROCESSED_{pdf_path.stem}_split.pdf"
+            out_path = temp_dir / f"PREPROCESSED_{self._stem_for_preprocessed_artifacts(pdf_path)}_split.pdf"
             
-            
-            new_doc.save(str(out_path))
+            self._save_preprocessed_pdf(new_doc, out_path)
             
             new_doc.close()
             doc.close()
@@ -7870,9 +7920,9 @@ class PaperProcessorDaemon:
             import tempfile
             temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
             temp_dir.mkdir(parents=True, exist_ok=True)
-            out_path = temp_dir / f"PREPROCESSED_{pdf_path.stem}_from_page{page_offset + 1}.pdf"
+            out_path = temp_dir / f"PREPROCESSED_{self._stem_for_preprocessed_artifacts(pdf_path)}_from_page{page_offset + 1}.pdf"
             
-            new_doc.save(str(out_path))
+            self._save_preprocessed_pdf(new_doc, out_path)
             new_doc.close()
             doc.close()
             
@@ -8020,9 +8070,9 @@ class PaperProcessorDaemon:
             import tempfile
             temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
             temp_dir.mkdir(parents=True, exist_ok=True)
-            out_path = temp_dir / f"PREPROCESSED_{pdf_path.stem}_trimmed_end_{pages_to_drop}.pdf"
+            out_path = temp_dir / f"PREPROCESSED_{self._stem_for_preprocessed_artifacts(pdf_path)}_trimmed_end_{pages_to_drop}.pdf"
             
-            new_doc.save(str(out_path))
+            self._save_preprocessed_pdf(new_doc, out_path)
             new_doc.close()
             doc.close()
             
@@ -8221,9 +8271,9 @@ class PaperProcessorDaemon:
             import tempfile
             temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
             temp_dir.mkdir(parents=True, exist_ok=True)
-            out_path = temp_dir / f"PREPROCESSED_{pdf_path.stem}_no_page1.pdf"
+            out_path = temp_dir / f"PREPROCESSED_{self._stem_for_preprocessed_artifacts(pdf_path)}_no_page1.pdf"
             
-            new_doc.save(str(out_path))
+            self._save_preprocessed_pdf(new_doc, out_path)
             new_doc.close()
             doc.close()
             
@@ -8342,7 +8392,7 @@ class PaperProcessorDaemon:
         import tempfile
         temp_dir = Path(tempfile.gettempdir()) / 'pdf_borders_removed'
         temp_dir.mkdir(parents=True, exist_ok=True)
-        out_path = temp_dir / f"PREPROCESSED_{pdf_path.stem}_no_borders.pdf"
+        out_path = temp_dir / f"PREPROCESSED_{self._stem_for_preprocessed_artifacts(pdf_path)}_no_borders.pdf"
         
         try:
             stats = self.border_remover.process_entire_pdf(pdf_path, out_path, zoom=2.0)
@@ -13524,7 +13574,7 @@ def main():
     # Get watch directory from config
     config = configparser.ConfigParser()
     root_dir = Path(__file__).parent.parent
-    config.read([
+    read_config_files(config, [
         root_dir / 'config.conf',
         root_dir / 'config.personal.conf'
     ])

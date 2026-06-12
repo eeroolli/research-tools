@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import List, Dict, Optional
 import configparser
 from difflib import SequenceMatcher
+
+from shared_tools.config.io import read_config_files
 from datetime import datetime
 
 
@@ -73,7 +75,7 @@ class JournalValidator:
         config = configparser.ConfigParser()
         root_dir = Path(__file__).parent.parent.parent
         
-        config.read([
+        read_config_files(config, [
             root_dir / 'config.conf',
             root_dir / 'config.personal.conf'
         ])

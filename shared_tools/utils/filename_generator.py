@@ -6,6 +6,8 @@ Supports configurable patterns for different document types.
 
 import configparser
 from pathlib import Path
+
+from shared_tools.config.io import read_config_files
 from typing import Dict, List, Optional
 
 
@@ -21,7 +23,7 @@ class FilenameGenerator:
         config = configparser.ConfigParser()
         root_dir = Path(__file__).parent.parent.parent
         
-        config.read([
+        read_config_files(config, [
             root_dir / 'config.conf',
             root_dir / 'config.personal.conf'
         ])

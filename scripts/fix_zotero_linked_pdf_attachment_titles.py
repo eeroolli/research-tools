@@ -33,13 +33,14 @@ if str(ROOT) not in sys.path:
 
 import requests
 
+from shared_tools.config.io import read_config_files
 from shared_tools.zotero.paper_processor import ZoteroPaperProcessor
 
 
 def _scanned_papers_log_path() -> Path:
     """Resolve data/logs/scanned_papers_log.csv from PATHS log_folder (config.conf + config.personal.conf)."""
     cfg = configparser.ConfigParser()
-    cfg.read([ROOT / "config.conf", ROOT / "config.personal.conf"])
+    read_config_files(cfg, [ROOT / "config.conf", ROOT / "config.personal.conf"])
     raw = cfg.get("PATHS", "log_folder", fallback="./data/logs").strip()
     log_folder = Path(raw)
     if not log_folder.is_absolute():
@@ -52,7 +53,7 @@ def _scanned_papers_log_path() -> Path:
 def _logs_dir_path() -> Path:
     """Resolve log folder from PATHS.log_folder in config."""
     cfg = configparser.ConfigParser()
-    cfg.read([ROOT / "config.conf", ROOT / "config.personal.conf"])
+    read_config_files(cfg, [ROOT / "config.conf", ROOT / "config.personal.conf"])
     raw = cfg.get("PATHS", "log_folder", fallback="./data/logs").strip()
     log_folder = Path(raw)
     if not log_folder.is_absolute():

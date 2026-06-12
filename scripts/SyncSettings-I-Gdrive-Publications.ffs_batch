@@ -8,8 +8,8 @@
     </Compare>
     <Synchronize>
         <Changes>
-            <Left Create="right" Update="right" Delete="right"/>
-            <Right Create="left" Update="left" Delete="left"/>
+            <Left Create="right" Update="right" Delete="none"/>
+            <Right Create="none" Update="none" Delete="none"/>
         </Changes>
         <DeletionPolicy>RecycleBin</DeletionPolicy>
         <VersioningFolder Style="Replace"/>

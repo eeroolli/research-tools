@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from shared_tools.config.io import read_config_file
 from shared_tools.daemon.exceptions import ConfigurationError
 
 
@@ -58,7 +59,7 @@ class SecureConfigLoader:
             raise ConfigurationError(f"Configuration file not found: {config_path}")
         
         try:
-            config.read(config_path)
+            read_config_file(config, config_path)
             self.logger.debug(f"Loaded main config from: {config_path}")
         except Exception as e:
             raise ConfigurationError(f"Failed to load config from {config_path}: {e}") from e
@@ -69,7 +70,7 @@ class SecureConfigLoader:
                 self._check_config_permissions(personal_config_path)
             
             try:
-                config.read(personal_config_path)
+                read_config_file(config, personal_config_path)
                 self.logger.debug(f"Loaded personal config from: {personal_config_path}")
             except Exception as e:
                 raise ConfigurationError(f"Failed to load personal config from {personal_config_path}: {e}") from e

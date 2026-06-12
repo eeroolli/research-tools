@@ -11,6 +11,8 @@ import configparser
 from typing import List, Dict, Tuple
 from pathlib import Path
 
+from shared_tools.config.io import read_config_file, read_config_files
+
 
 class APIPriorityManager:
     """Manages API priority order from configuration."""
@@ -30,12 +32,12 @@ class APIPriorityManager:
             personal_config = root_dir / 'config.personal.conf'
             
             # Read both configs
-            self.config.read([
+            read_config_files(self.config, [
                 str(config_file),
                 str(personal_config)
             ])
         else:
-            self.config.read(config_file)
+            read_config_file(self.config, config_file)
         
         self.priorities = self._load_priorities()
     

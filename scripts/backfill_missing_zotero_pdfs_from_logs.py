@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from shared_tools.config.io import read_config_files
 from shared_tools.zotero.paper_processor import ZoteroPaperProcessor
 
 
@@ -49,7 +50,7 @@ from shared_tools.zotero.paper_processor import ZoteroPaperProcessor
 
 def _load_config() -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
-    cfg.read([ROOT / "config.conf", ROOT / "config.personal.conf"])
+    read_config_files(cfg, [ROOT / "config.conf", ROOT / "config.personal.conf"])
     return cfg
 
 

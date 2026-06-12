@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import List, Dict, Any
 from configparser import ConfigParser
 
+from shared_tools.config.io import read_config_file
+
 
 class FileManager:
     """Manages photo files for book processing workflow."""
@@ -30,7 +32,7 @@ class FileManager:
                 config_file = Path(__file__).parent.parent.parent.parent / "config.conf"
         
         self.config = ConfigParser()
-        self.config.read(config_file)
+        read_config_file(self.config, config_file)
         
         # Set up paths from config with fallbacks
         self.base_photos_dir = Path(self.config.get('PATHS', 'scan_folder', fallback='/mnt/i/FraMobil/Camera/Books/'))

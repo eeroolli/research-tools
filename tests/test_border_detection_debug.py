@@ -186,6 +186,8 @@ def analyze_pdf(pdf_path: Path, page_num: int = 0):
 def main():
     """Main entry point."""
     import configparser
+
+    from shared_tools.config.io import read_config_files
     
     # Look for the example PDF
     # Try common locations
@@ -200,7 +202,7 @@ def main():
     try:
         config = configparser.ConfigParser()
         root_dir = Path(__file__).parent.parent
-        config.read([
+        read_config_files(config, [
             root_dir / 'config.conf',
             root_dir / 'config.personal.conf'
         ])
