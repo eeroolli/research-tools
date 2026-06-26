@@ -268,6 +268,19 @@ class ZoteroPaperProcessor:
             item['pages'] = metadata.get('pages', '')
             item['ISBN'] = metadata.get('isbn', '')
         
+        elif item_type == 'preprint':
+            arxiv_id = metadata.get('arxiv_id', '')
+            if arxiv_id:
+                item['archiveID'] = arxiv_id
+            if metadata.get('url'):
+                item['url'] = metadata['url']
+        
+        if metadata.get('source') == 'arxiv' and metadata.get('arxiv_id'):
+            if not item.get('archiveID'):
+                item['archiveID'] = metadata['arxiv_id']
+            if metadata.get('url') and not item.get('url'):
+                item['url'] = metadata['url']
+        
         # Add tags from metadata
         # Handle both 'tags' and 'keywords' fields
         tags_to_add = []
@@ -403,6 +416,73 @@ class ZoteroPaperProcessor:
             
         except Exception:
             return None
+    
+    def search_by_arxiv_id(self, arxiv_id: str) -> Optional[Dict]:
+        """Search Zotero library for item by arXiv ID.
+        
+        Args:
+            arxiv_id: arXiv ID (e.g. '2005.11401')
+            
+        Returns:
+            Zotero item dict or None
+        """
+        from shared_tools.utils.identifier_validator import IdentifierValidator
+        from shared_tools.zotero.local_search import ZoteroLocalSearch
+        
+        valid, clean_id, _ = IdentifierValidator.validate_arxiv_id(arxiv_id)
+        if not valid or not clean_id:
+            return None
+        
+        try:
+            local = ZoteroLocalSearch()
+            matches = local.search_by_arxiv_id(clean_id, limit=1)
+            if matches:
+                item_key = matches[0]['item_key']
+                response = requests.get(
+                    f"{self.base_url}/items/{item_key}",
+                    headers=self.headers,
+                    timeout=10,
+                )
+                if response.status_code == 200:
+                    return response.json()
+        except Exception:
+            pass
+        
+        search_queries = [
+            f'archiveID:"{clean_id}"',
+            f'https://arxiv.org/abs/{clean_id}',
+            clean_id,
+        ]
+        try:
+            for query in search_queries:
+                response = requests.get(
+                    f"{self.base_url}/items",
+                    headers=self.headers,
+                    params={
+                        'q': query,
+                        'qmode': 'everything',
+                        'format': 'json',
+                        'limit': 20,
+                    },
+                    timeout=10,
+                )
+                if response.status_code != 200:
+                    continue
+                for item in response.json():
+                    data = item.get('data', {})
+                    archive_id = (data.get('archiveID') or '').strip()
+                    url = (data.get('url') or '').lower()
+                    extra = (data.get('extra') or '').lower()
+                    if archive_id == clean_id:
+                        return item
+                    if clean_id in url and 'arxiv.org' in url:
+                        return item
+                    if clean_id in extra and 'arxiv' in extra:
+                        return item
+        except Exception:
+            pass
+        
+        return None
     
     def create_item(self, item_template: Dict) -> Optional[str]:
         """Create new item in Zotero library.

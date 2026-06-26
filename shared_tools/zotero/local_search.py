@@ -407,6 +407,127 @@ class ZoteroLocalSearch:
             self.logger.error(f"Error searching by ISBN: {e}")
 
         return matches
+
+    def search_by_arxiv_id(self, arxiv_id: str, limit: int = 5) -> List[Dict]:
+        """Search Zotero database for items matching an arXiv ID."""
+        from shared_tools.utils.identifier_validator import IdentifierValidator
+
+        valid, clean_id, _ = IdentifierValidator.validate_arxiv_id(arxiv_id)
+        if not valid or not clean_id:
+            return []
+
+        if not self.db_connection:
+            self.connect()
+
+        matches: List[Dict] = []
+        seen_keys: set = set()
+
+        def _append_match(
+            item_id: int,
+            item_key: str,
+            title: str,
+            date_str: str,
+            method: str,
+        ) -> None:
+            if item_key in seen_keys:
+                return
+            seen_keys.add(item_key)
+            try:
+                cursor = self.db_connection.cursor()
+                item_type = self._get_item_type(item_id)
+                authors = self._get_authors(item_id)
+                has_attachment = self._has_attachment(item_id)
+                container_info = self._get_container_info(item_id, item_type)
+                doi = self._get_doi(item_id)
+                abstract = self._get_abstract(item_id)
+                tags = self._get_tags(item_id)
+                creators = self._get_item_creators(cursor, item_id)
+                matches.append({
+                    'item_key': item_key,
+                    'title': title or "Unknown",
+                    'authors': authors,
+                    'year': self._extract_year(date_str),
+                    'similarity': 100.0,
+                    'method': method,
+                    'has_attachment': has_attachment,
+                    'item_type': item_type,
+                    'container_info': container_info,
+                    'journal': container_info['value'] if container_info else None,
+                    'doi': doi,
+                    'abstract': abstract,
+                    'tags': tags,
+                    'creators': creators,
+                })
+            except Exception as e:
+                self.logger.error(f"Error building arXiv match for {item_key}: {e}")
+
+        select_fields = """
+            SELECT i.itemID, i.key,
+                   COALESCE(fv_title.value, '') as title,
+                   COALESCE(fv_date.value, '') as date
+            FROM items i
+            LEFT JOIN itemData id_title ON i.itemID = id_title.itemID
+                AND id_title.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'title')
+            LEFT JOIN itemDataValues fv_title ON id_title.valueID = fv_title.valueID
+            LEFT JOIN itemData id_date ON i.itemID = id_date.itemID
+                AND id_date.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'date')
+            LEFT JOIN itemDataValues fv_date ON id_date.valueID = fv_date.valueID
+        """
+
+        try:
+            cursor = self.db_connection.cursor()
+
+            archive_query = select_fields + """
+            JOIN itemData id_archive ON i.itemID = id_archive.itemID
+                AND id_archive.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'archiveID')
+            JOIN itemDataValues fv_archive ON id_archive.valueID = fv_archive.valueID
+            WHERE fv_archive.value = ?
+              AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+            LIMIT ?
+            """
+            cursor.execute(archive_query, (clean_id, limit))
+            for item_id, item_key, title, date_str in cursor.fetchall():
+                _append_match(item_id, item_key, title, date_str, 'archiveID')
+
+            url_patterns = [
+                f'%arxiv.org/abs/{clean_id}%',
+                f'%arxiv.org/pdf/{clean_id}%',
+                f'%arxiv.org/pdf/{clean_id}.pdf%',
+            ]
+            for pattern in url_patterns:
+                url_query = select_fields + """
+                JOIN itemData id_url ON i.itemID = id_url.itemID
+                    AND id_url.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'url')
+                JOIN itemDataValues fv_url ON id_url.valueID = fv_url.valueID
+                WHERE UPPER(fv_url.value) LIKE UPPER(?)
+                  AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                LIMIT ?
+                """
+                cursor.execute(url_query, (pattern, limit))
+                for item_id, item_key, title, date_str in cursor.fetchall():
+                    _append_match(item_id, item_key, title, date_str, 'url')
+
+            extra_patterns = [
+                f'%arXiv:{clean_id}%',
+                f'%arxiv:{clean_id}%',
+            ]
+            for pattern in extra_patterns:
+                extra_query = select_fields + """
+                JOIN itemData id_extra ON i.itemID = id_extra.itemID
+                    AND id_extra.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'extra')
+                JOIN itemDataValues fv_extra ON id_extra.valueID = fv_extra.valueID
+                WHERE UPPER(fv_extra.value) LIKE UPPER(?)
+                  AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                LIMIT ?
+                """
+                cursor.execute(extra_query, (pattern, limit))
+                for item_id, item_key, title, date_str in cursor.fetchall():
+                    _append_match(item_id, item_key, title, date_str, 'extra')
+
+        except Exception as e:
+            self.logger.error(f"Error searching by arXiv ID: {e}")
+
+        return matches[:limit]
     
     def _search_by_title_fuzzy(self, title: str, authors: List[str] = None, 
                                 year: int = None) -> List[Dict]:
