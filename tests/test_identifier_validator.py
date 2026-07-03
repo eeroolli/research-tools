@@ -54,6 +54,45 @@ class TestDOIValidation:
         assert cleaned is None
 
 
+class TestDOIOcrCorrection:
+    """Test OCR digit confusion correction for DOIs."""
+
+    def test_ocr_damaged_dx_doi_url(self):
+        """User-reported OCR case: l misread for 1, o misread for 0."""
+        raw = "http://dx.doi.org/l0.l080/l4742837.20l2.703831"
+        is_valid, cleaned, reason = IdentifierValidator.validate_doi(raw)
+        assert is_valid is True
+        assert cleaned == "10.1080/14742837.2012.703831"
+        assert "OCR corrected" in reason
+
+    def test_ocr_damaged_raw_doi(self):
+        is_valid, cleaned, reason = IdentifierValidator.validate_doi(
+            "l0.l080/l4742837.20l2.703831"
+        )
+        assert is_valid is True
+        assert cleaned == "10.1080/14742837.2012.703831"
+        assert "OCR corrected" in reason
+
+    def test_valid_doi_unchanged(self):
+        is_valid, cleaned, reason = IdentifierValidator.validate_doi(
+            "10.1080/14742837.2012.703831"
+        )
+        assert is_valid is True
+        assert cleaned == "10.1080/14742837.2012.703831"
+        assert reason == "Valid DOI"
+
+    def test_letter_suffix_not_corrupted(self):
+        is_valid, cleaned, reason = IdentifierValidator.validate_doi("10.1038/nature12345")
+        assert is_valid is True
+        assert cleaned == "10.1038/nature12345"
+        assert "OCR corrected" not in reason
+
+    def test_suspicious_pattern_still_rejected(self):
+        is_valid, cleaned, reason = IdentifierValidator.validate_doi("l0.l234/fake")
+        assert is_valid is False
+        assert cleaned is None
+
+
 class TestISSNValidation:
     """Test ISSN validation."""
     

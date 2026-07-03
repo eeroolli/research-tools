@@ -456,7 +456,10 @@ class PaperMetadataProcessor:
         for doi in identifiers['dois']:
             is_valid, cleaned, reason = self.validator.validate_doi(doi)
             if is_valid and cleaned:
-                print(f"  ✅ Valid DOI: {cleaned}")
+                if 'OCR corrected' in reason:
+                    print(f"  ✅ Valid DOI (OCR corrected): {cleaned}")
+                else:
+                    print(f"  ✅ Valid DOI: {cleaned}")
                 valid_dois.append(cleaned)
             else:
                 print(f"  ❌ Invalid DOI: {doi} - {reason}")

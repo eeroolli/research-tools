@@ -3708,62 +3708,64 @@ class PaperProcessorDaemon:
             online_metadata.get('doi') if online_metadata else None,
             local_metadata.get('doi') if local_metadata else None
         )
-        print("You can enter DOI manually (supports: 10.1234/example, https://doi.org/10.1234/example, doi:10.1234/example)")
+
+        def apply_manual_doi(cleaned_doi: str, reason: str) -> None:
+            nonlocal has_online, online_metadata, online_source
+            edited['doi'] = cleaned_doi
+            if 'OCR corrected' in reason:
+                print(f"✅ Valid DOI (OCR corrected): {cleaned_doi}")
+            else:
+                print(f"✅ Valid DOI: {cleaned_doi}")
+            if not has_online and not has_local:
+                fetch_choice = input("Fetch metadata for this DOI? [y/n]: ").strip().lower()
+                if fetch_choice == 'y':
+                    print(f"🔍 Fetching metadata for DOI: {cleaned_doi}...")
+                    fetched_metadata = self.metadata_processor._try_apis_for_doi(
+                        cleaned_doi, ['crossref', 'openalex', 'pubmed']
+                    )
+                    if fetched_metadata:
+                        source = fetched_metadata.get('source', 'unknown')
+                        print(f"✅ Found metadata from {source}")
+                        merge_choice = input("Merge fetched metadata with current? [y/n]: ").strip().lower()
+                        if merge_choice == 'y':
+                            for key, value in fetched_metadata.items():
+                                if value and not edited.get(key) and key not in ['source', 'raw_type']:
+                                    edited[key] = value
+                                    if key in ['title', 'authors', 'year', 'journal', 'abstract']:
+                                        display_val = str(value)
+                                        if key == 'authors' and isinstance(value, list):
+                                            display_val = ', '.join(value[:3])
+                                        elif key == 'abstract' and len(str(value)) > 50:
+                                            display_val = str(value)[:50] + "..."
+                                        print(f"  ✅ Added {key}: {display_val}")
+                            has_online = True
+                            online_metadata = fetched_metadata
+                            online_source = source
+                    else:
+                        print("❌ No metadata found for this DOI in any API")
+
+        print(
+            "You can enter DOI manually (supports: 10.1234/example, "
+            "https://doi.org/10.1234/example, http://dx.doi.org/..., doi:10.1234/example)"
+        )
         new_value = input("New DOI (or Enter to keep current): ").strip()
         
         if new_value:
-            # Validate and normalize the entered DOI
             validator = self.metadata_processor.validator
             is_valid, cleaned_doi, reason = validator.validate_doi(new_value)
-            
             if is_valid and cleaned_doi:
-                edited['doi'] = cleaned_doi
-                print(f"✅ Valid DOI: {cleaned_doi}")
-                
-                # If no metadata was found yet, offer to fetch it using the DOI
-                if not has_online and not has_local:
-                    fetch_choice = input(f"Fetch metadata for this DOI? [y/n]: ").strip().lower()
-                    if fetch_choice == 'y':
-                        print(f"🔍 Fetching metadata for DOI: {cleaned_doi}...")
-                        # Try to fetch metadata using the DOI (using private method - it's the right interface)
-                        fetched_metadata = self.metadata_processor._try_apis_for_doi(cleaned_doi, ['crossref', 'openalex', 'pubmed'])
-                        if fetched_metadata:
-                            source = fetched_metadata.get('source', 'unknown')
-                            print(f"✅ Found metadata from {source}")
-                            # Ask if user wants to merge fetched metadata
-                            merge_choice = input("Merge fetched metadata with current? [y/n]: ").strip().lower()
-                            if merge_choice == 'y':
-                                # Fill gaps with fetched metadata (don't overwrite existing values)
-                                for key, value in fetched_metadata.items():
-                                    if value and not edited.get(key) and key not in ['source', 'raw_type']:
-                                        edited[key] = value
-                                        # Show brief summary for key fields
-                                        if key in ['title', 'authors', 'year', 'journal', 'abstract']:
-                                            display_val = str(value)
-                                            if key == 'authors' and isinstance(value, list):
-                                                display_val = ', '.join(value[:3])
-                                            elif key == 'abstract' and len(str(value)) > 50:
-                                                display_val = str(value)[:50] + "..."
-                                            print(f"  ✅ Added {key}: {display_val}")
-                                has_online = True  # Now we have online metadata
-                                online_metadata = fetched_metadata
-                                online_source = source
-                        else:
-                            print("❌ No metadata found for this DOI in any API")
+                apply_manual_doi(cleaned_doi, reason)
             else:
                 print(f"❌ {reason}")
-                retry = input("Retry with different DOI? [y/n]: ").strip().lower()
-                if retry == 'y':
-                    # Re-prompt for DOI (don't recurse through entire function)
-                    retry_value = input("Enter DOI again: ").strip()
-                    if retry_value:
-                        is_valid, cleaned_doi, reason = validator.validate_doi(retry_value)
-                        if is_valid and cleaned_doi:
-                            edited['doi'] = cleaned_doi
-                            print(f"✅ Valid DOI: {cleaned_doi}")
-                        else:
-                            print(f"❌ {reason} - skipping DOI")
-                # Otherwise keep original or empty
+                while True:
+                    corrected = input("Enter corrected DOI (Enter or n to skip): ").strip()
+                    if not corrected or corrected.lower() in ('n', 'no'):
+                        break
+                    is_valid, cleaned_doi, reason = validator.validate_doi(corrected)
+                    if is_valid and cleaned_doi:
+                        apply_manual_doi(cleaned_doi, reason)
+                        break
+                    print(f"❌ {reason}")
         elif online_metadata and online_metadata.get('doi') and not edited.get('doi'):
             edited['doi'] = online_metadata['doi']
             print(f"✅ Auto-filled from online: {online_metadata['doi']}")

@@ -64,6 +64,12 @@ class IdentifierExtractor:
         # OCR error: / misread as ) - raw DOI
         r'\b(10\.\d{4,}\)[^\s\)]+)',
     ]
+
+    # doi.org URLs with OCR-damaged paths (prefix may be l0. instead of 10.)
+    DOI_URL_OCR_PATTERNS = [
+        r'https?://doi\.org/([^\s\)]+)',
+        r'https?://dx\.doi\.org/([^\s\)]+)',
+    ]
     
     # ISSN pattern: 1234-5678 or 1234-567X
     ISSN_PATTERN = r'\bISSN[:\s]*(\d{4}-\d{3}[0-9X])\b'
@@ -185,15 +191,18 @@ class IdentifierExtractor:
                 if re.match(r'10\.\d{4,}\)', doi):
                     doi = doi.replace(')', '/', 1)  # Replace first ) with /
                 
-                # Normalize any OCR artifacts in the DOI itself
-                # Replace common OCR errors: "O" misread as "0" or "o", "I" as "1" or "l", etc.
-                # But be careful - we don't want to corrupt valid DOIs
-                # Only fix if we see obvious OCR errors in the prefix-like part
-                
                 # Remove trailing punctuation that might be captured
                 doi = re.sub(r'[.,;:\s]+$', '', doi)
                 
                 if doi and doi not in dois:
+                    dois.append(doi)
+
+        for pattern in cls.DOI_URL_OCR_PATTERNS:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                doi = match.group(1).strip()
+                doi = re.sub(r'[.,;:\s]+$', '', doi)
+                if doi and '/' in doi and doi not in dois:
                     dois.append(doi)
         
         return dois

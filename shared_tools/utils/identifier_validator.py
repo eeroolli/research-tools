@@ -59,7 +59,60 @@ class IdentifierValidator:
             doi = doi[15:].strip()
         
         return doi if doi else None
-    
+
+    @classmethod
+    def _ocr_substitute_digit_char(cls, char: str) -> str:
+        """Map common OCR letter misreads to digits."""
+        if char in 'lI':
+            return '1'
+        if char in 'oO':
+            return '0'
+        return char
+
+    @classmethod
+    def _is_digit_adjacent(cls, text: str, index: int) -> bool:
+        """True if position is adjacent to a digit or dot in a numeric run."""
+        if index > 0 and (text[index - 1].isdigit() or text[index - 1] == '.'):
+            return True
+        if index + 1 < len(text) and (text[index + 1].isdigit() or text[index + 1] == '.'):
+            return True
+        return False
+
+    @classmethod
+    def fix_ocr_digit_confusions(cls, doi: str) -> str:
+        """Correct common OCR digit confusions (l/I→1, o/O→0) in DOI strings.
+
+        Prefix (before first /) is treated as numeric (10.{registrant}).
+        Suffix substitutions apply only in digit-adjacent positions.
+        """
+        if not doi or '/' not in doi:
+            prefix, suffix = doi, ''
+        else:
+            slash = doi.index('/')
+            prefix, suffix = doi[:slash], doi[slash + 1:]
+
+        fixed_prefix = ''.join(cls._ocr_substitute_digit_char(c) for c in prefix)
+
+        fixed_suffix_chars = []
+        for i, char in enumerate(suffix):
+            if char in 'lIoO' and cls._is_digit_adjacent(suffix, i):
+                fixed_suffix_chars.append(cls._ocr_substitute_digit_char(char))
+            else:
+                fixed_suffix_chars.append(char)
+        fixed_suffix = ''.join(fixed_suffix_chars)
+
+        if suffix:
+            return f"{fixed_prefix}/{fixed_suffix}"
+        return fixed_prefix
+
+    @classmethod
+    def _doi_passes_format_checks(cls, doi: str) -> bool:
+        """Return True if doi matches format rules and is not a fake pattern."""
+        for pattern in cls.FAKE_PATTERNS:
+            if re.match(pattern, doi):
+                return False
+        return bool(cls.DOI_PATTERN.match(doi))
+
     @classmethod
     def validate_doi(cls, doi: Optional[str]) -> Tuple[bool, Optional[str], str]:
         """Validate DOI format.
@@ -77,17 +130,19 @@ class IdentifierValidator:
         normalized = cls.normalize_doi(doi)
         if not normalized:
             return (False, None, "Empty DOI after normalization")
-        
-        # Check for suspicious patterns
+
+        if cls._doi_passes_format_checks(normalized):
+            return (True, normalized, "Valid DOI")
+
+        corrected = cls.fix_ocr_digit_confusions(normalized)
+        if corrected != normalized and cls._doi_passes_format_checks(corrected):
+            return (True, corrected, "Valid DOI (OCR corrected)")
+
         for pattern in cls.FAKE_PATTERNS:
             if re.match(pattern, normalized):
                 return (False, None, f"Suspicious pattern: {normalized}")
-        
-        # Validate format
-        if cls.DOI_PATTERN.match(normalized):
-            return (True, normalized, "Valid DOI")
-        else:
-            return (False, None, f"Invalid DOI format: {normalized}")
+
+        return (False, None, f"Invalid DOI format: {normalized}")
     
     @classmethod
     def validate_issn(cls, issn: Optional[str]) -> Tuple[bool, Optional[str], str]:
