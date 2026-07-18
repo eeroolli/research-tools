@@ -5959,60 +5959,66 @@ class PaperProcessorDaemon:
         print()
         print("  [Enter] = Use this filename")
         print("  [e] = Edit filename")
+        print("  Or type a filename directly")
         print()
         
-        choice = input("Your choice: ").strip().lower()
+        choice_raw = input("Your choice: ").strip()
+        choice = choice_raw.lower()
         
         if choice == '' or choice == 'y':
             # User approved, return as-is
             return target_filename
         
-        if choice != 'e':
-            # Invalid choice, default to approve
-            return target_filename
-        
-        # User wants to edit - show options
-        print()
-        print(Colors.colorize("Choose filename source:", ColorScheme.ACTION))
-        print(Colors.colorize("  [a] Default: Zotero-based filename (current)", ColorScheme.LIST))
-        print(Colors.colorize("  [b] OCR-based: Use extracted title from PDF", ColorScheme.LIST))
-        print()
-        
-        source_raw = input("Your choice [a/b]: ").strip()
-        source_choice = source_raw.lower()
-        
-        if source_choice == 'b':
-            # Generate OCR-based filename when available
-            ocr_title = (extracted_metadata or {}).get('title', '').strip()
-            if ocr_title:
-                # Build metadata with OCR title but Zotero authors/year
-                ocr_metadata = {
-                    'title': ocr_title,
-                    'authors': zotero_metadata.get('authors', []),
-                    'year': zotero_metadata.get('year', 'Unknown'),
-                    'document_type': zotero_metadata.get('document_type', 'journalArticle')
-                }
-                filename_gen = FilenameGenerator()
-                proposed_filename = filename_gen.generate(ocr_metadata, is_scan=True) + '.pdf'
-                print()
-                print(f"OCR-based filename: {proposed_filename}")
-            else:
-                print("⚠️  No extracted title available, using Zotero-based filename")
-                proposed_filename = target_filename
-        elif source_choice in ('', 'a'):
-            # Use Zotero-based (option a or Enter)
-            proposed_filename = target_filename
+        if choice == 'e':
+            # User wants to edit - show source options
             print()
-            print(f"Zotero-based filename: {proposed_filename}")
+            print(Colors.colorize("Choose filename source:", ColorScheme.ACTION))
+            print(Colors.colorize("  [a] Default: Zotero-based filename (current)", ColorScheme.LIST))
+            print(Colors.colorize("  [b] OCR-based: Use extracted title from PDF", ColorScheme.LIST))
+            print()
+            
+            source_raw = input("Your choice [a/b]: ").strip()
+            source_choice = source_raw.lower()
+            
+            if source_choice == 'b':
+                # Generate OCR-based filename when available
+                ocr_title = (extracted_metadata or {}).get('title', '').strip()
+                if ocr_title:
+                    # Build metadata with OCR title but Zotero authors/year
+                    ocr_metadata = {
+                        'title': ocr_title,
+                        'authors': zotero_metadata.get('authors', []),
+                        'year': zotero_metadata.get('year', 'Unknown'),
+                        'document_type': zotero_metadata.get('document_type', 'journalArticle')
+                    }
+                    filename_gen = FilenameGenerator()
+                    proposed_filename = filename_gen.generate(ocr_metadata, is_scan=True) + '.pdf'
+                    print()
+                    print(f"OCR-based filename: {proposed_filename}")
+                else:
+                    print("⚠️  No extracted title available, using Zotero-based filename")
+                    proposed_filename = target_filename
+            elif source_choice in ('', 'a'):
+                # Use Zotero-based (option a or Enter)
+                proposed_filename = target_filename
+                print()
+                print(f"Zotero-based filename: {proposed_filename}")
+            else:
+                # Manual filename typed instead of a/b — use as edit default (preserve case)
+                proposed_filename = source_raw
+                if not proposed_filename.endswith('.pdf'):
+                    proposed_filename = proposed_filename + '.pdf'
+                print()
+                print(f"Entered filename: {proposed_filename}")
         else:
-            # Manual filename typed instead of a/b — use as edit default (preserve case)
-            proposed_filename = source_raw
+            # Filename typed at first prompt — use as edit default (preserve case)
+            proposed_filename = choice_raw
             if not proposed_filename.endswith('.pdf'):
                 proposed_filename = proposed_filename + '.pdf'
             print()
             print(f"Entered filename: {proposed_filename}")
         
-        # Allow terminal editing
+        # Allow terminal editing (Enter confirms proposed_filename)
         print()
         print("Edit filename (or press Enter to use as-is):")
         edited = input(f"{proposed_filename} -> ").strip()
