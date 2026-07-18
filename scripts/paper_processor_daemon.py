@@ -5978,11 +5978,12 @@ class PaperProcessorDaemon:
         print(Colors.colorize("  [b] OCR-based: Use extracted title from PDF", ColorScheme.LIST))
         print()
         
-        source_choice = input("Your choice [a/b]: ").strip().lower()
+        source_raw = input("Your choice [a/b]: ").strip()
+        source_choice = source_raw.lower()
         
-        if source_choice == 'b' and extracted_metadata:
-            # Generate OCR-based filename
-            ocr_title = extracted_metadata.get('title', '').strip()
+        if source_choice == 'b':
+            # Generate OCR-based filename when available
+            ocr_title = (extracted_metadata or {}).get('title', '').strip()
             if ocr_title:
                 # Build metadata with OCR title but Zotero authors/year
                 ocr_metadata = {
@@ -5998,11 +5999,18 @@ class PaperProcessorDaemon:
             else:
                 print("⚠️  No extracted title available, using Zotero-based filename")
                 proposed_filename = target_filename
-        else:
-            # Use Zotero-based (option a or fallback)
+        elif source_choice in ('', 'a'):
+            # Use Zotero-based (option a or Enter)
             proposed_filename = target_filename
             print()
             print(f"Zotero-based filename: {proposed_filename}")
+        else:
+            # Manual filename typed instead of a/b — use as edit default (preserve case)
+            proposed_filename = source_raw
+            if not proposed_filename.endswith('.pdf'):
+                proposed_filename = proposed_filename + '.pdf'
+            print()
+            print(f"Entered filename: {proposed_filename}")
         
         # Allow terminal editing
         print()
