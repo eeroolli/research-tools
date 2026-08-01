@@ -1638,7 +1638,8 @@ def _handle_drop_border_removal(ctx, daemon):
         original_pdf,
         border_removal=False,
         split_method=preprocessing_state.get('split_method', 'auto'),
-        trim_leading=preprocessing_state.get('trim_leading', True)
+        trim_leading=preprocessing_state.get('trim_leading', True),
+        manual_split_ratio=preprocessing_state.get('manual_split_ratio'),
     )
     
     ctx['processed_pdf'] = processed_pdf
@@ -1712,7 +1713,8 @@ def _handle_drop_trimming(ctx, daemon):
         original_pdf,
         border_removal=preprocessing_state.get('border_removal', True),
         split_method=preprocessing_state.get('split_method', 'auto'),
-        trim_leading=False
+        trim_leading=False,
+        manual_split_ratio=preprocessing_state.get('manual_split_ratio'),
     )
     
     ctx['processed_pdf'] = processed_pdf
@@ -1730,7 +1732,8 @@ def _handle_add_trimming(ctx, daemon):
         original_pdf,
         border_removal=preprocessing_state.get('border_removal', True),
         split_method=preprocessing_state.get('split_method', 'auto'),
-        trim_leading=True
+        trim_leading=True,
+        manual_split_ratio=preprocessing_state.get('manual_split_ratio'),
     )
     
     ctx['processed_pdf'] = processed_pdf

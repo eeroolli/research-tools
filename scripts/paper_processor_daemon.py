@@ -6743,7 +6743,8 @@ class PaperProcessorDaemon:
                             original_pdf,
                             border_removal=False,
                             split_method=new_state.get('split_method', 'auto'),
-                            trim_leading=new_state.get('trim_leading', True)
+                            trim_leading=new_state.get('trim_leading', True),
+                            manual_split_ratio=new_state.get('manual_split_ratio'),
                         )
                         preprocessing_state = new_state
                         last_previewed_pdf = None
@@ -6802,7 +6803,8 @@ class PaperProcessorDaemon:
                             original_pdf,
                             border_removal=new_state.get('border_removal', True),
                             split_method=new_state.get('split_method', 'auto'),
-                            trim_leading=False
+                            trim_leading=False,
+                            manual_split_ratio=new_state.get('manual_split_ratio'),
                         )
                         preprocessing_state = new_state
                         last_previewed_pdf = None
@@ -6817,7 +6819,8 @@ class PaperProcessorDaemon:
                             original_pdf,
                             border_removal=new_state.get('border_removal', True),
                             split_method=new_state.get('split_method', 'auto'),
-                            trim_leading=True
+                            trim_leading=True,
+                            manual_split_ratio=new_state.get('manual_split_ratio'),
                         )
                         preprocessing_state = new_state
                         last_previewed_pdf = None

@@ -60,7 +60,12 @@ yaml_mod.safe_load = lambda *_args, **_kwargs: {}
 sys.modules.setdefault("yaml", yaml_mod)
 
 try:
-    from handle_item_selected_pages import _handle_manual_split
+    from handle_item_selected_pages import (
+        _handle_add_trimming,
+        _handle_drop_border_removal,
+        _handle_drop_trimming,
+        _handle_manual_split,
+    )
     from scripts.paper_processor_daemon import PaperProcessorDaemon
     from shared_tools.ui.navigation import NavigationResult
 except ModuleNotFoundError as exc:
@@ -240,3 +245,130 @@ def test_preprocess_manual_split_skips_trim_when_not_requested(
     assert state["split_method"] == "manual"
     assert state["split_succeeded"] is True
     assert state["trim_leading"] is False
+
+
+def _manual_split_state() -> dict:
+    return {
+        "border_removal": False,
+        "split_method": "manual",
+        "split_attempted": True,
+        "split_succeeded": True,
+        "manual_split_ratio": 52.0,
+        "trim_leading": False,
+    }
+
+
+def _capture_preprocess(final_out: Path):
+    captured: dict = {}
+
+    def fake_preprocess(
+        pdf_path_arg,
+        border_removal=True,
+        split_method="auto",
+        trim_leading=True,
+        manual_split_ratio=None,
+    ):
+        captured["args"] = {
+            "pdf_path": pdf_path_arg,
+            "border_removal": border_removal,
+            "split_method": split_method,
+            "trim_leading": trim_leading,
+            "manual_split_ratio": manual_split_ratio,
+        }
+        return final_out, {
+            "border_removal": border_removal,
+            "split_method": split_method,
+            "split_attempted": True,
+            "split_succeeded": True,
+            "manual_split_ratio": manual_split_ratio,
+            "trim_leading": trim_leading,
+        }
+
+    return captured, fake_preprocess
+
+
+def test_handle_add_trimming_preserves_manual_split_ratio(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add trimming after manual split must forward manual_split_ratio."""
+    pdf_path = tmp_path / "EN_scan_double.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    final_out = tmp_path / "PREPROCESSED_EN_scan_split_trimmed.pdf"
+    final_out.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    captured, fake_preprocess = _capture_preprocess(final_out)
+    monkeypatch.setattr(daemon, "_preprocess_pdf_with_options", fake_preprocess)
+
+    ctx = {
+        "pdf_path": pdf_path,
+        "preprocessing_state": _manual_split_state(),
+    }
+
+    result = _handle_add_trimming(ctx, daemon)
+
+    assert result.type == NavigationResult.Type.SHOW_PAGE
+    assert result.page_id == "pdf_preview"
+    assert captured["args"]["split_method"] == "manual"
+    assert captured["args"]["manual_split_ratio"] == 52.0
+    assert captured["args"]["trim_leading"] is True
+    assert captured["args"]["border_removal"] is False
+    assert ctx["preprocessing_state"]["manual_split_ratio"] == 52.0
+
+
+def test_handle_drop_trimming_preserves_manual_split_ratio(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drop trimming after manual split must forward manual_split_ratio."""
+    pdf_path = tmp_path / "EN_scan_double.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    final_out = tmp_path / "PREPROCESSED_EN_scan_split.pdf"
+    final_out.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    captured, fake_preprocess = _capture_preprocess(final_out)
+    monkeypatch.setattr(daemon, "_preprocess_pdf_with_options", fake_preprocess)
+
+    state = _manual_split_state()
+    state["trim_leading"] = True
+    ctx = {
+        "pdf_path": pdf_path,
+        "preprocessing_state": state,
+    }
+
+    result = _handle_drop_trimming(ctx, daemon)
+
+    assert result.type == NavigationResult.Type.SHOW_PAGE
+    assert result.page_id == "pdf_preview"
+    assert captured["args"]["split_method"] == "manual"
+    assert captured["args"]["manual_split_ratio"] == 52.0
+    assert captured["args"]["trim_leading"] is False
+    assert ctx["preprocessing_state"]["manual_split_ratio"] == 52.0
+
+
+def test_handle_drop_border_preserves_manual_split_ratio(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drop border after manual split must forward manual_split_ratio."""
+    pdf_path = tmp_path / "EN_scan_double.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    final_out = tmp_path / "PREPROCESSED_EN_scan_split.pdf"
+    final_out.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    captured, fake_preprocess = _capture_preprocess(final_out)
+    monkeypatch.setattr(daemon, "_preprocess_pdf_with_options", fake_preprocess)
+
+    state = _manual_split_state()
+    state["border_removal"] = True
+    ctx = {
+        "pdf_path": pdf_path,
+        "preprocessing_state": state,
+    }
+
+    result = _handle_drop_border_removal(ctx, daemon)
+
+    assert result.type == NavigationResult.Type.SHOW_PAGE
+    assert result.page_id == "pdf_preview"
+    assert captured["args"]["split_method"] == "manual"
+    assert captured["args"]["manual_split_ratio"] == 52.0
+    assert captured["args"]["border_removal"] is False
+    assert captured["args"]["trim_leading"] is False
+    assert ctx["preprocessing_state"]["manual_split_ratio"] == 52.0
