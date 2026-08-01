@@ -328,6 +328,11 @@ are treated as two-up pages and are split automatically during the PDF preproces
     - `Auto-splitting due to '_double' in filename...`
   - In the preprocessing preview menu, the `Current preprocessing` section shows:
     - `Split: ✓ Applied (50/50 geometric)` after the initial pass, or `Split: ✓ Applied (gutter detection)` after using **Improve split**.
+- **When you adjust preprocessing from PDF PREVIEW**
+  - Each change reruns the complete preprocessing pipeline from the original scan, not from the already split or trimmed preview. This prevents repeated splitting or cumulative trimming.
+  - The same restart rule applies in the item-selected attachment preview after the early preprocessing pass.
+  - A manual split is entered as the left-page percentage from `30` to `70` (for example, `52` means `52/48`).
+  - Adding or dropping trimming, or dropping border removal, preserves an active manual split ratio. The pipeline reapplies the selected options in order and then refreshes the preview.
 - **How it is logged**
   - The CSV log at `data/logs/scanned_papers_log.csv` contains a `split` column:
     - `"yes"`  – split was attempted and succeeded.
