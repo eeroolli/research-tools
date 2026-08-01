@@ -76,7 +76,7 @@ from shared_tools.pdf.document_separator import (
 
 # Import color utilities
 from shared_tools.ui.colors import ColorScheme, Colors
-from shared_tools.ui.user_feedback import print_unacceptable_input
+from shared_tools.ui.user_feedback import is_clear_field_input, print_unacceptable_input
 
 # Import daemon modules
 from shared_tools.daemon.service_manager import ServiceManager
@@ -948,14 +948,22 @@ class PaperProcessorDaemon:
         if allow_back:
             hint += ", 'z' to back, 'r' to restart"
         if current_year:
-            hint += ", or enter new year to change"
+            hint += ", space or '-' to clear, or enter new year to change"
         hint += ")"
         
         try:
-            year_input = input(f"Enter publication year {hint}: ").strip().lower()
+            year_raw = input(f"Enter publication year {hint}: ")
         except (KeyboardInterrupt, EOFError):
             print("\n❌ Cancelled")
             return 'BACK'  # Allow user to go back/cancel
+        
+        if is_clear_field_input(year_raw):
+            metadata.pop('year', None)
+            metadata.pop('_year_confirmed', None)
+            print("✅ Year cleared")
+            return metadata
+        
+        year_input = year_raw.strip().lower()
         
         if year_input == 'z' and allow_back:
             return 'BACK'
@@ -1485,11 +1493,11 @@ class PaperProcessorDaemon:
                 while True:
                     final_choice = input("Enter your choice: ").strip().lower()
                     if final_choice == '1':
-                        new_year = input("Enter different year (blank to clear): ").strip()
-                        if new_year:
-                            metadata['year'] = new_year
-                        else:
+                        new_year_raw = input("Enter different year (blank, space, or '-' to clear): ")
+                        if is_clear_field_input(new_year_raw) or new_year_raw == '':
                             metadata.pop('year', None)
+                        else:
+                            metadata['year'] = new_year_raw.strip()
                         return ('search', None, metadata)
                     elif final_choice == '2':
                         return ('create', None, metadata)
@@ -3516,9 +3524,12 @@ class PaperProcessorDaemon:
             online_metadata.get('title') if online_metadata else None,
             local_metadata.get('title') if local_metadata else None
         )
-        new_value = input("New title (or Enter to keep current): ").strip()
-        if new_value:
-            edited['title'] = new_value
+        new_raw = input("New title (Enter=keep, space or '-'=clear): ")
+        if is_clear_field_input(new_raw):
+            edited['title'] = ''
+            print("✅ Title cleared")
+        elif new_raw.strip():
+            edited['title'] = new_raw.strip()
         elif online_metadata and online_metadata.get('title') and not edited.get('title'):
             edited['title'] = online_metadata['title']
             print(f"✅ Auto-filled from online: {online_metadata['title']}")
@@ -3583,16 +3594,17 @@ class PaperProcessorDaemon:
         author_count = len(edited.get('authors', []))
         if author_count > 5:
             print(f"\n⚠️  Found {author_count} authors. Quick options:")
-            print("  (clear)  Delete all authors")
+            print("  (space or -)  Delete all authors")
             print("  (first)  Use only first author")
             print("  (last)   Use only last author")
         
-        new_value = input("New authors (comma-separated, Enter to keep, 'clear', 'first', or 'last'): ").strip()
-        if new_value:
-            if new_value.lower() == 'clear':
-                edited['authors'] = []
-                print("✅ All authors deleted")
-            elif new_value.lower() == 'first':
+        new_raw = input("New authors (comma-separated; Enter=keep, space or '-'=clear, 'first', or 'last'): ")
+        if is_clear_field_input(new_raw):
+            edited['authors'] = []
+            print("✅ All authors deleted")
+        elif new_raw.strip():
+            new_value = new_raw.strip()
+            if new_value.lower() == 'first':
                 if edited.get('authors'):
                     edited['authors'] = [edited['authors'][0]]
                     print(f"✅ Using only first author: {edited['authors'][0]}")
@@ -3606,7 +3618,7 @@ class PaperProcessorDaemon:
                 else:
                     print("⚠️  No authors to select from")
             else:
-                edited['authors'] = [a.strip() for a in new_value.split(',')]
+                edited['authors'] = [a.strip() for a in new_value.split(',') if a.strip()]
         elif online_metadata and online_metadata.get('authors') and not edited.get('authors'):
             edited['authors'] = online_metadata['authors']
             print(f"✅ Auto-filled from online: {', '.join(online_metadata['authors'])}")
@@ -3623,16 +3635,17 @@ class PaperProcessorDaemon:
         )
         current_year = edited.get('year', '')
         if current_year:
-            prompt_text = f"New year (current: {current_year}, Enter to keep, or 'clear' to remove): "
+            prompt_text = f"New year (current: {current_year}, Enter=keep, space or '-'=clear): "
         else:
-            prompt_text = "New year (Enter to skip, or 'clear' to remove): "
-        new_value = input(prompt_text).strip()
-        if new_value:
-            if new_value.lower() == 'clear':
-                edited['year'] = ''
-                edited.pop('_year_confirmed', None)  # Clear confirmation flag if year is cleared
-                print("✅ Year cleared")
-            elif new_value.isdigit() and len(new_value) == 4:
+            prompt_text = "New year (Enter=skip, space or '-'=clear): "
+        new_raw = input(prompt_text)
+        if is_clear_field_input(new_raw):
+            edited['year'] = ''
+            edited.pop('_year_confirmed', None)  # Clear confirmation flag if year is cleared
+            print("✅ Year cleared")
+        elif new_raw.strip():
+            new_value = new_raw.strip()
+            if new_value.isdigit() and len(new_value) == 4:
                 edited['year'] = new_value
                 edited.pop('_year_confirmed', None)  # Clear confirmation flag to allow re-editing
                 print(f"✅ Year updated to: {new_value}")
@@ -3675,8 +3688,12 @@ class PaperProcessorDaemon:
             else:
                 print(f"  🆕 New journal (not in your Zotero collection)")
         
-        new_value = input("New journal/source (or Enter to keep current): ").strip()
-        if new_value:
+        new_raw = input("New journal/source (Enter=keep, space or '-'=clear): ")
+        if is_clear_field_input(new_raw):
+            edited['journal'] = ''
+            print("✅ Journal/source cleared")
+        elif new_raw.strip():
+            new_value = new_raw.strip()
             # Validate newly entered journal
             edited['journal'] = new_value
             if self.journal_validator:
@@ -3756,29 +3773,29 @@ class PaperProcessorDaemon:
             "You can enter DOI manually (supports: 10.1234/example, "
             "https://doi.org/10.1234/example, http://dx.doi.org/..., doi:10.1234/example)"
         )
-        new_value = input("New DOI (or Enter to keep current, 'clear' to remove): ").strip()
+        new_raw = input("New DOI (Enter=keep, space or '-'=clear): ")
         
-        if new_value:
-            if new_value.lower() == 'clear':
-                edited['doi'] = ''
-                edited.pop('doi_source', None)
-                print("✅ DOI cleared")
+        if is_clear_field_input(new_raw):
+            edited['doi'] = ''
+            edited.pop('doi_source', None)
+            print("✅ DOI cleared")
+        elif new_raw.strip():
+            new_value = new_raw.strip()
+            validator = self.metadata_processor.validator
+            is_valid, cleaned_doi, reason = validator.validate_doi(new_value)
+            if is_valid and cleaned_doi:
+                apply_manual_doi(cleaned_doi, reason)
             else:
-                validator = self.metadata_processor.validator
-                is_valid, cleaned_doi, reason = validator.validate_doi(new_value)
-                if is_valid and cleaned_doi:
-                    apply_manual_doi(cleaned_doi, reason)
-                else:
+                print(f"❌ {reason}")
+                while True:
+                    corrected = input("Enter corrected DOI (Enter or n to skip): ").strip()
+                    if not corrected or corrected.lower() in ('n', 'no'):
+                        break
+                    is_valid, cleaned_doi, reason = validator.validate_doi(corrected)
+                    if is_valid and cleaned_doi:
+                        apply_manual_doi(cleaned_doi, reason)
+                        break
                     print(f"❌ {reason}")
-                    while True:
-                        corrected = input("Enter corrected DOI (Enter or n to skip): ").strip()
-                        if not corrected or corrected.lower() in ('n', 'no'):
-                            break
-                        is_valid, cleaned_doi, reason = validator.validate_doi(corrected)
-                        if is_valid and cleaned_doi:
-                            apply_manual_doi(cleaned_doi, reason)
-                            break
-                        print(f"❌ {reason}")
         elif online_metadata and online_metadata.get('doi') and not edited.get('doi'):
             edited['doi'] = online_metadata['doi']
             print(f"✅ Auto-filled from online: {online_metadata['doi']}")
@@ -5500,22 +5517,31 @@ class PaperProcessorDaemon:
                             print(f"\n📅 Year found by {suggested_source}: {suggested_year}")
                         
                         # Simple prompt: press Enter to confirm or type a different year
-                        print("💡 You can type a 4-digit year to change it, or press Enter to confirm")
+                        print("💡 You can type a 4-digit year to change it, space or '-' to clear, or press Enter to confirm")
                         while True:
                             try:
                                 prompt_text = Colors.colorize(
-                                    f"Year [{suggested_year}] (Enter=confirm, type new year, 'm'=manual entry, 'z'=back, or 'r'=restart): ",
+                                    f"Year [{suggested_year}] (Enter=confirm, type new year, space/'-'=clear, 'm'=manual, 'z'=back, 'r'=restart): ",
                                     ColorScheme.ACTION
                                 )
                                 # Typed entry: no timeouts (user may take time to type).
                                 from shared_tools.ui.input_timeout import drain_stdin
                                 drain_stdin(max_lines=3, timeout_per_line=0.05)
-                                year_input = input(prompt_text).strip()
+                                year_raw = input(prompt_text)
                             except (KeyboardInterrupt, EOFError):
                                 print("\n❌ Cancelled")
                                 self.move_to_failed(pdf_path)
                                 return
                             
+                            if is_clear_field_input(year_raw):
+                                metadata.pop('year', None)
+                                metadata.pop('_year_confirmed', None)
+                                metadata.pop('_year_source', None)
+                                print("✅ Year cleared")
+                                self.logger.info("User cleared suggested year")
+                                break
+                            
+                            year_input = year_raw.strip()
                             if not year_input:
                                 # User pressed Enter - use suggested year
                                 metadata['year'] = suggested_year
@@ -5549,7 +5575,7 @@ class PaperProcessorDaemon:
                             else:
                                 print("⚠️  Invalid year format (expected 4 digits, e.g., '2024')")
                                 print("   Press Enter to confirm suggested year, type a 4-digit year to change it,")
-                                print("   'm' for manual entry prompt, or 'r' to restart from beginning")
+                                print("   space or '-' to clear, 'm' for manual entry prompt, or 'r' to restart from beginning")
                 
                 # Prompt for year BEFORE document type, so numeric input isn't misrouted
                 # (This will only prompt if no year was found by any source, or if user chose 'm' for manual entry)
@@ -10275,6 +10301,63 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 )
         return True
     
+    def _resolve_author_list_entries(self, name: str) -> list:
+        """Resolve a typed/extracted author name into selection-list entries.
+        
+        Exact full-name hit → one recognized entry.
+        Single last-name hit → keep display name, set recognized_as + paper_count.
+        Multiple last-name hits → one entry per Zotero creator (for disambiguation).
+        No match → one unrecognized entry.
+        """
+        unknown = {
+            'name': name,
+            'paper_count': 0,
+            'recognized': False,
+            'recognized_as': None,
+        }
+        if not self.author_validator:
+            return [unknown]
+        
+        exact = self.author_validator.get_author_info(name)
+        if exact:
+            return [{
+                'name': name,
+                'paper_count': exact.get('paper_count', 0),
+                'recognized': True,
+                'recognized_as': exact.get('name'),
+            }]
+        
+        matches = self.author_validator.find_by_lastname(name)
+        if len(matches) == 1:
+            match = matches[0]
+            return [{
+                'name': name,
+                'paper_count': match.get('paper_count', 0),
+                'recognized': True,
+                'recognized_as': match.get('name'),
+            }]
+        if len(matches) > 1:
+            return [{
+                'name': m['name'],
+                'paper_count': m.get('paper_count', 0),
+                'recognized': True,
+                'recognized_as': m['name'],
+            } for m in matches]
+        
+        try:
+            suggestion = self.author_validator.suggest_ocr_correction(name)
+            if suggestion:
+                return [{
+                    'name': name,
+                    'paper_count': suggestion.get('paper_count', 0),
+                    'recognized': True,
+                    'recognized_as': suggestion.get('corrected_name'),
+                }]
+        except Exception:
+            pass
+        
+        return [unknown]
+    
     def select_authors_for_search(self, authors: list) -> list:
         """Let user select which authors to search by and in what order.
         
@@ -10293,41 +10376,10 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         if self.author_validator:
             self.author_validator.refresh_if_needed(max_age_hours=6, silent=True)
         
-        # Get author info (paper counts) if validator available
         author_info = []
         for author in authors:
-            info = {'name': author, 'paper_count': 0, 'recognized': False, 'recognized_as': None}
-            if self.author_validator:
-                # Try exact match first
-                author_data = self.author_validator.get_author_info(author)
-                if author_data:
-                    info['paper_count'] = author_data.get('paper_count', 0)
-                    info['recognized'] = True
-                    info['recognized_as'] = author_data.get('name')
-                else:
-                    # Try lastname matching (for cases like "Sicakkan" matching "Hakan Gürcan Sicakkan")
-                    # Use validate_authors which does lastname matching
-                    validation_result = self.author_validator.validate_authors([author])
-                    if validation_result['known_authors']:
-                        # Found match via lastname
-                        known_author = validation_result['known_authors'][0]
-                        info['recognized'] = True
-                        info['recognized_as'] = known_author['name']
-                        # Get paper count for the matched full name
-                        full_name_data = self.author_validator.get_author_info(known_author['name'])
-                        if full_name_data:
-                            info['paper_count'] = full_name_data.get('paper_count', 0)
-                    else:
-                        # Try OCR correction / alternatives match
-                        try:
-                            suggestion = self.author_validator.suggest_ocr_correction(author)
-                            if suggestion:
-                                info['recognized'] = True
-                                info['recognized_as'] = suggestion.get('corrected_name')
-                                info['paper_count'] = suggestion.get('paper_count', 0)
-                        except Exception:
-                            pass
-            author_info.append(info)
+            author_info.extend(self._resolve_author_list_entries(author))
+        authors = [info['name'] for info in author_info]
         
         # Display authors with number labels (1, 2, 3, ...)
         author_map = {}
@@ -10411,22 +10463,15 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     old_name = author_map[edit_choice]
                     new_name = input(f"Edit '{old_name}' to: ").strip()
                     if new_name:
-                        # Update the author in author_info
-                        for info in author_info:
-                            if info['name'] == old_name:
-                                info['name'] = new_name
-                                # Re-validate author info
-                                if self.author_validator:
-                                    author_data = self.author_validator.get_author_info(new_name)
-                                    if author_data:
-                                        info['paper_count'] = author_data.get('paper_count', 0)
-                                print(f"✅ Updated: {old_name} → {new_name}")
-                        
-                        # Also update the original authors list for consistency
-                        for i, orig_author in enumerate(authors):
-                            if orig_author == old_name:
-                                authors[i] = new_name
-                                break
+                        edit_idx = int(edit_choice) - 1
+                        resolved = self._resolve_author_list_entries(new_name)
+                        author_info[edit_idx:edit_idx + 1] = resolved
+                        authors = [info['name'] for info in author_info]
+                        if len(resolved) == 1:
+                            print(f"✅ Updated: {old_name} → {resolved[0]['name']}")
+                        else:
+                            names = ', '.join(r['name'] for r in resolved)
+                            print(f"✅ Updated: {old_name} → {len(resolved)} matches: {names}")
                     else:
                         print("⚠️  No change made")
                 else:
@@ -10437,26 +10482,14 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 # Add new author
                 new_author = input("\nEnter new author name: ").strip()
                 if new_author:
-                    info = {'name': new_author, 'paper_count': 0, 'recognized': False, 'recognized_as': None}
-                    if self.author_validator:
-                        author_data = self.author_validator.get_author_info(new_author)
-                        if author_data:
-                            info['paper_count'] = author_data.get('paper_count', 0)
-                            info['recognized'] = True
-                            info['recognized_as'] = author_data.get('name')
-                        else:
-                            # Try OCR correction / alternatives match
-                            try:
-                                suggestion = self.author_validator.suggest_ocr_correction(new_author)
-                                if suggestion:
-                                    info['recognized'] = True
-                                    info['recognized_as'] = suggestion.get('corrected_name')
-                                    info['paper_count'] = suggestion.get('paper_count', 0)
-                            except Exception:
-                                pass
-                    author_info.append(info)
-                    authors.append(new_author)  # Also add to original list for consistency
-                    print(f"✅ Added: {new_author}")
+                    resolved = self._resolve_author_list_entries(new_author)
+                    author_info.extend(resolved)
+                    authors = [info['name'] for info in author_info]
+                    if len(resolved) == 1:
+                        print(f"✅ Added: {resolved[0]['name']}")
+                    else:
+                        names = ', '.join(r['name'] for r in resolved)
+                        print(f"✅ Added {len(resolved)} matches: {names}")
                 else:
                     print("⚠️  No author name entered")
                 print()  # Blank line before showing list again
@@ -10725,18 +10758,24 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         enhanced_metadata = extracted_metadata.copy()
         
         # Prompt for fields (allow override if already present)
-        print(Colors.colorize("Enter or correct information (press Enter to keep existing or skip):", ColorScheme.ACTION))
+        print(Colors.colorize(
+            "Enter or correct information (Enter=keep/skip, space or '-'=clear a field):",
+            ColorScheme.ACTION
+        ))
         print()
         
         # Title
         current_title = enhanced_metadata.get('title', '')
         try:
             if current_title:
-                title = input(f"Title [{current_title}]: ").strip()
+                title_raw = input(f"Title [{current_title}]: ")
             else:
-                title = input("Title: ").strip()
-            if title:
-                enhanced_metadata['title'] = title
+                title_raw = input("Title: ")
+            if is_clear_field_input(title_raw):
+                enhanced_metadata['title'] = ''
+                print("✅ Title cleared")
+            elif title_raw.strip():
+                enhanced_metadata['title'] = title_raw.strip()
         except (KeyboardInterrupt, EOFError):
             print("\n❌ Cancelled")
             return None
@@ -10747,13 +10786,24 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             if current_authors:
                 # Use semicolons to separate author names (since names may contain commas)
                 print(f"\nCurrent authors: {'; '.join(current_authors)}")
-                print(Colors.colorize("Enter authors (one per line, empty line to keep current):", ColorScheme.ACTION))
+                print(Colors.colorize(
+                    "Enter authors (one per line; empty line=keep current, space or '-' alone=clear all):",
+                    ColorScheme.ACTION
+                ))
             else:
                 print(Colors.colorize("\nEnter authors (one per line, empty line to finish):", ColorScheme.ACTION))
             authors = []
             while True:
                 try:
-                    author = input("  Author: ").strip()
+                    author_raw = input("  Author: ")
+                    if author_raw == '':
+                        break
+                    if not authors and is_clear_field_input(author_raw):
+                        enhanced_metadata['authors'] = []
+                        print("✅ Authors cleared")
+                        authors = None  # signal that we already applied clear
+                        break
+                    author = author_raw.strip()
                     if not author:
                         break
                     authors.append(author)
@@ -10771,11 +10821,14 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         current_year = enhanced_metadata.get('year', '')
         try:
             if current_year:
-                year = input(f"\nYear [{current_year}]: ").strip()
+                year_raw = input(f"\nYear [{current_year}]: ")
             else:
-                year = input("\nYear: ").strip()
-            if year:
-                enhanced_metadata['year'] = year
+                year_raw = input("\nYear: ")
+            if is_clear_field_input(year_raw):
+                enhanced_metadata['year'] = ''
+                print("✅ Year cleared")
+            elif year_raw.strip():
+                enhanced_metadata['year'] = year_raw.strip()
         except (KeyboardInterrupt, EOFError):
             print("\n❌ Cancelled")
             return None
@@ -10788,10 +10841,15 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             current_conference = enhanced_metadata.get('conference', enhanced_metadata.get('journal', ''))
             try:
                 if current_conference:
-                    conference = input(f"\nConference/Proceedings name [{current_conference}]: ").strip()
+                    conference_raw = input(f"\nConference/Proceedings name [{current_conference}]: ")
                 else:
-                    conference = input("\nConference/Proceedings name: ").strip()
-                if conference:
+                    conference_raw = input("\nConference/Proceedings name: ")
+                if is_clear_field_input(conference_raw):
+                    enhanced_metadata['conference'] = ''
+                    enhanced_metadata['journal'] = ''
+                    print("✅ Conference/Proceedings cleared")
+                elif conference_raw.strip():
+                    conference = conference_raw.strip()
                     enhanced_metadata['conference'] = conference
                     # Also store in journal field for compatibility (some systems use journal for conference)
                     if not enhanced_metadata.get('journal'):
@@ -10804,11 +10862,14 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             current_book_title = enhanced_metadata.get('book_title', '')
             try:
                 if current_book_title:
-                    book_title = input(f"\nBook title [{current_book_title}]: ").strip()
+                    book_title_raw = input(f"\nBook title [{current_book_title}]: ")
                 else:
-                    book_title = input("\nBook title: ").strip()
-                if book_title:
-                    enhanced_metadata['book_title'] = book_title
+                    book_title_raw = input("\nBook title: ")
+                if is_clear_field_input(book_title_raw):
+                    enhanced_metadata['book_title'] = ''
+                    print("✅ Book title cleared")
+                elif book_title_raw.strip():
+                    enhanced_metadata['book_title'] = book_title_raw.strip()
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Cancelled")
                 return None
@@ -10817,10 +10878,15 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             current_org = enhanced_metadata.get('publisher', enhanced_metadata.get('organization', enhanced_metadata.get('journal', '')))
             try:
                 if current_org:
-                    organization = input(f"\nOrganization/Publisher/Report Series [{current_org}]: ").strip()
+                    organization_raw = input(f"\nOrganization/Publisher/Report Series [{current_org}]: ")
                 else:
-                    organization = input("\nOrganization/Publisher/Report Series: ").strip()
-                if organization:
+                    organization_raw = input("\nOrganization/Publisher/Report Series: ")
+                if is_clear_field_input(organization_raw):
+                    enhanced_metadata['publisher'] = ''
+                    enhanced_metadata['journal'] = ''
+                    print("✅ Organization/Publisher cleared")
+                elif organization_raw.strip():
+                    organization = organization_raw.strip()
                     enhanced_metadata['publisher'] = organization
                     # Also store in journal field for compatibility
                     if not enhanced_metadata.get('journal'):
@@ -10833,11 +10899,14 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             current_journal = enhanced_metadata.get('journal', '')
             try:
                 if current_journal:
-                    journal = input(f"\nJournal [{current_journal}]: ").strip()
+                    journal_raw = input(f"\nJournal [{current_journal}]: ")
                 else:
-                    journal = input("\nJournal: ").strip()
-                if journal:
-                    enhanced_metadata['journal'] = journal
+                    journal_raw = input("\nJournal: ")
+                if is_clear_field_input(journal_raw):
+                    enhanced_metadata['journal'] = ''
+                    print("✅ Journal cleared")
+                elif journal_raw.strip():
+                    enhanced_metadata['journal'] = journal_raw.strip()
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Cancelled")
                 return None
@@ -10848,11 +10917,14 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 current_volume = enhanced_metadata.get('volume', '')
                 try:
                     if current_volume:
-                        volume = input(f"\nVolume [{current_volume}]: ").strip()
+                        volume_raw = input(f"\nVolume [{current_volume}]: ")
                     else:
-                        volume = input("\nVolume: ").strip()
-                    if volume:
-                        enhanced_metadata['volume'] = volume
+                        volume_raw = input("\nVolume: ")
+                    if is_clear_field_input(volume_raw):
+                        enhanced_metadata['volume'] = ''
+                        print("✅ Volume cleared")
+                    elif volume_raw.strip():
+                        enhanced_metadata['volume'] = volume_raw.strip()
                 except (KeyboardInterrupt, EOFError):
                     print("\n❌ Cancelled")
                     return None
@@ -10861,11 +10933,14 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 current_issue = enhanced_metadata.get('issue', '')
                 try:
                     if current_issue:
-                        issue = input(f"\nIssue [{current_issue}]: ").strip()
+                        issue_raw = input(f"\nIssue [{current_issue}]: ")
                     else:
-                        issue = input("\nIssue: ").strip()
-                    if issue:
-                        enhanced_metadata['issue'] = issue
+                        issue_raw = input("\nIssue: ")
+                    if is_clear_field_input(issue_raw):
+                        enhanced_metadata['issue'] = ''
+                        print("✅ Issue cleared")
+                    elif issue_raw.strip():
+                        enhanced_metadata['issue'] = issue_raw.strip()
                 except (KeyboardInterrupt, EOFError):
                     print("\n❌ Cancelled")
                     return None
@@ -10874,11 +10949,14 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 current_pages = enhanced_metadata.get('pages', '')
                 try:
                     if current_pages:
-                        pages = input(f"\nPages [{current_pages}]: ").strip()
+                        pages_raw = input(f"\nPages [{current_pages}]: ")
                     else:
-                        pages = input("\nPages: ").strip()
-                    if pages:
-                        enhanced_metadata['pages'] = pages
+                        pages_raw = input("\nPages: ")
+                    if is_clear_field_input(pages_raw):
+                        enhanced_metadata['pages'] = ''
+                        print("✅ Pages cleared")
+                    elif pages_raw.strip():
+                        enhanced_metadata['pages'] = pages_raw.strip()
                 except (KeyboardInterrupt, EOFError):
                     print("\n❌ Cancelled")
                     return None

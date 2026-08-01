@@ -258,6 +258,33 @@ class AuthorValidator:
             
             self.lastname_index[lastname].append(full_name)
     
+    def find_by_lastname(self, name: str) -> List[Dict]:
+        """
+        Find Zotero authors whose last name matches the given name.
+        
+        Args:
+            name: Author name in any format (full name, "Last, First", or surname only)
+            
+        Returns:
+            List of author dicts from zotero_authors (name, paper_count, etc.),
+            preserving lastname_index order. Empty if no last-name match.
+        """
+        lastname = self._extract_lastname(name)
+        if not lastname or lastname not in self.lastname_index:
+            return []
+        
+        results = []
+        seen = set()
+        for full_name in self.lastname_index[lastname]:
+            key = full_name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            info = self.get_author_info(full_name)
+            if info:
+                results.append(info)
+        return results
+    
     def suggest_ocr_correction(self, extracted_name: str, max_distance: int = 2) -> Optional[Dict]:
         """
         Suggest OCR correction for an extracted name using edit distance.
@@ -282,28 +309,26 @@ class AuthorValidator:
         extracted_lower = extracted_name.lower()
         
         # Try matching by lastname first (faster, handles OCR errors in first name)
+        # lastname_index values are full-name strings, not author dicts
         lastname = self._extract_lastname(extracted_name)
         if lastname and lastname in self.lastname_index:
-            # Found matching lastname - check if any author with this lastname is similar
-            for author in self.lastname_index[lastname]:
-                author_name = author['name']
+            for author_name in self.lastname_index[lastname]:
                 author_lower = author_name.lower()
                 
-                # Calculate similarity ratio
                 similarity = SequenceMatcher(None, extracted_lower, author_lower).ratio()
                 
-                # Calculate Levenshtein-like distance
                 # Be more lenient for lastname matches (similarity > 0.7 instead of 0.8)
                 if similarity > 0.7:
                     distance = self._edit_distance(extracted_lower, author_lower)
                     
                     if distance <= max_distance and similarity > best_similarity:
                         best_similarity = similarity
+                        info = self.get_author_info(author_name)
                         best_match = {
                             'corrected_name': author_name,
                             'confidence': int(similarity * 100),
                             'distance': distance,
-                            'paper_count': author['paper_count'],
+                            'paper_count': info['paper_count'] if info else 0,
                             'original_name': extracted_name
                         }
         
@@ -313,10 +338,8 @@ class AuthorValidator:
                 author_name = author['name']
                 author_lower = author_name.lower()
                 
-                # Calculate similarity ratio
                 similarity = SequenceMatcher(None, extracted_lower, author_lower).ratio()
                 
-                # Calculate Levenshtein-like distance
                 if similarity > 0.8:  # Only consider good matches
                     distance = self._edit_distance(extracted_lower, author_lower)
                     

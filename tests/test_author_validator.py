@@ -54,3 +54,74 @@ def test_strict_never_adds_more_matches_than_partial():
     result_partial = validator.validate_authors(inputs, allow_partial_match=True)
 
     assert len(result_strict["known_authors"]) <= len(result_partial["known_authors"])
+
+
+def _mock_validator(authors):
+    """Build an AuthorValidator with seeded authors (no live Zotero DB)."""
+    validator = object.__new__(AuthorValidator)
+    validator.zotero_authors = authors
+    validator.lastname_index = {}
+    validator._build_lastname_index()
+    return validator
+
+
+def test_find_by_lastname_single_match():
+    """Surname-only lookup returns the full Zotero creator with paper_count."""
+    validator = _mock_validator([
+        {
+            "name": "Hakan Gürcan Sicakkan",
+            "last_name": "Sicakkan",
+            "first_name": "Hakan Gürcan",
+            "paper_count": 5,
+        }
+    ])
+
+    matches = validator.find_by_lastname("Sicakkan")
+    assert len(matches) == 1
+    assert matches[0]["name"] == "Hakan Gürcan Sicakkan"
+    assert matches[0]["paper_count"] == 5
+
+    # OCR-mangled "Last, First" still resolves by last name
+    matches_comma = validator.find_by_lastname("Sicakkan, Hakan Giircan")
+    assert len(matches_comma) == 1
+    assert matches_comma[0]["paper_count"] == 5
+
+
+def test_find_by_lastname_multiple_matches():
+    """Shared surnames return all Zotero creators for disambiguation."""
+    validator = _mock_validator([
+        {"name": "John Smith", "last_name": "Smith", "first_name": "John", "paper_count": 3},
+        {"name": "Jane Smith", "last_name": "Smith", "first_name": "Jane", "paper_count": 7},
+        {"name": "Alice Jones", "last_name": "Jones", "first_name": "Alice", "paper_count": 1},
+    ])
+
+    matches = validator.find_by_lastname("Smith")
+    assert len(matches) == 2
+    names = {m["name"] for m in matches}
+    assert names == {"John Smith", "Jane Smith"}
+    assert {m["paper_count"] for m in matches} == {3, 7}
+
+
+def test_find_by_lastname_no_match():
+    validator = _mock_validator([
+        {"name": "Per Selle", "last_name": "Selle", "first_name": "Per", "paper_count": 2},
+    ])
+    assert validator.find_by_lastname("Sicakkan") == []
+
+
+def test_suggest_ocr_correction_lastname_index_uses_strings():
+    """lastname_index stores strings; lastname OCR path must not TypeError."""
+    validator = _mock_validator([
+        {
+            "name": "Hakan Gürcan Sicakkan",
+            "last_name": "Sicakkan",
+            "first_name": "Hakan Gürcan",
+            "paper_count": 5,
+        }
+    ])
+
+    # Near-identical full name sharing lastname — exercises the lastname-index branch
+    suggestion = validator.suggest_ocr_correction("Hakan Gurcan Sicakkan", max_distance=3)
+    assert suggestion is not None
+    assert suggestion["corrected_name"] == "Hakan Gürcan Sicakkan"
+    assert suggestion["paper_count"] == 5
