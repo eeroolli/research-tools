@@ -321,7 +321,7 @@ class PaperMetadataProcessor:
             pdf_path: Path to PDF file
             
         Returns:
-            Language code (NO, EN, DE, FI, SV) or None if not detected
+            Language code (NO, EN, DE, FI, SV, DA) or None if not detected
         """
         filename = pdf_path.name.upper()
         language_map = {
@@ -329,7 +329,9 @@ class PaperMetadataProcessor:
             'EN_': 'EN',
             'DE_': 'DE',
             'FI_': 'FI',
-            'SV_': 'SV'  # Swedish (matches filename prefix SV_)
+            'SV_': 'SV',  # Swedish (ISO 639-1 prefix)
+            'SE_': 'SV',  # Swedish alias (country-style prefix → SV for Ollama)
+            'DA_': 'DA',  # Danish
         }
         
         for prefix, lang_code in language_map.items():

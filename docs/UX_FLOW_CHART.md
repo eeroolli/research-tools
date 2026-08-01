@@ -20,7 +20,7 @@ This document describes the complete user experience flow for the paper processo
 ┌─────────────────────────────────────────────────────────────────┐
 │  1. File Detection (Watchdog)                                   │
 │     - PDF detected in watch directory                           │
-│     - Language prefix detected (NO_, EN_, DE_, FI_, SV_, DA_)   │
+│     - Language prefix detected (NO_, EN_, DE_, FI_, SV_/SE_, DA_)   │
 │     - File moved to processing queue                            │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -583,7 +583,7 @@ inside the current prompt may be discarded when going back.
 
 ### Input
 - **Watch directory:** `/mnt/i/FraScanner/papers/` (or configured path)
-- **Language prefixes:** `NO_`, `EN_`, `DE_`, `FI_`, `SV_`, `DA_`
+- **Language prefixes:** `NO_`, `EN_`, `DE_`, `FI_`, `SV_` / `SE_` (Swedish alias → ISO `sv`), `DA_`
 
 ### Processing
 - **Border removal:** System temp directory (e.g., `/tmp/pdf_borders_removed/`) - Happens FIRST

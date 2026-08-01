@@ -78,7 +78,7 @@ This activates the WSL `research-tools` environment and runs the legacy WSL laun
     - `NO_20251011_143522_3.pdf`
     - `DE_20251011_143522_2.pdf`
    **If Epson doesn't support this pattern:**
-  - Use any pattern that includes language prefix (EN_, NO_, DE_, SV_, DA_, FI_)
+  - Use any pattern that includes language prefix (EN_, NO_, DE_, SV_/SE_, DA_, FI_)
   - Daemon will detect files starting with these prefixes
 
 
@@ -135,7 +135,7 @@ You can create similar profiles for other languages (Norwegian, German, etc.):
 - Each with: exactly same settings as the English ones, except: 
 - Norwegian Portrait: Prefix `NO_`
 - German Portrait: Prefix `DE_`
-- Swedish Portrait: Prefix `SV_`
+- Swedish Portrait: Prefix `SV_` (alias `SE_` also accepted; both map to ISO `sv`)
 - Danish Portrait: Prefix `DA_`
 - Finnish Portrait: Prefix `FI_`
 - And so on...

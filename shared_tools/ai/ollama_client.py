@@ -258,11 +258,17 @@ class OllamaClient:
                 'EN': 'English', 
                 'DE': 'German',
                 'FI': 'Finnish',
-                'SV': 'Swedish'  # Swedish (matches filename prefix SV_ and ISO code sv)
+                'SV': 'Swedish',  # ISO 639-1 / SV_ prefix
+                'SE': 'Swedish',  # country-style alias
+                'DA': 'Danish',
             }
+            lang_key = language.upper()
+            # Normalize SE alias and lowercase ISO codes to the instruction keys
+            if lang_key in ('SE', 'SV'):
+                lang_key = 'SV'
             lang_name = lang_map.get(language.upper(), language.upper())
             
-            if language.upper() == 'NO':
+            if lang_key == 'NO':
                 language_instructions = f"""
 LANGUAGE CONTEXT: This document is in {lang_name}.
 - Author patterns: "Av [Name]", "Forfatter: [Name]", "[Name] og [Name]"
@@ -270,7 +276,7 @@ LANGUAGE CONTEXT: This document is in {lang_name}.
 - Common terms: "Forlag" (publisher), "Tidsskrift" (journal), "Kapittel" (chapter)
 - Extract authors, titles, and metadata in {lang_name} format
 """
-            elif language.upper() == 'DE':
+            elif lang_key == 'DE':
                 language_instructions = f"""
 LANGUAGE CONTEXT: This document is in {lang_name}.
 - Author patterns: "Von [Name]", "Autor: [Name]", "[Name] und [Name]"
@@ -278,7 +284,7 @@ LANGUAGE CONTEXT: This document is in {lang_name}.
 - Common terms: "Verlag" (publisher), "Zeitschrift" (journal), "Kapitel" (chapter)
 - Extract authors, titles, and metadata in {lang_name} format
 """
-            elif language.upper() == 'FI':
+            elif lang_key == 'FI':
                 language_instructions = f"""
 LANGUAGE CONTEXT: This document is in Finnish.
 - Author patterns: "Tekijä:", "Tekijät:", "[Name] ja [Name]" (and)
@@ -286,13 +292,21 @@ LANGUAGE CONTEXT: This document is in Finnish.
 - Common terms: "Kustantaja" (publisher), "Lehti"/"Aikakauslehti" (journal), "Luku" (chapter)
 - Extract authors, titles, and metadata in Finnish format
 """
-            elif language.upper() == 'SV':
+            elif lang_key == 'SV':
                 language_instructions = f"""
 LANGUAGE CONTEXT: This document is in Swedish.
 - Author patterns: "Av [Name]", "Av: [Name]", "[Name] och [Name]"
 - Date formats: "23 april 2025", "23.4.2025", "2025-04-23"
 - Common terms: "Förlag" (publisher), "Tidskrift" (journal), "Kapitel" (chapter)
 - Extract authors, titles, and metadata in Swedish format
+"""
+            elif lang_key == 'DA':
+                language_instructions = f"""
+LANGUAGE CONTEXT: This document is in Danish.
+- Author patterns: "Af [Name]", "Forfatter: [Name]", "[Name] og [Name]"
+- Date formats: "23. april 2025", "23.4.2025", "2025-04-23"
+- Common terms: "Forlag" (publisher), "Tidsskrift" (journal), "Kapitel" (chapter)
+- Extract authors, titles, and metadata in Danish format
 """
         
         # Base instructions - CRITICAL: emphasize NOT inventing authors
