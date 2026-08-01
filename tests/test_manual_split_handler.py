@@ -65,6 +65,7 @@ try:
         _handle_drop_border_removal,
         _handle_drop_trimming,
         _handle_manual_split,
+        _preprocess_restart_source,
     )
     from scripts.paper_processor_daemon import PaperProcessorDaemon
     from shared_tools.ui.navigation import NavigationResult
@@ -372,3 +373,106 @@ def test_handle_drop_border_preserves_manual_split_ratio(
     assert captured["args"]["border_removal"] is False
     assert captured["args"]["trim_leading"] is False
     assert ctx["preprocessing_state"]["manual_split_ratio"] == 52.0
+
+
+def test_restart_uses_original_scan_not_working_pdf_for_manual_split(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Attachment preview must restart from the two-up original, not the split working PDF."""
+    original = tmp_path / "NO_20260801_0002.pdf"
+    original.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    working = tmp_path / "PREPROCESSED_NO_20260801_0002_split.pdf"
+    working.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    final_out = tmp_path / "PREPROCESSED_NO_20260801_0002_split_manual.pdf"
+    final_out.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    daemon._original_scan_path = original
+
+    captured, fake_preprocess = _capture_preprocess(final_out)
+    monkeypatch.setattr(daemon, "_preprocess_pdf_with_options", fake_preprocess)
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: "48")
+
+    ctx = {
+        "pdf_path": working,  # what handle_item_selected receives after early preprocess
+        "original_pdf": working,  # stale / wrong if set from pdf_path
+        "preprocessing_state": {
+            "split_method": "50-50",
+            "split_attempted": True,
+            "split_succeeded": True,
+            "trim_leading": False,
+            "border_removal": False,
+        },
+    }
+
+    result = _handle_manual_split(ctx, daemon)
+
+    assert result.type == NavigationResult.Type.SHOW_PAGE
+    assert captured["args"]["pdf_path"] == original
+    assert captured["args"]["pdf_path"] != working
+    assert captured["args"]["split_method"] == "manual"
+    assert captured["args"]["manual_split_ratio"] == 48
+    assert captured["args"]["trim_leading"] is False
+    assert ctx["original_pdf"] == original
+    assert daemon._working_pdf == final_out
+    assert daemon._preprocessing_state["manual_split_ratio"] == 48
+
+
+def test_add_trimming_restarts_from_original_with_manual_ratio(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add trim after manual split: original source + ratio + trim (split then trim)."""
+    original = tmp_path / "NO_20260801_0002.pdf"
+    original.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    working = tmp_path / "PREPROCESSED_NO_20260801_0002_split.pdf"
+    working.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    final_out = tmp_path / "PREPROCESSED_NO_20260801_0002_split_trimmed.pdf"
+    final_out.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    daemon._original_scan_path = original
+
+    captured, fake_preprocess = _capture_preprocess(final_out)
+    monkeypatch.setattr(daemon, "_preprocess_pdf_with_options", fake_preprocess)
+
+    ctx = {
+        "pdf_path": working,
+        "original_pdf": working,
+        "preprocessing_state": _manual_split_state(),
+    }
+
+    result = _handle_add_trimming(ctx, daemon)
+
+    assert result.type == NavigationResult.Type.SHOW_PAGE
+    assert captured["args"]["pdf_path"] == original
+    assert captured["args"]["split_method"] == "manual"
+    assert captured["args"]["manual_split_ratio"] == 52.0
+    assert captured["args"]["trim_leading"] is True
+    assert daemon._working_pdf == final_out
+    assert daemon._preprocessing_state["trim_leading"] is True
+
+
+def test_preprocess_restart_source_prefers_original_scan_path(
+    daemon: PaperProcessorDaemon, tmp_path: Path
+) -> None:
+    original = tmp_path / "scan.pdf"
+    original.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    working = tmp_path / "PREPROCESSED_scan_split.pdf"
+    working.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    daemon._original_scan_path = original
+
+    src = _preprocess_restart_source(
+        {"pdf_path": working, "original_pdf": working},
+        daemon,
+    )
+    assert src == original
+
+
+def test_preprocess_restart_source_falls_back_without_original_scan(
+    daemon: PaperProcessorDaemon, tmp_path: Path
+) -> None:
+    pdf = tmp_path / "scan.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    if hasattr(daemon, "_original_scan_path"):
+        delattr(daemon, "_original_scan_path")
+
+    src = _preprocess_restart_source({"pdf_path": pdf}, daemon)
+    assert src == pdf
