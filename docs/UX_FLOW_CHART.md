@@ -62,11 +62,11 @@ This document describes the complete user experience flow for the paper processo
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  6. Author Selection                                            │
-│     - Interactive author list with letters (a-z)                 │
-│     - Zotero recognition (paper counts)                         │
-│     - Weak name-only hits are marked as unconfirmed suggestions │
+│     - Interactive author list with numbers                       │
+│     - Exact, surname, and OCR-corrected Zotero recognition       │
+│     - Shared surnames expand to choices with paper counts        │
 │     - Options: select order, edit, add, delete                   │
-│     - Commands: 'a', 'ab', 'all', 'e', 'n', '-a', 'z', 'r'      │
+│     - Commands: '1', '12', 'all', 'e', 'n', '-1', 'z', 'r'      │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -139,6 +139,19 @@ This document describes the complete user experience flow for the paper processo
                     │
                     ▼
 ```
+
+---
+
+## Metadata prompt controls
+
+At year confirmation, search-parameter editing, and manual metadata entry:
+
+- **Enter** keeps the current value (or skips an empty field).
+- A **space**, **`-`**, or **`clear`** clears the field.
+- A valid new value replaces the current value.
+
+The clear action applies to fields that display the clearing hint, including year,
+title, authors, journal/source, and DOI.
 
 ---
 
@@ -363,19 +376,35 @@ These words mean different things in this codebase and in the UX:
 ### 6. Intelligent Two-Up Page Splitting
 - **Landscape Detection:** Happens BEFORE border removal to ensure accurate detection even if border removal changes dimensions
 - **Detection Methods:**
-  - Checks for `_double.pdf` filename pattern (always split)
+  - Checks for `_double.pdf` filename pattern (always attempts a fast 50/50 geometric split)
   - For other files: Analyzes aspect ratio (>1.3) and content structure
   - Stores detection results (dimensions, two-up status) before border removal
-- **Gutter Detection:** Image-based analysis to find actual gutter position (not just 50% split)
+- **Gutter Detection:** Available through **Improve split** in `PDF PREVIEW`; image analysis finds the actual gutter position instead of assuming 50%
 - **Dual Methods:** 
   - Spine detection for physical books (finds darker gray spine area)
   - Content detection for printed articles (finds minimum content density)
 - **Automatic Selection:** Chooses method based on signal strength (15% threshold)
 - **Border-Aware:** Accounts for dark borders when detecting gutter
 - **Multi-Page Validation:** Analyzes 3 pages for consistency
-- **Workflow:** Landscape detection → Border removal → Intelligent splitting
+- **Initial `_double` Workflow:** Landscape detection → 50/50 split without border removal → `PDF PREVIEW`
+- **Improved Workflow:** In `PDF PREVIEW`, choose **Improve split** to rerun from the original scan with border removal and gutter detection
 - **Fallback:** Uses geometric split (50%) if detection fails
 - **Benefit:** Significantly improves splitting accuracy for physical book scans with visible spines, works correctly even after border removal
+
+#### `PDF PREVIEW` preprocessing controls
+
+The menu is dynamic, but can offer:
+
+- **Accept and proceed** with the displayed PDF.
+- **Improve split**, **Use 50/50 split instead**, or **Drop split**.
+- **Add/Drop trimming** and **Drop border removal**.
+- **Split by manual definition**. Enter the left-page percentage from `30` to
+  `70`; for example, `55` produces a 55/45 split on every page.
+- **Separate this PDF into files** for multiple papers, which is different from
+  splitting a two-up page.
+
+Changing trim or border settings reruns preprocessing from the original scan while
+keeping the current split method, including a manual split ratio.
 
 ### 6b. Document separator (one scan PDF → multiple papers)
 
