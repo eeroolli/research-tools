@@ -16,6 +16,7 @@ The ServiceManager module centralizes all service lifecycle management (GROBID, 
 - Network connectivity monitoring
 - Retry logic with exponential backoff
 - Local vs remote service detection
+- Wake-on-LAN coordination for remote P1 services
 - Graceful degradation when services unavailable
 - Service lifecycle management (start/stop for local services)
 
@@ -25,7 +26,7 @@ The ServiceManager module centralizes all service lifecycle management (GROBID, 
 2. **Resilient**: Automatic retries with exponential backoff for network failures
 3. **Observable**: Clear status reporting and error messages
 4. **Testable**: Dependency injection allows mocking for testing
-5. **Non-Blocking**: Health checks don't block daemon startup
+5. **Graceful Startup**: An unavailable service is reported but does not prevent the daemon from starting
 
 ## Class Structure
 
@@ -46,6 +47,7 @@ class ServiceManager:
     ollama_ready: bool
     grobid_client: Optional[GrobidClient]
     ollama_client: Optional[OllamaClient]
+    _remote_host_awake: bool
     
     # Methods
     def initialize_grobid() -> bool
@@ -53,7 +55,10 @@ class ServiceManager:
     def ensure_grobid_ready() -> bool
     def ensure_ollama_ready() -> bool
     def check_grobid_health() -> Tuple[bool, Optional[str]]
-    def check_ollama_health() -> Tuple[bool, Optional[str]]
+    def check_ollama_health(quick: bool = False) -> Tuple[bool, Optional[str]]
+    def _wake_remote_p1_service(
+        service: str, *, wait_for_service: bool = True
+    ) -> bool
     def shutdown()
 ```
 
@@ -61,8 +66,10 @@ class ServiceManager:
 
 ### 1. Health Check with Retries
 
-- Short timeout (5 seconds) for health checks
-- Exponential backoff (1s, 2s, 4s)
+- TCP reachability check before each HTTP health request
+- Configurable timeout and exponential retry backoff for full health checks
+- One-attempt Ollama probe at daemon startup: 1-second TCP timeout followed by
+  a 2-second HTTP timeout to `/api/tags`
 - Clear error messages for network vs service issues
 
 ### 2. Service Discovery
@@ -81,6 +88,26 @@ class ServiceManager:
 - Reuse HTTP connections for remote services
 - Connection timeouts and keepalive
 - Automatic reconnection on failure
+
+### Remote P1 wake coordination
+
+For a remote GROBID host, initialization invokes the companion ackerstr
+`Ensure-P1Service` script before the full health check. The supported fixed script
+locations are:
+
+- Windows: `F:\prog\ackerstr\scripts\Ensure-P1Service.ps1`
+- WSL: `/mnt/f/prog/ackerstr/scripts/ensure-p1-service.sh`
+
+The default wake-and-poll limit is 50 seconds
+(`max(30, health_check_timeout * 10)`). A missing or failed script is non-fatal;
+normal health checks still run.
+
+Ollama initialization does not perform this long wake wait. It uses the quick
+probe; if that fails, Ollama remains marked unavailable until first needed.
+`ensure_ollama_ready()` wakes P1 only if a successful remote wake or health check
+has not already established that the machine is awake, then runs a full health
+check. This avoids waiting once for GROBID and again for Ollama on the same
+machine.
 
 ## Error Handling
 
@@ -144,8 +171,9 @@ health_check_backoff_multiplier = 2
 
 ## Performance Considerations
 
-- Health checks are lightweight (HTTP GET)
+- Health checks use a TCP precheck followed by an HTTP GET
 - Network timeouts prevent hanging
-- Lazy initialization (Ollama only when needed)
+- GROBID initialization can wait for a remote host wake and full retries
+- Ollama uses a quick startup probe and full checks only when needed
 - Connection reuse for remote services
 
