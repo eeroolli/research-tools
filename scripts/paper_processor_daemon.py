@@ -198,6 +198,8 @@ class PaperProcessorDaemon:
         self.observer = None
         # Thread-safe queue for paper paths; only main thread calls process_paper()
         self._paper_queue = queue.Queue()
+        # Paths already waiting on the queue (resolved); prevents watcher+separator double enqueue.
+        self._enqueued_paths: set[str] = set()
         # Guard async queue notices so watcher output never interrupts active prompts.
         self._queue_notice_lock = threading.Lock()
         self._processing_active = False
@@ -1976,8 +1978,13 @@ class PaperProcessorDaemon:
         # Ensure DOI and abstract are passed through
         if 'doi' not in normalized and 'DOI' in item:
             normalized['doi'] = item['DOI']
+            normalized['doi_source'] = 'zotero'
         elif 'doi' not in normalized and 'doi' in item:
             normalized['doi'] = item['doi']
+            if item.get('doi_source'):
+                normalized['doi_source'] = item['doi_source']
+            elif item.get('from_zotero') or item.get('item_key') or item.get('key'):
+                normalized['doi_source'] = 'zotero'
         
         if 'abstract' not in normalized:
             if 'abstractNote' in item:
@@ -3211,6 +3218,7 @@ class PaperProcessorDaemon:
         # Copy other fields if present
         if zotero_item.get('DOI'):
             metadata['doi'] = zotero_item['DOI']
+            metadata['doi_source'] = 'zotero'
         # Journal: prefer publicationTitle, fallback to journal (from local DB)
         if zotero_item.get('publicationTitle'):
             metadata['journal'] = zotero_item['publicationTitle']
@@ -4897,8 +4905,10 @@ class PaperProcessorDaemon:
         # Enqueue new PDFs so they are processed from the beginning.
         for p in written:
             if p.exists() and self.should_process(p.name):
-                self._paper_queue.put(p)
-                self.logger.info(f"Queued document separator output: {p.name}")
+                if self._enqueue_paper(p, notice=False):
+                    self.logger.info(f"Queued document separator output: {p.name}")
+                else:
+                    self.logger.debug(f"Separator output already queued: {p.name}")
             else:
                 self.logger.info(f"Separator output not queued (prefix/suffix rule): {p.name}")
 
@@ -6264,29 +6274,35 @@ class PaperProcessorDaemon:
     # ------------------------
     # Two-up split pre-processing
     # ------------------------
+    # Scanner two-up mark: *_double.pdf, or *_double_<digits>.pdf (Document Capture Pro batch counter).
+    # Not *_double__partN.pdf / mid-name *_double_*.pdf.
+    _DOUBLE_FILENAME_RE = re.compile(r"_double(?:_\d+)?\.pdf$", re.IGNORECASE)
+    _DOUBLE_STEM_RE = re.compile(r"_double(?=(_\d+)?$)", re.IGNORECASE)
+
+    @staticmethod
+    def _filename_requests_double_split(filename: str) -> bool:
+        """True when the scan name requests unconditional two-up split."""
+        return bool(PaperProcessorDaemon._DOUBLE_FILENAME_RE.search(str(filename)))
+
     @staticmethod
     def _stem_for_preprocessed_artifacts(pdf_path: Path) -> str:
-        """Stem for PREPROCESSED_* temp files; strip trailing `_double` so names match post-split state."""
-        stem = pdf_path.stem
-        if stem.lower().endswith("_double"):
-            return stem[: -len("_double")]
-        return stem
+        """Stem for PREPROCESSED_* temps; strip `_double` tag, keep optional DCP counter."""
+        return PaperProcessorDaemon._DOUBLE_STEM_RE.sub("", pdf_path.stem)
 
     def _preprocess_split_if_needed(self, pdf_path: Path) -> Optional[Path]:
         """Detect and split two-up pages when appropriate.
         
         Rules:
-        - If filename ends with _double.pdf: split unconditionally and return new path
+        - If filename is *_double.pdf or *_double_<digits>.pdf: split unconditionally
         - Else if page is wide (AR > 1.3): run gutter/spine detector on page 1
           - If likely two-up: prompt user to split; if yes, split and return new path
         - Otherwise: return None
         """
-        name = pdf_path.name.lower()
         try:
             import pdfplumber
         except Exception:
-            # If pdfplumber not available, only honor _double.pdf
-            if name.endswith('_double.pdf'):
+            # If pdfplumber not available, only honor filename double rule
+            if self._filename_requests_double_split(pdf_path.name):
                 return self._split_with_mutool(pdf_path)
             return None
         
@@ -6300,9 +6316,11 @@ class PaperProcessorDaemon:
         except Exception:
             width = height = 0
         
-        # Unconditional split by filename suffix
-        if name.endswith('_double.pdf'):
-            self.logger.info("Auto-splitting due to filename suffix _double.pdf")
+        # Unconditional split by filename suffix (incl. Document Capture Pro _001 counters)
+        if self._filename_requests_double_split(pdf_path.name):
+            self.logger.info(
+                f"Auto-splitting due to filename double rule: {pdf_path.name}"
+            )
             return self._split_with_mutool(pdf_path, width=width, height=height)
         
         # Aspect ratio pre-filter
@@ -6328,8 +6346,9 @@ class PaperProcessorDaemon:
         self, 
         pdf_path: Path,
         border_removal: bool = True,
-        split_method: str = 'auto',  # 'auto', '50-50', 'none'
-        trim_leading: bool = True
+        split_method: str = 'auto',  # 'auto', '50-50', 'none', 'manual'
+        trim_leading: bool = True,
+        manual_split_ratio: Optional[float] = None,
     ) -> tuple[Optional[Path], dict]:
         """Preprocess PDF with specified options.
         
@@ -6339,8 +6358,10 @@ class PaperProcessorDaemon:
         Args:
             pdf_path: Path to original PDF file
             border_removal: Whether to remove borders
-            split_method: Split method - 'auto' (gutter detection), '50-50' (geometric), 'none' (no split)
+            split_method: Split method - 'auto' (gutter detection), '50-50' (geometric),
+                'manual' (custom ratio), 'none' (no split)
             trim_leading: Whether to trim leading pages
+            manual_split_ratio: Left-page percentage (30-70) when split_method is 'manual'
         
         Returns:
             Tuple of (processed_pdf_path, preprocessing_state)
@@ -6350,6 +6371,7 @@ class PaperProcessorDaemon:
               - split_attempted: bool
               - split_succeeded: bool (optional, present if attempted)
               - split_reason: str (optional, e.g. 'filename_double', 'landscape_two_up')
+              - manual_split_ratio: float (optional, when method is manual)
               - trim_leading: bool
         """
         current_pdf = pdf_path
@@ -6378,73 +6400,127 @@ class PaperProcessorDaemon:
         
         # Step 2: Check if splitting is needed and perform split
         if split_method != 'none':
-            # Check if PDF is landscape/two-up
-            # Use original filename for _double detection (before border removal renamed it)
-            name_lower = original_filename_lower
-            needs_split = False
-            landscape_width = None
-            landscape_height = None
-            
-            # 1) Filename: same rule as _preprocess_split_if_needed — only *._double.pdf, not substring.
-            if name_lower.endswith("_double.pdf"):
-                needs_split = True
-                preprocessing_state["split_reason"] = "filename_double"
-                self.logger.info(
-                    f"_double.pdf filename rule: will split '{pdf_path.name}'"
-                )
-                print("Auto-splitting due to '_double.pdf' filename...")
-            else:
-                # 2) Aspect ratio + gutter-based rule (may depend on pdfplumber)
-                try:
-                    import pdfplumber
-                    with pdfplumber.open(str(current_pdf)) as pdf:
-                        if len(pdf.pages) > 0:
-                            first = pdf.pages[0]
-                            width, height = first.width, first.height
-                            if width and height:
-                                aspect_ratio = width / max(1.0, height)
-                                if aspect_ratio > 1.3:
-                                    # Landscape detected - check if it's two-up
-                                    is_two_up, score, mode = self._detect_two_up_page(current_pdf)
-                                    if is_two_up:
-                                        needs_split = True
-                                        landscape_width = width
-                                        landscape_height = height
-                                        preprocessing_state['split_reason'] = 'landscape_two_up'
-                                        self.logger.info(
-                                            f"Landscape two-up detected: {width:.1f}x{height:.1f} (ratio: {aspect_ratio:.2f}), "
-                                            f"mode={mode} score={score:.2f}"
-                                        )
-                except Exception as e:
-                    self.logger.debug(f"Landscape detection skipped: {e}")
-            
-            if needs_split:
-                # Track that split is being attempted - update state BEFORE calling _split_with_mutool
-                preprocessing_state['split_method'] = split_method
-                preprocessing_state['split_attempted'] = True
-                
-                # Perform split - pass border detection stats if available
-                border_detection_stats = preprocessing_state.get('border_detection_stats')
-                split_path = self._split_with_mutool(
-                    current_pdf, 
-                    width=landscape_width, 
-                    height=landscape_height,
-                    split_method=split_method,
-                    border_detection_stats=border_detection_stats
-                )
-                if split_path:
-                    current_pdf = split_path
-                    # split_method already set above, just log success
-                    self.logger.info(f"Split completed: {split_path.name} (reason={preprocessing_state.get('split_reason', 'unknown')}, method={split_method})")
-                    preprocessing_state['split_succeeded'] = True
-                else:
-                    # Split was attempted but failed or was cancelled
-                    # Keep split_method in state to show what was attempted
-                    self.logger.info(
-                        f"Split attempted with method '{split_method}' (reason={preprocessing_state.get('split_reason', 'unknown')}) "
-                        f"but did not complete (user cancelled or failed)"
-                    )
+            if split_method == 'manual':
+                # Forced split from original (post-border) with user-defined ratio.
+                # Always restart from original two-up pages — never from an already-split PDF.
+                if manual_split_ratio is None:
+                    self.logger.error("manual split requested without manual_split_ratio")
+                    preprocessing_state['split_method'] = 'manual'
+                    preprocessing_state['split_attempted'] = True
                     preprocessing_state['split_succeeded'] = False
+                else:
+                    preprocessing_state['split_method'] = 'manual'
+                    preprocessing_state['split_attempted'] = True
+                    preprocessing_state['split_reason'] = 'manual'
+                    preprocessing_state['manual_split_ratio'] = manual_split_ratio
+                    try:
+                        import fitz  # PyMuPDF
+                        doc = fitz.open(str(current_pdf))
+                        if len(doc) == 0:
+                            print("❌ Error: PDF has no pages")
+                            doc.close()
+                            preprocessing_state['split_succeeded'] = False
+                        else:
+                            page_widths = [doc[i].rect.width for i in range(len(doc))]
+                            doc.close()
+                            gutter_x_per_page = [w * (manual_split_ratio / 100) for w in page_widths]
+                            first_width = page_widths[0]
+                            first_gutter = gutter_x_per_page[0]
+                            print(f"📊 Split point: {first_gutter:.1f} (page width: {first_width:.1f}, ratio: {manual_split_ratio}%)")
+                            if len(page_widths) > 1:
+                                print(f"   (per-page split applied to {len(page_widths)} pages)")
+                            print("\n🔄 Performing manual split...")
+                            split_path, error_msg = self._split_with_custom_gutter(
+                                current_pdf, gutter_x_per_page[0], gutter_x_per_page
+                            )
+                            if split_path:
+                                current_pdf = split_path
+                                preprocessing_state['split_succeeded'] = True
+                                self.logger.info(
+                                    f"Split completed: {split_path.name} (reason=manual, method=manual, "
+                                    f"ratio={manual_split_ratio})"
+                                )
+                                print(f"✅ Manual split completed: {manual_split_ratio:.0f}/{100-manual_split_ratio:.0f}")
+                            else:
+                                preprocessing_state['split_succeeded'] = False
+                                if error_msg:
+                                    print(f"❌ Manual split failed: {error_msg}")
+                                else:
+                                    print("❌ Manual split failed")
+                    except ImportError:
+                        print("❌ Error: PyMuPDF not available")
+                        preprocessing_state['split_succeeded'] = False
+                    except Exception as e:
+                        print(f"❌ Error reading PDF: {e}")
+                        preprocessing_state['split_succeeded'] = False
+            else:
+                # Check if PDF is landscape/two-up
+                # Use original filename for _double detection (before border removal renamed it)
+                name_lower = original_filename_lower
+                needs_split = False
+                landscape_width = None
+                landscape_height = None
+                
+                # 1) Filename: *_double.pdf or *_double_<digits>.pdf (not __part / mid-name).
+                if self._filename_requests_double_split(name_lower):
+                    needs_split = True
+                    preprocessing_state["split_reason"] = "filename_double"
+                    self.logger.info(
+                        f"filename double rule: will split '{pdf_path.name}'"
+                    )
+                    print("Auto-splitting due to '_double' filename...")
+                else:
+                    # 2) Aspect ratio + gutter-based rule (may depend on pdfplumber)
+                    try:
+                        import pdfplumber
+                        with pdfplumber.open(str(current_pdf)) as pdf:
+                            if len(pdf.pages) > 0:
+                                first = pdf.pages[0]
+                                width, height = first.width, first.height
+                                if width and height:
+                                    aspect_ratio = width / max(1.0, height)
+                                    if aspect_ratio > 1.3:
+                                        # Landscape detected - check if it's two-up
+                                        is_two_up, score, mode = self._detect_two_up_page(current_pdf)
+                                        if is_two_up:
+                                            needs_split = True
+                                            landscape_width = width
+                                            landscape_height = height
+                                            preprocessing_state['split_reason'] = 'landscape_two_up'
+                                            self.logger.info(
+                                                f"Landscape two-up detected: {width:.1f}x{height:.1f} (ratio: {aspect_ratio:.2f}), "
+                                                f"mode={mode} score={score:.2f}"
+                                            )
+                    except Exception as e:
+                        self.logger.debug(f"Landscape detection skipped: {e}")
+                
+                if needs_split:
+                    # Track that split is being attempted - update state BEFORE calling _split_with_mutool
+                    preprocessing_state['split_method'] = split_method
+                    preprocessing_state['split_attempted'] = True
+                    
+                    # Perform split - pass border detection stats if available
+                    border_detection_stats = preprocessing_state.get('border_detection_stats')
+                    split_path = self._split_with_mutool(
+                        current_pdf, 
+                        width=landscape_width, 
+                        height=landscape_height,
+                        split_method=split_method,
+                        border_detection_stats=border_detection_stats
+                    )
+                    if split_path:
+                        current_pdf = split_path
+                        # split_method already set above, just log success
+                        self.logger.info(f"Split completed: {split_path.name} (reason={preprocessing_state.get('split_reason', 'unknown')}, method={split_method})")
+                        preprocessing_state['split_succeeded'] = True
+                    else:
+                        # Split was attempted but failed or was cancelled
+                        # Keep split_method in state to show what was attempted
+                        self.logger.info(
+                            f"Split attempted with method '{split_method}' (reason={preprocessing_state.get('split_reason', 'unknown')}) "
+                            f"but did not complete (user cancelled or failed)"
+                        )
+                        preprocessing_state['split_succeeded'] = False
         
         # Step 3: Trim leading pages if requested
         if trim_leading:
@@ -6696,11 +6772,8 @@ class PaperProcessorDaemon:
                         # Continue loop to show preview again
                     
                     elif action == 'manual_split':
-                        # Manual split definition
-                        # CRITICAL: Always use original_pdf for manual split, not processed_pdf
-                        # processed_pdf may already be split, which would give wrong dimensions
-                        border_detection_stats = preprocessing_state.get('border_detection_stats')
-                        
+                        # Prompt for ratio, then restart full pipeline from original
+                        # (border → manual split → trim) so prior trim is re-applied.
                         print("\n📐 Manual Split Definition")
                         print("=" * 60)
                         print("Enter the split ratio as a single number (e.g., 55 for 55/45 split).")
@@ -6713,7 +6786,7 @@ class PaperProcessorDaemon:
                                 
                                 if ratio_input == 'c':
                                     print("Cancelled manual split")
-                                    break  # Continue loop to show preview again
+                                    break
                                 
                                 ratio = float(ratio_input)
                                 
@@ -6721,58 +6794,21 @@ class PaperProcessorDaemon:
                                     print_unacceptable_input()
                                     continue
                                 
-                                # Get all page widths from ORIGINAL PDF for per-page split (handles mixed page sizes)
-                                try:
-                                    import fitz  # PyMuPDF
-                                    doc = fitz.open(str(original_pdf))
-                                    if len(doc) == 0:
-                                        print("❌ Error: PDF has no pages")
-                                        doc.close()
-                                        break
-                                    page_widths = [doc[i].rect.width for i in range(len(doc))]
-                                    doc.close()
-                                except ImportError:
-                                    print("❌ Error: PyMuPDF not available")
-                                    break
-                                except Exception as e:
-                                    print(f"❌ Error reading PDF: {e}")
-                                    break
-                                
-                                # Per-page gutter at requested ratio so mixed page sizes work
-                                gutter_x_per_page = [w * (ratio / 100) for w in page_widths]
-                                first_width = page_widths[0]
-                                first_gutter = gutter_x_per_page[0]
-                                print(f"📊 Split point: {first_gutter:.1f} (page width: {first_width:.1f}, ratio: {ratio}%)")
-                                if len(page_widths) > 1:
-                                    print(f"   (per-page split applied to {len(page_widths)} pages)")
-                                
-                                # Perform split on ORIGINAL PDF (not processed_pdf which may be already split)
-                                print("\n🔄 Performing manual split...")
-                                split_path, error_msg = self._split_with_custom_gutter(original_pdf, gutter_x_per_page[0], gutter_x_per_page)
-                                
-                                if split_path:
-                                    # Update preprocessing state
-                                    preprocessing_state['split_method'] = 'manual'
-                                    preprocessing_state['split_attempted'] = True
-                                    preprocessing_state['split_succeeded'] = True
-                                    preprocessing_state['manual_split_ratio'] = ratio
-                                    preprocessing_state['border_detection_stats'] = border_detection_stats  # Preserve border stats
-                                    
-                                    processed_pdf = split_path
-                                    last_previewed_pdf = None
-                                    print(f"✅ Manual split completed: {ratio:.0f}/{100-ratio:.0f}")
-                                else:
-                                    if error_msg:
-                                        print(f"❌ Manual split failed: {error_msg}")
-                                    else:
-                                        print("❌ Manual split failed")
-                                
-                                break  # Exit ratio input loop
+                                print("\n🔄 Restarting preprocessing with manual split...")
+                                processed_pdf, preprocessing_state = self._preprocess_pdf_with_options(
+                                    original_pdf,
+                                    border_removal=preprocessing_state.get('border_removal', False),
+                                    split_method='manual',
+                                    trim_leading=preprocessing_state.get('trim_leading', False),
+                                    manual_split_ratio=ratio,
+                                )
+                                last_previewed_pdf = None
+                                break
                             except ValueError:
                                 print_unacceptable_input()
                             except (KeyboardInterrupt, EOFError):
                                 print("\n❌ Cancelled")
-                                break  # Continue loop to show preview again
+                                break
                         
                         # Continue loop to show preview again
 
@@ -6783,7 +6819,7 @@ class PaperProcessorDaemon:
                         if written:
                             for p in written:
                                 if p.exists() and self.should_process(p.name):
-                                    self._paper_queue.put(p)
+                                    self._enqueue_paper(p, notice=False)
                             self.move_to_done(original_pdf, log_entry={"status": "success", "split": "document_separator"})
                             return None, {
                                 "restart": True,
@@ -8480,6 +8516,36 @@ class PaperProcessorDaemon:
         except KeyboardInterrupt:
             self.shutdown(None, None)
     
+    def _enqueue_paper(self, path: Path, *, notice: bool = True) -> bool:
+        """Enqueue a scan path once. Returns False if already waiting on the queue.
+
+        Used by the watcher and document-separator so the same file is not processed twice.
+        """
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        with self._queue_notice_lock:
+            if key in self._enqueued_paths:
+                self.logger.debug(f"Skip duplicate enqueue: {path.name}")
+                return False
+            self._enqueued_paths.add(key)
+        self._paper_queue.put(path)
+        if notice:
+            queue_notice = self._register_new_scan_notice(path.name)
+            if queue_notice:
+                self.logger.info(queue_notice)
+        return True
+
+    def _release_enqueued_path(self, path: Path) -> None:
+        """Allow the same path to be enqueued again after processing finishes."""
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        with self._queue_notice_lock:
+            self._enqueued_paths.discard(key)
+
     def _run_processing_loop(self):
         """Run the main processing loop: take one path from the queue, process it, repeat.
         Only the main thread runs this; the watcher thread only enqueues paths.
@@ -8507,6 +8573,7 @@ class PaperProcessorDaemon:
                     self.logger.info("Ready for next scan")
                     break
             finally:
+                self._release_enqueued_path(path)
                 self._set_processing_active(False)
                 deferred_notice = self._consume_deferred_scan_notice()
                 if deferred_notice:
@@ -9390,8 +9457,10 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         
         # Enqueue for the main processing loop (single-threaded)
         for file_path in existing_files:
-            self._paper_queue.put(file_path)
-            self.logger.info(f"Queued: {file_path.name}")
+            if self._enqueue_paper(file_path, notice=False):
+                self.logger.info(f"Queued: {file_path.name}")
+            else:
+                self.logger.debug(f"Already queued: {file_path.name}")
     
     def shutdown(self, signum, frame):
         """Clean shutdown handler.
@@ -9523,108 +9592,130 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             print("📄 Creating new Zotero item...")
             return extracted  # Use extracted metadata for new item
     
-    def _merge_metadata_sources(self, extracted: dict, zotero: dict) -> dict:
-        """Merge metadata from both sources with field-by-field comparison."""
+    def _merge_metadata_sources(
+        self,
+        left: dict,
+        right: dict,
+        left_label: str = "Extracted",
+        right_label: str = "Zotero",
+    ) -> dict:
+        """Merge metadata from two sources with field-by-field comparison.
+
+        Args:
+            left: First metadata dict
+            right: Second metadata dict
+            left_label: Display name for left (e.g. Extracted, Online, Manual/Extracted)
+            right_label: Display name for right (e.g. Zotero, Online)
+        """
+        from shared_tools.metadata.document_types import (
+            document_types_equivalent,
+            to_zotero_item_type,
+        )
+
         print(Colors.colorize("\n🔀 FIELD-BY-FIELD MERGE", ColorScheme.PAGE_TITLE))
         print("=" * 40)
-        
+
+        left_key = (left_label.strip()[:1] or "l").lower()
+        right_key = (right_label.strip()[:1] or "r").lower()
+        if left_key == right_key:
+            left_key, right_key = "1", "2"
+        prompt = f"Use ({left_key}) {left_label}, ({right_key}) {right_label}, or (c)ustom? "
+
         merged = {}
-        
-        # Get all unique keys from both sources
-        all_keys = set(extracted.keys()) | set(zotero.keys())
-        
-        # Special handling for tags: always merge instead of prompting
-        if 'tags' in all_keys:
-            current_tags = zotero.get('tags', [])
-            extracted_tags = extracted.get('tags', [])
-            
-            if current_tags or extracted_tags:
-                merged_tags = self._merge_tags(current_tags, extracted_tags)
-                merged['tags'] = merged_tags
-                added_count = len(merged_tags) - len(current_tags)
+        all_keys = set(left.keys()) | set(right.keys())
+        all_keys.discard("doi_source")
+
+        # Tags: always merge instead of prompting
+        if "tags" in all_keys:
+            right_tags = right.get("tags", [])
+            left_tags = left.get("tags", [])
+            if right_tags or left_tags:
+                merged_tags = self._merge_tags(right_tags, left_tags)
+                merged["tags"] = merged_tags
+                added_count = len(merged_tags) - len(right_tags)
                 if added_count > 0:
-                    print(f"  ✅ tags: merged {added_count} new tag(s) from online/extracted")
+                    print(f"  ✅ tags: merged {added_count} new tag(s)")
                 else:
-                    print(f"  ⏭️  tags: no new tags to add")
-            
-            # Remove tags from all_keys so it's not processed again
-            all_keys.discard('tags')
-        
-        # Special handling for abstract: use extracted if Zotero doesn't have one
-        if 'abstract' in all_keys:
-            zotero_abstract = zotero.get('abstract', '')
-            extracted_abstract = extracted.get('abstract', '')
-            
-            if not zotero_abstract or (isinstance(zotero_abstract, str) and not zotero_abstract.strip()):
-                # Zotero doesn't have abstract, use extracted if available
-                if extracted_abstract:
-                    merged['abstract'] = extracted_abstract
-                    print(f"  ✅ abstract: filled from online/extracted source")
+                    print("  ⏭️  tags: no new tags to add")
+            all_keys.discard("tags")
+
+        # Abstract: fill from left if right empty; prompt if both differ
+        if "abstract" in all_keys:
+            right_abstract = right.get("abstract", "")
+            left_abstract = left.get("abstract", "")
+            if not right_abstract or (
+                isinstance(right_abstract, str) and not right_abstract.strip()
+            ):
+                if left_abstract:
+                    merged["abstract"] = left_abstract
+                    print(f"  ✅ abstract: filled from {left_label}")
                 else:
-                    merged['abstract'] = zotero_abstract  # Keep empty
-                    print(f"  ⏭️  abstract: no abstract available from either source")
-            elif extracted_abstract and extracted_abstract != zotero_abstract:
-                # Both have abstracts but they differ - ask user
-                print(f"\nabstract:")
-                print(f"  Extracted: {extracted_abstract[:200]}{'...' if len(extracted_abstract) > 200 else ''}")
-                print(f"  Zotero:    {zotero_abstract[:200]}{'...' if len(zotero_abstract) > 200 else ''}")
-                
+                    merged["abstract"] = right_abstract
+                    print("  ⏭️  abstract: no abstract available from either source")
+            elif left_abstract and left_abstract != right_abstract:
+                print("\nabstract:")
+                print(
+                    f"  {left_label}: {left_abstract[:200]}"
+                    f"{'...' if len(left_abstract) > 200 else ''}"
+                )
+                print(
+                    f"  {right_label}: {right_abstract[:200]}"
+                    f"{'...' if len(right_abstract) > 200 else ''}"
+                )
                 while True:
-                    choice = input("Use (e)xtracted, (z)otero, or (c)ustom? ").strip().lower()
-                    if choice == 'e':
-                        merged['abstract'] = extracted_abstract
+                    choice = input(prompt).strip().lower()
+                    if choice == left_key:
+                        merged["abstract"] = left_abstract
                         break
-                    elif choice == 'z':
-                        merged['abstract'] = zotero_abstract
+                    elif choice == right_key:
+                        merged["abstract"] = right_abstract
                         break
-                    elif choice == 'c':
-                        custom = input("Enter custom abstract: ").strip()
-                        merged['abstract'] = custom
+                    elif choice == "c":
+                        merged["abstract"] = input("Enter custom abstract: ").strip()
                         break
                     else:
                         print_unacceptable_input()
             else:
-                # Same abstract or Zotero has one and extracted doesn't - use Zotero
-                merged['abstract'] = zotero_abstract
-            
-            # Remove abstract from all_keys so it's not processed again
-            all_keys.discard('abstract')
-        
-        # Process remaining fields with standard field-by-field logic
+                merged["abstract"] = right_abstract
+            all_keys.discard("abstract")
+
         for key in all_keys:
-            extracted_val = extracted.get(key, '')
-            zotero_val = zotero.get(key, '')
-            
-            if extracted_val == zotero_val:
-                # Same value - use either
-                merged[key] = extracted_val
-            elif not extracted_val and zotero_val:
-                # Only Zotero has value
-                merged[key] = zotero_val
-            elif extracted_val and not zotero_val:
-                # Only extracted has value
-                merged[key] = extracted_val
+            left_val = left.get(key, "")
+            right_val = right.get(key, "")
+
+            if key == "document_type" and left_val and right_val:
+                if document_types_equivalent(left_val, right_val):
+                    mapped = to_zotero_item_type(left_val) or to_zotero_item_type(
+                        right_val
+                    )
+                    merged[key] = mapped
+                    print(f"  ✅ document_type: sources agree ({mapped})")
+                    continue
+
+            if left_val == right_val:
+                merged[key] = left_val
+            elif not left_val and right_val:
+                merged[key] = right_val
+            elif left_val and not right_val:
+                merged[key] = left_val
             else:
-                # Different values - ask user
                 print(f"\n{key.title()}:")
-                print(f"  Extracted: {extracted_val}")
-                print(f"  Zotero:    {zotero_val}")
-                
+                print(f"  {left_label}: {left_val}")
+                print(f"  {right_label}: {right_val}")
                 while True:
-                    choice = input("Use (e)xtracted, (z)otero, or (c)ustom? ").strip().lower()
-                    if choice == 'e':
-                        merged[key] = extracted_val
+                    choice = input(prompt).strip().lower()
+                    if choice == left_key:
+                        merged[key] = left_val
                         break
-                    elif choice == 'z':
-                        merged[key] = zotero_val
+                    elif choice == right_key:
+                        merged[key] = right_val
                         break
-                    elif choice == 'c':
-                        custom = input("Enter custom value: ").strip()
-                        merged[key] = custom
+                    elif choice == "c":
+                        merged[key] = input("Enter custom value: ").strip()
                         break
                     else:
                         print_unacceptable_input()
-        
+
         print("\n✅ Metadata merge complete")
         return merged
     
@@ -9684,10 +9775,17 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 return online_metadata
             elif choice == '2':
                 print("🔀 Merging online + Zotero...")
-                return self._merge_metadata_sources(online_metadata, zotero)
+                return self._merge_metadata_sources(
+                    online_metadata, zotero, left_label="Online", right_label="Zotero"
+                )
             elif choice == '3':
                 print("🔀 Merging online + extracted...")
-                return self._merge_metadata_sources(online_metadata, extracted)
+                return self._merge_metadata_sources(
+                    online_metadata,
+                    extracted,
+                    left_label="Online",
+                    right_label="Extracted",
+                )
             elif choice == '4':
                 print("✏️ Editing with online as reference...")
                 return self.edit_metadata_interactively(
@@ -10807,16 +10905,27 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         authors = metadata.get('authors', [])
         year = metadata.get('year')
         journal = metadata.get('journal')
-        
-        if not title and not authors:
+
+        from shared_tools.metadata.doi_provenance import is_trusted_doi, mark_doi_source
+
+        # Zotero item DOI is trusted even if working metadata lacks doi_source
+        if zotero_item and (zotero_item.get('DOI') or zotero_item.get('doi')):
+            if not metadata.get('doi'):
+                metadata = dict(metadata)
+                metadata['doi'] = zotero_item.get('DOI') or zotero_item.get('doi')
+            metadata['doi_source'] = 'zotero'
+
+        if not title and not authors and not is_trusted_doi(metadata):
             print("⚠️  Need at least title or authors to search online")
             return None
         
         print("\n🌐 Searching online libraries...")
         print(f"   Title: {title or '(none)'}")
-        print(f"   Authors: {'; '.join(authors) if authors else '(none)'}")
+        print(f"   Authors: {', '.join(authors) if authors else '(none)'}")
         print(f"   Year: {year or '(none)'}")
         print(f"   Journal: {journal or '(none)'}")
+        if is_trusted_doi(metadata):
+            print(f"   DOI ({metadata.get('doi_source')}): {metadata.get('doi')}")
         print()
         
         all_results = []
@@ -10832,16 +10941,39 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             candidate_metadata['source'] = metadata_source
             all_results.append(candidate_metadata)
             checked_libraries.append(f"Extracted ({metadata_source})")
+
+        # Trusted DOI (online / Zotero): look up by DOI before title/authors search
+        doi_lookup_hit = False
+        if is_trusted_doi(metadata):
+            doi = metadata['doi']
+            print(f"🔍 Looking up DOI ({metadata.get('doi_source')}): {doi}")
+            checked_libraries.append("DOI lookup")
+            try:
+                doi_result = self.metadata_processor.search_by_doi(doi)
+                if doi_result.get('success') and doi_result.get('metadata'):
+                    found = doi_result['metadata']
+                    mark_doi_source(found, 'online')
+                    all_results = [found]
+                    source_name = found.get('source', 'DOI')
+                    doi_lookup_hit = True
+                    print(f"   ✅ DOI lookup: Found via {source_name}")
+                else:
+                    print(f"   ⚠️  DOI lookup: {doi_result.get('error', 'No results')}")
+            except Exception as e:
+                self.logger.error(f"DOI lookup error: {e}")
+                print(f"   ❌ DOI lookup: Error - {e}")
         
         # Use document type to guide API selection
         doc_type = metadata.get('document_type', '').lower()
         
         # Try CrossRef for published academic papers (journal articles, conference papers, reports)
-        # Skip for books/chapters, preprints, theses, news articles
+        # Skip if DOI lookup already produced results
         should_try_crossref = (
-            title or authors
-        ) and doc_type in ['journal_article', 'conference_paper', 'report', 'academic_paper', '']
-        
+            not doi_lookup_hit
+            and (title or authors)
+            and doc_type in ['journal_article', 'conference_paper', 'report', 'academic_paper', '']
+        )
+
         if should_try_crossref:
             print("🔍 Checking CrossRef...")
             checked_libraries.append("CrossRef")
@@ -11812,7 +11944,12 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             elif choice == '2':
                 final_metadata = online_metadata
             elif choice == '3':
-                final_metadata = self._merge_metadata_sources(combined_metadata, online_metadata)
+                final_metadata = self._merge_metadata_sources(
+                    combined_metadata,
+                    online_metadata,
+                    left_label="Manual/Extracted",
+                    right_label="Online",
+                )
             elif choice == '4':
                 final_metadata = self.edit_metadata_interactively(combined_metadata, online_metadata, 
                                                                  online_source='online_library')
@@ -13552,10 +13689,7 @@ class PaperFileHandler(FileSystemEventHandler):
             return
         
         # Enqueue for main-thread processing (avoids concurrent interactive prompts)
-        self.daemon._paper_queue.put(file_path)
-        queue_notice = self.daemon._register_new_scan_notice(file_path.name)
-        if queue_notice:
-            self.daemon.logger.info(queue_notice)
+        self.daemon._enqueue_paper(file_path, notice=True)
 
 
 def normalize_path_for_wsl(path_str: str) -> str:
@@ -13578,7 +13712,9 @@ def main():
     import signal
     import time
     import subprocess
-    
+
+    from shared_tools.daemon.process_detection import find_running_daemon_pids
+
     parser = argparse.ArgumentParser(description="Paper processor daemon")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--status", action="store_true", help="Show daemon status and exit")
@@ -13626,21 +13762,14 @@ def main():
     def _stop_graceful(timeout_seconds: int = 8) -> bool:
         pid = _read_pid()
         if not _is_alive(pid):
-            # Try pkill fallback if no pid file but process may exist
+            # Try process-list fallback if no pid file but process may exist
             try:
-                # Find matching PIDs and avoid killing ourselves
-                out = subprocess.check_output(["pgrep", "-f", "scripts/paper_processor_daemon.py"], text=True)
                 current_pid = os.getpid()
-                for line in out.strip().splitlines():
+                for target in find_running_daemon_pids(exclude_pid=current_pid):
                     try:
-                        target = int(line.strip())
-                        if target != current_pid:
-                            try:
-                                os.kill(target, signal.SIGTERM)
-                            except Exception:
-                                pass
+                        os.kill(target, signal.SIGTERM)
                     except Exception:
-                        continue
+                        pass
             except Exception:
                 pass
             if pid_file.exists():
@@ -13675,12 +13804,15 @@ def main():
         if _is_alive(pid):
             print(f"running (PID {pid})")
             sys.exit(0)
-        else:
-            # Clean stale pid file
-            if pid_file.exists():
-                pid_file.unlink(missing_ok=True)
-            print("not running")
-            sys.exit(1)
+        # PID file missing/stale: detect live worker via process list (Windows Conda + WSL)
+        if pid_file.exists():
+            pid_file.unlink(missing_ok=True)
+        live = find_running_daemon_pids(exclude_pid=os.getpid())
+        if live:
+            print(f"running (PID {live[0]}; no valid pid file)")
+            sys.exit(0)
+        print("not running")
+        sys.exit(1)
 
     if args.stop:
         ok = _stop_graceful()

@@ -471,6 +471,7 @@ class JSTORClient:
                 is_valid, _, _ = IdentifierValidator.validate_doi(doi)
                 if is_valid:
                     mapped['doi'] = doi
+                    mapped['doi_source'] = 'online'
 
         mapped['title'] = gadata.get('itemTitle')
         mapped['journal'] = gadata.get('contentName')

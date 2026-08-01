@@ -143,6 +143,7 @@ class ArxivClient:
                 'journal': 'arXiv',
                 'document_type': 'preprint',
                 'source': 'arxiv',
+                **({'doi_source': 'online'} if doi else {}),
             }
             
         except ET.ParseError as e:
@@ -219,6 +220,7 @@ class ArxivClient:
                 'journal': 'arXiv',
                 'document_type': 'preprint',
                 'source': 'arxiv',
+                **({'doi_source': 'online'} if doi else {}),
             }
             
         except Exception as e:

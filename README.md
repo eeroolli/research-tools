@@ -33,8 +33,8 @@ For detailed development status, technical architecture, and upcoming features, 
 
 **Setup for Epson Scanner:**
 1. **Before scanning**: Run `scripts/start_scanner_daemon_restart.vbs` to start/restart the daemon
-2. In Epson Capture Pro, set "After Scan" action (Send Settings → Destination → Application) to run `scripts/start_scanner_daemon_quiet.vbs`
-3. The quiet VBS runs silently in the background (no popup windows)
+2. In Epson Capture Pro, set Send → Destination → **Do Nothing** (no Application). Save the PDF to the watch folder only; the running daemon picks it up via the folder watcher
+3. **Stop when done**: Press Ctrl+C in the daemon terminal
 
 **Optimal Epson Scanner Settings for OCR Quality:**
 - **Text Enhancement**: OFF (better OCR results when disabled)
@@ -64,7 +64,7 @@ For detailed development status, technical architecture, and upcoming features, 
 - ✅ Smart filename generation
 - ✅ Manual processing option for ambiguous cases
 
-[Detailed scanner setup (Epson auto-trigger) →](SCANNER_SETUP.md)
+[Detailed scanner setup →](SCANNER_SETUP.md)
 
 ## GitHub SSH Setup (optional)
 

@@ -4,6 +4,8 @@ Only fills missing fields unless explicitly marked for manual review.
 """
 from typing import Dict, Tuple
 
+from shared_tools.metadata.document_types import document_types_equivalent
+
 
 DEFAULT_FIELD_POLICY = {
     "title": "manual",
@@ -47,6 +49,8 @@ class EnrichmentPlanner:
 
             if rule == "manual":
                 if c_val and c_val != z_val:
+                    if field == "document_type" and document_types_equivalent(z_val, c_val):
+                        continue
                     manual_fields.append(field)
                 continue
 

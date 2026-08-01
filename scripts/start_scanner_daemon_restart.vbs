@@ -1,8 +1,10 @@
 ' ========================================
 ' Paper Processor Daemon - Manual Restart Launcher
 ' ========================================
-' Use this manually before starting to scan
-' Stops existing daemon (if running) and starts fresh
+' MANUAL ONLY: stops existing daemon (if running) and starts fresh (--restart).
+' Use before a scanning session or to recover from a stuck daemon.
+' Do NOT use as Epson Capture Pro After-Scan / Application destination.
+' Epson Send must be Do Nothing; start the daemon yourself before scanning.
 
 Set objShell = CreateObject("WScript.Shell")
 

@@ -178,6 +178,7 @@ class CrossRefClient:
             'tags': tags,
             'source': 'crossref',
             'raw_type': doc_type,
+            **({'doi_source': 'online'} if message.get('DOI') else {}),
         }
     
     def _map_crossref_type(self, crossref_type: str) -> str:

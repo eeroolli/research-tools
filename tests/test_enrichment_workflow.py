@@ -69,13 +69,37 @@ def test_evaluate_and_plan_builds_plan():
     assert "pages" in summary["plan"]["updates"]
 
 
+def test_evaluate_and_plan_canonicalizes_document_type():
+    wf = EnrichmentWorkflow(metadata_processor=DummyMetadataProcessor())
+    zotero = {
+        "title": "Alpha",
+        "authors": ["Doe"],
+        "year": "2020",
+        "document_type": "journalArticle",
+    }
+    candidates = [
+        {
+            "title": "Alpha",
+            "authors": ["Doe"],
+            "year": "2020",
+            "document_type": "journal_article",
+            "pages": "5-10",
+        },
+    ]
+
+    summary = wf.evaluate_and_plan(zotero, candidates)
+    assert summary["candidate"]["document_type"] == "journalArticle"
+    assert "document_type" not in summary["plan"]["manual_fields"]
+
+
 def test_search_online_includes_additional_candidates():
     wf = EnrichmentWorkflow(metadata_processor=DummyMetadataProcessor())
     metadata = {"title": "Test", "authors": ["Author"], "year": "2020"}
     additional = [
         {"title": "Test", "authors": ["Author"], "year": "2020", "isbn": "123", "source": "national_library"}
     ]
-    
+
     results = wf.search_online(metadata, additional_candidates=additional)
     assert len(results) >= 1
     assert any("isbn" in r for r in results)
+

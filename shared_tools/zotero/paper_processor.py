@@ -320,25 +320,12 @@ class ZoteroPaperProcessor:
         Returns:
             Zotero item type string
         """
-        doc_type = metadata.get('document_type', '').lower()
+        from shared_tools.metadata.document_types import to_zotero_item_type
+
+        doc_type = metadata.get('document_type', '')
+        zotero_type = to_zotero_item_type(doc_type) or 'journalArticle'
         
-        # Map our types to Zotero types
-        type_mapping = {
-            'journal_article': 'journalArticle',
-            'conference_paper': 'conferencePaper',
-            'book_chapter': 'bookSection',
-            'preprint': 'preprint',
-            'working_paper': 'preprint',  # Working papers map to preprint in Zotero
-            'manuscript': 'manuscript',    # True manuscripts (no institution)
-            'report': 'report',
-            'thesis': 'thesis',
-            'news_article': 'newspaperArticle',
-            'web_article': 'webpage'
-        }
-        
-        zotero_type = type_mapping.get(doc_type, 'journalArticle')
-        
-        # Additional heuristics if type unclear
+        # Additional heuristics if type unclear / default journal
         if zotero_type == 'journalArticle':
             if metadata.get('book_title'):
                 zotero_type = 'bookSection'
@@ -671,6 +658,9 @@ class ZoteroPaperProcessor:
         """
         try:
             normalized_field = self._normalize_field_name(field_name)
+            field_value = self._coerce_field_value(normalized_field, field_value)
+            if field_value is None:
+                return False
 
             # Get current item
             response = requests.get(
@@ -792,6 +782,9 @@ class ZoteroPaperProcessor:
         """
         try:
             normalized_field = self._normalize_field_name(field_name)
+            field_value = self._coerce_field_value(normalized_field, field_value)
+            if field_value is None:
+                return False
 
             # Get current item (need version for safe patch)
             response = requests.get(
@@ -869,8 +862,18 @@ class ZoteroPaperProcessor:
             'journal': 'publicationTitle',
             'abstract': 'abstractNote',
             'year': 'date',
+            'document_type': 'itemType',
+            'itemtype': 'itemType',
         }
         return mapping.get(lower, field_name)
+
+    def _coerce_field_value(self, normalized_field: str, field_value):
+        """Convert values for Zotero API fields (e.g. document_type → itemType)."""
+        if normalized_field != 'itemType':
+            return field_value
+        from shared_tools.metadata.document_types import to_zotero_item_type
+        mapped = to_zotero_item_type(field_value)
+        return mapped if mapped else None
     
     def update_item_tags(self, item_key: str, add_tags: list = None, remove_tags: list = None) -> bool:
         """Update tags on an existing Zotero item.

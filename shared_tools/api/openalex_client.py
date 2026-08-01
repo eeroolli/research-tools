@@ -270,7 +270,7 @@ class OpenAlexClient:
                 if display_name:
                     tags.append(display_name)
             
-            return {
+            result = {
                 'title': title,
                 'authors': authors,
                 'year': year,
@@ -287,6 +287,9 @@ class OpenAlexClient:
                 'source': 'openalex',
                 'date_published': pub_date
             }
+            if doi:
+                result['doi_source'] = 'online'
+            return result
             
         except Exception as e:
             print(f"Error parsing OpenAlex response: {e}")

@@ -7,6 +7,22 @@ import logging
 
 from shared_tools.metadata.enrichment_policy import MatchPolicy, MatchPolicyConfig
 from shared_tools.metadata.enrichment_planner import EnrichmentPlanner
+from shared_tools.metadata.document_types import to_zotero_item_type
+
+
+def _canonicalize_document_type(metadata: Dict) -> Dict:
+    """Return a shallow copy with document_type mapped to Zotero itemType when known."""
+    if not metadata or not isinstance(metadata, dict):
+        return metadata
+    raw = metadata.get("document_type")
+    if not raw:
+        return metadata
+    mapped = to_zotero_item_type(raw)
+    if not mapped or mapped == raw:
+        return metadata
+    out = dict(metadata)
+    out["document_type"] = mapped
+    return out
 
 
 class EnrichmentWorkflow:
@@ -138,13 +154,15 @@ class EnrichmentWorkflow:
         best = None
         best_decision = None
         best_score = -1.0
+        z_meta = _canonicalize_document_type(zotero_metadata)
 
         for cand in candidates:
-            decision = self.match_policy.evaluate(zotero_metadata, cand)
+            c_meta = _canonicalize_document_type(cand)
+            decision = self.match_policy.evaluate(z_meta, c_meta)
             score = decision.get("confidence", 0.0)
             if score > best_score:
                 best_score = score
-                best = cand
+                best = c_meta
                 best_decision = decision
 
         return best, best_decision
@@ -153,7 +171,11 @@ class EnrichmentWorkflow:
         self, zotero_metadata: Dict, candidate: Dict, decision: Dict
     ) -> Dict:
         """Build an update plan using the planner and decision evidence."""
-        return self.planner.build_plan(zotero_metadata, candidate, decision)
+        return self.planner.build_plan(
+            _canonicalize_document_type(zotero_metadata),
+            _canonicalize_document_type(candidate),
+            decision,
+        )
 
     def evaluate_and_plan(
         self, zotero_metadata: Dict, candidates: List[Dict]

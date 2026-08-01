@@ -1,7 +1,10 @@
 ' ========================================
 ' Paper Processor Daemon - VBS Launcher
 ' ========================================
-
+' MANUAL ONLY: always passes --restart (stops any live daemon, then starts fresh).
+' Do NOT use as Epson Capture Pro After-Scan / Application destination.
+' Epson Send must be Do Nothing; start the daemon yourself before scanning.
+'
 ' Show startup message
 Set objShell = CreateObject("WScript.Shell")
 

@@ -302,7 +302,7 @@ class PubMedClient:
             elif any('meta-analysis' in pt.lower() for pt in pub_types):
                 document_type = 'meta_analysis'
             
-            return {
+            result = {
                 'title': title,
                 'authors': authors,
                 'year': year,
@@ -319,6 +319,9 @@ class PubMedClient:
                 'source': 'pubmed',
                 'date_published': year
             }
+            if doi:
+                result['doi_source'] = 'online'
+            return result
             
         except Exception as e:
             print(f"Error parsing PubMed XML: {e}")

@@ -109,3 +109,9 @@ GROBID on port 8070 is typically safe for local network access, but consider:
 - Using SSH tunnel for more security
 - Running GROBID on a non-standard port if needed
 
+
+## Rebuild the docker containers
+There is a file F:\prog\ackerstr\docker\docker-compose.yml that starts contains what is needed. Run in Powershell:
+
+docker rm open-webui ollama-gpu grobid 2>$null
+docker compose up -d

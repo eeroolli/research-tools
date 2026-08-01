@@ -1600,7 +1600,7 @@ def _handle_separate_documents(ctx, daemon):
         return NavigationResult.show_page('pdf_preview')
     for p in written:
         if p.exists() and daemon.should_process(p.name):
-            daemon._paper_queue.put(p)
+            daemon._enqueue_paper(p, notice=False)
     daemon.move_to_done(pdf_path, log_entry={"status": "success", "split": "document_separator"})
     return NavigationResult.separate_documents_queued()
 
@@ -1717,10 +1717,9 @@ def _handle_add_trimming(ctx, daemon):
 
 
 def _handle_manual_split(ctx, daemon):
-    """Handler for manual split definition - prompt for ratio and perform split."""
+    """Handler for manual split - prompt for ratio, then restart full pipeline."""
     original_pdf = ctx['pdf_path']
     preprocessing_state = ctx.get('preprocessing_state', {}).copy()
-    border_detection_stats = preprocessing_state.get('border_detection_stats')
     
     print("\n📐 Manual Split Definition")
     print("=" * 60)
@@ -1749,53 +1748,19 @@ def _handle_manual_split(ctx, daemon):
             print("\n❌ Cancelled")
             return NavigationResult.show_page('pdf_preview')
     
-    # Get all page widths from PDF for per-page split (handles mixed page sizes)
-    try:
-        import fitz  # PyMuPDF
-        doc = fitz.open(str(original_pdf))
-        if len(doc) == 0:
-            print("❌ Error: PDF has no pages")
-            doc.close()
-            return NavigationResult.show_page('pdf_preview')
-        page_widths = [doc[i].rect.width for i in range(len(doc))]
-        doc.close()
-    except ImportError:
-        print("❌ Error: PyMuPDF not available")
-        return NavigationResult.show_page('pdf_preview')
-    except Exception as e:
-        print(f"❌ Error reading PDF: {e}")
-        return NavigationResult.show_page('pdf_preview')
-    
-    # Per-page gutter at requested ratio so mixed page sizes work
-    gutter_x_per_page = [w * (ratio / 100) for w in page_widths]
-    first_width = page_widths[0]
-    first_gutter = gutter_x_per_page[0]
-    print(f"📊 Split point: {first_gutter:.1f} (page width: {first_width:.1f}, ratio: {ratio}%)")
-    if len(page_widths) > 1:
-        print(f"   (per-page split applied to {len(page_widths)} pages)")
-    
-    # Perform split
-    print("\n🔄 Performing manual split...")
-    split_path, error_msg = daemon._split_with_custom_gutter(original_pdf, gutter_x_per_page[0], gutter_x_per_page)
-    
-    if split_path:
-        # Update preprocessing state
-        preprocessing_state['split_method'] = 'manual'
-        preprocessing_state['split_attempted'] = True
-        preprocessing_state['split_succeeded'] = True
-        preprocessing_state['manual_split_ratio'] = ratio
-        preprocessing_state['border_detection_stats'] = border_detection_stats  # Preserve border stats
-        
-        ctx['processed_pdf'] = split_path
-        ctx['preprocessing_state'] = preprocessing_state
-        ctx['original_pdf'] = original_pdf
-        
-        print(f"✅ Manual split completed: {ratio:.0f}/{100-ratio:.0f}")
-        return NavigationResult.show_page('pdf_preview')
-    else:
-        error_display = f": {error_msg}" if error_msg else ""
-        print(f"❌ Manual split failed{error_display}")
-        return NavigationResult.show_page('pdf_preview')
+    # Restart from original: border → manual split → trim (re-applies prior trim if set)
+    print("\n🔄 Restarting preprocessing with manual split...")
+    processed_pdf, new_state = daemon._preprocess_pdf_with_options(
+        original_pdf,
+        border_removal=preprocessing_state.get('border_removal', False),
+        split_method='manual',
+        trim_leading=preprocessing_state.get('trim_leading', False),
+        manual_split_ratio=ratio,
+    )
+    ctx['processed_pdf'] = processed_pdf
+    ctx['preprocessing_state'] = new_state
+    ctx['original_pdf'] = original_pdf
+    return NavigationResult.show_page('pdf_preview')
 
 
 def create_note_input_page(daemon) -> Page:

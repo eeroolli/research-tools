@@ -29,3 +29,23 @@ def test_planner_respects_manual_on_conflict():
     plan = planner.build_plan(zotero, candidate, decision)
     assert "doi" not in plan["updates"]
     assert "doi" in plan["manual_fields"]
+
+
+def test_planner_ignores_equivalent_document_type_aliases():
+    planner = EnrichmentPlanner()
+    zotero = {
+        "title": "Paper",
+        "document_type": "journalArticle",
+        "authors": ["A"],
+        "year": "2020",
+    }
+    candidate = {
+        "title": "Paper",
+        "document_type": "journal_article",
+        "authors": ["A"],
+        "year": "2020",
+        "pages": "1-2",
+    }
+    plan = planner.build_plan(zotero, candidate, {"evidence": {}})
+    assert "document_type" not in plan["manual_fields"]
+    assert plan["updates"].get("pages") == "1-2"

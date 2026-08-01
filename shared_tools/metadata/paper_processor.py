@@ -837,6 +837,8 @@ class PaperMetadataProcessor:
                 metadata = client.get_metadata_by_doi(doi)
                 if metadata:
                     print(f"  ✅ Found metadata in {api_name}")
+                    from shared_tools.metadata.doi_provenance import mark_doi_source
+                    mark_doi_source(metadata, "online")
                     return metadata
             except Exception as e:
                 print(f"  ⚠️  {api_name} error: {e}")

@@ -20,8 +20,7 @@
   - Handle `on_moved` events as creates (common on Windows scanners)
 
 - Windows helper scripts:
-  - `scripts/start_scanner_daemon_restart.vbs` → Restart daemon (recommended before scanning session)
-  - `scripts/start_scanner_daemon_quiet.vbs` → Silent post-scan trigger (used by Epson Capture Pro)
+  - `scripts/start_scanner_daemon_restart.vbs` → Restart daemon (manual; recommended before scanning session)
   - `scripts/stop_scanner_daemon.bat` → calls WSL `--stop` (future enhancement)
 
 Notes:
@@ -583,7 +582,7 @@ Note: Largely covered by GROBID already (title/authors/venue/year from first pag
 - [x] **Separate workflows** - Books and papers use same underlying systems but different entry points
 - [x] **Configuration sharing** - Reuse existing config system (config.personal.conf)
 - [x] **Logging consistency** - Extend CSV logging with Zotero fields
-- [x] **Scanner integration** - Epson Capture Pro jobs configured with language prefixes (NO_, EN_, DE_, SV_, DA_, FI_) and orientations (Portrait/Landscape), post-scan action triggers quiet.vbs
+- [x] **Scanner integration** - Epson Capture Pro jobs configured with language prefixes (NO_, EN_, DE_, SV_, DA_, FI_) and orientations (Portrait/Landscape); Send = Do Nothing; start daemon manually before scanning
 - [x] **Conference detection** - conference_detector.py for presentations (Oct 11, 2025)
 - [x] **Interactive menu** - PENDING: Add to process_scanned_papers.py (NEXT SESSION)
 - [ ] **Testing** - End-to-end testing with real scanner
@@ -598,8 +597,8 @@ Note: Largely covered by GROBID already (title/authors/venue/year from first pag
 5. Click job (Language/Orientation)
 6. Scan document
 7. Save document (to scanner folder)
-8. Epson triggers quiet.vbs (silently)
-9. Terminal opens with PDF info
+8. Running daemon watcher sees new PDF
+9. Terminal shows PDF info
 10. Make choices & edit metadata
 11. Metadata (tags etc) saved to Zotero
 12. PDF saved to publications folder (with new name or not)

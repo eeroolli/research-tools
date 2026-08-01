@@ -18,7 +18,11 @@ This guide explains how to configure your Epson scanner to automatically trigger
 
 ---
 
+
+
 ## Step 1: Choose runtime: Windows-native (recommended) vs WSL
+
+
 
 ### Windows-native workflow (recommended)
 
@@ -40,6 +44,8 @@ Publications: I:\publications
 ============================================================
 ```
 
+
+
 ### WSL workflow (legacy / optional)
 
 If you still want to start the daemon from WSL, you can use:
@@ -52,55 +58,56 @@ This activates the WSL `research-tools` environment and runs the legacy WSL laun
 
 ---
 
+
+
 ## Step 2: Configure Epson Capture Pro
+
+
 
 ### Scan Destination Settings
 
 1. **Open Epson Capture Pro**
 2. **Select Job/Profile** (or create new one for papers)
 3. **Configure Destination:**
-
-   **Save Location:**
-   ```
-   I:\FraScanner\papers\
-   ```
-
+  **Save Location:**
    **File Naming Pattern:**
-   - Use Epson's built-in variables for language, date, time, page count
-   - Target format: `<LANG>_YYYYMMDD_HHMMSS_<PAGES>.pdf`
-   - Examples:
-     - `EN_20251011_143522_5.pdf`
-     - `NO_20251011_143522_3.pdf`
-     - `DE_20251011_143522_2.pdf`
-
+  - Use Epson's built-in variables for language, date, time, page count
+  - Target format: `<LANG>_YYYYMMDD_HHMMSS_<PAGES>.pdf`
+  - Examples:
+    - `EN_20251011_143522_5.pdf`
+    - `NO_20251011_143522_3.pdf`
+    - `DE_20251011_143522_2.pdf`
    **If Epson doesn't support this pattern:**
-   - Use any pattern that includes language prefix (EN_, NO_, DE_, SV_, DA_, FI_)
-   - Daemon will detect files starting with these prefixes
+  - Use any pattern that includes language prefix (EN_, NO_, DE_, SV_, DA_, FI_)
+  - Daemon will detect files starting with these prefixes
+
+
 
 ### Post-Scan Action
 
-1. **Go to:** Advanced Settings → Post-Processing → Run Program
-2. **Enable:** "Run program after job completion"
-3. **Use Quiet Launcher (Recommended):**
-   ```
-   F:\prog\research-tools\scripts\start_scanner_daemon_quiet.vbs
-   ```
-   - Epson compatible
-   - Runs silently (no popup windows)
-   - Works on any Windows computer
-   - Best for automated post-scan triggering
+The Save destination already writes PDFs into the watch folder; the **running** daemon picks them up via its folder watcher. Do **not** configure Epson to launch any daemon script after a scan.
 
+1. **Go to:** Job Settings → **4. Send**
+2. **Destination:** **Do Nothing** (or Folder/Save only — no Application / Run Program)
+3. Start the daemon yourself before scanning with `scripts/start_scanner_daemon_restart.vbs`
 4. **Save settings**
+
+**If a second daemon terminal appears on scan:** Epson still has an Application destination pointing at a launcher. Set Send to Do Nothing and close the extra window.
 
 ---
 
+
+
 ## Step 3: Create Scanner Buttons/Profiles
+
+
 
 ### Button Configuration
 
 Create separate jobs/profiles for each language and orientation:
 
 **English Portrait:**
+
 - Name: "Papers - English Portrait"
 - Language prefix: EN_
 - Scan settings:
@@ -108,22 +115,23 @@ Create separate jobs/profiles for each language and orientation:
   - Scan language: English
   - Remove empty pages (in case it is only one-sided scan)
 - Save settings:
-   - Filename pattern: Starts with `EN_`
-   - PDF - Options - Language: English
-   - Location: I:\FraScanner\papers\ (or what every you defined in config.conf)
+  - Filename pattern: Starts with `EN_`
+  - PDF - Options - Language: English
+  - Location: I:\FraScanner\papers\ (or what every you defined in config.conf)
 - Index settings off
 - Send Settings
-   - Destination: Application - Setting name - Edit
-           `[add path]\research-tools\scripts\start_scanner_daemon_quiet.vbs`
+  - Destination: **Do Nothing** (no Application / no post-scan program)
 
 **English Landscape:**
+
 - Name: "Papers - English Landscape"
 - Description: To be used when there are two pages next to each other like in a book
 - All the same settings as English Portait but add:
-   Filename pattern: Starts with `EN_` and ends with `_double`
+ Filename pattern: Starts with `EN_` and ends with `_double`
 
 **Other Languages:**
 You can create similar profiles for other languages (Norwegian, German, etc.):
+
 - Each with: exactly same settings as the English ones, except: 
 - Norwegian Portrait: Prefix `NO_`
 - German Portrait: Prefix `DE_`
@@ -134,63 +142,68 @@ You can create similar profiles for other languages (Norwegian, German, etc.):
 
 ---
 
+
+
 ## Step 4: Starting the Daemon Before Scanning
+
+
 
 ### Initial Startup
 
 **Before you start scanning, do a full restart of the daemon:**
 
 1. **Run the restart script:**
-   ```
+  ```
    F:\prog\research-tools\scripts\start_scanner_daemon_restart.vbs
-   ```
-   - This ensures a clean start
-   - Stops any existing daemon instance
-   - Starts fresh daemon process
-   - Recommended: Run this when you begin your scanning session or if you have any problems.
-
+  ```
+  - This ensures a clean start
+  - Stops any existing daemon instance
+  - Starts fresh daemon process
+  - Recommended: Run this when you begin your scanning session or if you have any problems.
 2. **Verify daemon is running:**
-   ```cmd
+  ```cmd
    wsl cat /mnt/i/FraScanner/papers/.daemon.pid
    wsl ps aux | findstr paper_processor_daemon
-   ```
+  ```
    You should see the PID file and process running.
 
 ---
 
+
+
 ## Step 5: Test the Setup
+
+
 
 ### Test Sequence
 
 1. **Start with restart (if not already running):**
-   ```cmd
+  ```cmd
    F:\prog\research-tools\scripts\start_scanner_daemon_restart.vbs
-   ```
-
+  ```
 2. **Scan a test document:**
-   - Press your configured scanner button
-   - Watch for:
-     - PDF saved to I:\FraScanner\papers\
-     - Quiet VBS script runs silently (no popup)
-     - Daemon processes the file automatically
-
+  - Press your configured scanner button
+  - Watch for:
+    - PDF saved to I:\FraScanner\papers\
+    - Quiet VBS script runs silently (no popup)
+    - Daemon processes the file automatically
 3. **Verify daemon is running:**
-   ```cmd
+  ```cmd
    wsl cat /mnt/i/FraScanner/papers/.daemon.pid
    wsl ps aux | findstr paper_processor_daemon
-   ```
-
+  ```
 4. **Check processing:**
-   - Check daemon logs or terminal for activity
-   - Should show: "New scan detected: EN_..."
-   - Should process automatically
-
+  - Check daemon logs or terminal for activity
+  - Should show: "New scan detected: EN_..."
+  - Should process automatically
 5. **Test second scan:**
-   - Scan another document
-   - Quiet VBS script runs silently (daemon already running)
-   - New PDF processed automatically
+  - Scan another document
+  - Quiet VBS script runs silently (daemon already running)
+  - New PDF processed automatically
 
 ---
+
+
 
 ## Workflow After Setup
 
@@ -242,15 +255,14 @@ You can create similar profiles for other languages (Norwegian, German, etc.):
          │
          ▼
 ┌─────────────────┐
-│ Epson triggers  │
-│ quiet.vbs       │
-│ (silently)      │
+│ Running daemon │
+│ watcher sees   │
+│ new PDF        │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ Terminal       │
-│ Opens with     │
+│ Terminal shows │
 │ PDF Info       │
 └────────┬────────┘
          │
@@ -300,6 +312,8 @@ You can create similar profiles for other languages (Norwegian, German, etc.):
 
 ---
 
+
+
 ## Two-up (`_double`) scans and automatic splitting
 
 Scans whose filenames contain `_double` (for example `EN_20260312-130734_001_double.pdf`)
@@ -308,14 +322,12 @@ are treated as two-up pages and are split automatically during the PDF preproces
 - **When it happens**
   - After metadata is finalized and before the PDF is copied to the publications folder / attached to Zotero, the daemon runs a **PDF PREPROCESSING** phase.
   - If the original filename contains `_double`, preprocessing will **always attempt to split** the scan into single pages using the automatic (gutter-based) method.
-
 - **What you see in the terminal**
   - A `PDF PREPROCESSING` header appears after the filename confirmation.
   - For `_double` scans you should see:
     - `Auto-splitting due to '_double' in filename...`
   - In the preprocessing preview menu, the `Current preprocessing` section shows:
     - `Split: ✓ Applied (gutter detection)` when the split succeeded.
-
 - **How it is logged**
   - The CSV log at `data/logs/scanned_papers_log.csv` contains a `split` column:
     - `"yes"`  – split was attempted and succeeded.
@@ -325,51 +337,73 @@ are treated as two-up pages and are split automatically during the PDF preproces
 This makes `_double` behavior predictable and lets you confirm splitting both from the
 interactive UI and from the historical log.
 
+## Multiple scans
+
+The Epson printer has a document feeder. One can scan several documents at once IF they all use the same Epson Scan Pro job.  
+In this case it is smart to use a document separator pages like F:\prog\ackerstr\scanner\separator_page_both.pdf, which will be recognized,
+and replaced by a document split, so that each paper is saved on a separate PDF.
+
 ---
+
+
 
 ## Troubleshooting
 
-### VBS script doesn't run
 
-**Check Epson Capture Pro settings:**
-- Verify path is correct: `F:\prog\research-tools\scripts\start_scanner_daemon_quiet.vbs`
-- Try absolute path without spaces
-- Check "Run as administrator" if needed
+
+### New daemon / conda windows open on every scan
+
+**Cause:** Epson Send still has an Application destination pointing at a daemon launcher.
+
+**Fix:**
+
+1. Set Send → Destination → **Do Nothing** (remove any Application program)
+2. Close extra daemon/conda windows
+3. Keep one daemon started via `start_scanner_daemon_restart.vbs` before the session
+
+
+
+### Restart VBS script doesn't run
 
 **Test manually:**
-```cmd
-F:\prog\research-tools\scripts\start_scanner_daemon_quiet.vbs
-```
 
-**Or test the restart script:**
 ```cmd
 F:\prog\research-tools\scripts\start_scanner_daemon_restart.vbs
 ```
 
+
+
 ### Daemon doesn't start
 
 **Check WSL:**
+
 ```cmd
 wsl --list --verbose
 ```
+
 Should show Ubuntu/Debian running.
 
 **Test Python path:**
+
 ```cmd
 wsl python --version
 wsl which python
 ```
 
 **Check file permissions:**
+
 ```cmd
 wsl ls -la /mnt/f/prog/research-tools/scripts/start_paper_processor.py
 ```
+
+
 
 ### PDFs not detected
 
 **Known issue:** watchdog doesn't work on DrvFS/Google Drive mounts.
 
 **Fix:** Edit `scripts/paper_processor_daemon.py` line 449:
+
 ```python
 # Change from:
 from watchdog.observers import Observer
@@ -379,9 +413,12 @@ from watchdog.observers.polling import PollingObserver as Observer
 ```
 
 **Alternative:** Use batch processing manually:
+
 ```cmd
 wsl python /mnt/f/prog/research-tools/scripts/process_scanned_papers.py
 ```
+
+
 
 ### Daemon terminal stays open
 
@@ -393,56 +430,76 @@ wsl python /mnt/f/prog/research-tools/scripts/process_scanned_papers.py
 
 ---
 
+
+
 ## Advanced Configuration
+
+
 
 ### Silent Mode (Future)
 
 Add flag to start_paper_processor.py:
+
 ```python
 parser.add_argument("--background", action="store_true")
 ```
 
+
+
 ### Auto-start Daemon on Windows Boot
 
 Create Windows Task Scheduler task:
+
 1. Trigger: At startup
 2. Action: Run batch file
 3. Settings: Run only if network available
 
+
+
 ### Multiple Scanner Destinations
 
 Create different batch files for different workflows:
+
 - `scripts/start_scanner_daemon_papers.bat` → papers workflow
 - `scripts/start_scanner_daemon_books.bat` → books workflow
 - `scripts/start_scanner_daemon_other.bat` → other documents
 
 ---
 
+
+
 ## File Locations Summary
 
-| File | Windows Path | WSL Path |
-|------|-------------|----------|
-| Quiet VBS launcher (post-scan) | `F:\prog\research-tools\scripts\start_scanner_daemon_quiet.vbs` | `/mnt/f/prog/research-tools/scripts/start_scanner_daemon_quiet.vbs` |
-| Restart VBS launcher (startup) | `F:\prog\research-tools\scripts\start_scanner_daemon_restart.vbs` | `/mnt/f/prog/research-tools/scripts/start_scanner_daemon_restart.vbs` |
-| Python launcher | `F:\prog\research-tools\scripts\start_paper_processor.py` | `/mnt/f/prog/research-tools/scripts/start_paper_processor.py` |
-| Daemon script | `F:\prog\research-tools\scripts\paper_processor_daemon.py` | `/mnt/f/prog/research-tools/scripts/paper_processor_daemon.py` |
-| Scanner destination | `I:\FraScanner\papers\` | `/mnt/i/FraScanner/papers/` |
-| Final PDFs | `G:\My Drive\publications\` | `/mnt/g/My Drive/publications/` |
+
+| File                                | Windows Path                                                      | WSL Path                                                              |
+| ----------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Restart VBS launcher (manual start) | `F:\prog\research-tools\scripts\start_scanner_daemon_restart.vbs` | `/mnt/f/prog/research-tools/scripts/start_scanner_daemon_restart.vbs` |
+| Python launcher                     | `F:\prog\research-tools\scripts\start_paper_processor.py`         | `/mnt/f/prog/research-tools/scripts/start_paper_processor.py`         |
+| Daemon script                       | `F:\prog\research-tools\scripts\paper_processor_daemon.py`        | `/mnt/f/prog/research-tools/scripts/paper_processor_daemon.py`        |
+| Scanner destination                 | `I:\FraScanner\papers\`                                           | `/mnt/i/FraScanner/papers/`                                           |
+| Final PDFs                          | `G:\My Drive\publications\`                                       | `/mnt/g/My Drive/publications/`                                       |
+
 
 ---
+
+
 
 ## GROBID Configuration
 
 The paper processor daemon uses **GROBID** (GeneRation Of BIbliographic Data) for advanced academic paper metadata extraction.
 
 ### Automatic Setup
+
 - ✅ **Auto-start**: GROBID Docker container starts automatically when daemon launches (local GROBID only)
 - ✅ **Auto-stop**: Container stops when daemon shuts down (configurable, local GROBID only)
 - ✅ **Remote Support**: Can connect to GROBID running on another machine
 - ✅ **Smart Processing**: Extracts metadata from first 2 pages only (prevents citation pollution)
 - ✅ **Document Type Detection**: Automatically identifies journal articles, books, conferences, etc.
 
+
+
 ### Configuration Options
+
 Edit `config.conf` to customize GROBID behavior:
 
 ```ini
@@ -463,57 +520,70 @@ container_name = grobid
 max_pages = 2
 ```
 
+
+
 ### Distributed Processing Setup
 
 For distributed processing where GROBID runs on one machine (P1) and the daemon runs on another (blacktower):
 
 **On P1 (GROBID server):**
+
 1. Start GROBID Docker container:
-   ```bash
+  ```bash
    docker start grobid
    # Or create if needed:
    docker run -d --name grobid -p 8070:8070 lfoppiano/grobid:0.8.2
-   ```
+  ```
 2. Ensure GROBID is accessible on port 8070 (check firewall if needed)
 
 **On blacktower (daemon machine):**
+
 1. Edit `config.personal.conf`:
-   ```ini
+  ```ini
    [GROBID]
    host = p1
    # Or use IP address: host = 192.168.1.100
    port = 8070
    auto_start = false
    auto_stop = false
-   ```
+  ```
 2. Configure daemon lock checking (optional, prevents multiple daemons):
-   ```ini
+  ```ini
    [DAEMON]
    remote_check_host = p1
-   ```
+  ```
 3. Start daemon - it will connect to remote GROBID automatically
 
 **Daemon Locking:**
+
 - Only one daemon should run at a time across all machines
 - Local daemon checks prevent duplicate instances on same machine
 - Remote daemon check (if configured) prevents conflicts when daemon is running on another machine
 - If remote daemon is detected, startup will exit with clear error message
 
+
+
 ### GROBID Features
+
 - **Smart Author Extraction** - Only processes first 2 pages to avoid extracting authors from references
 - **Document Type Detection** - Identifies journal articles, books, conferences, theses, reports, preprints
 - **Enhanced Metadata** - Extracts keywords, publisher, volume, issue, pages, language, conference info
 - **Fallback Support** - Falls back to Ollama 7B if GROBID is unavailable
 - **Remote Access** - Can connect to GROBID on another machine over network
 
+
+
 ### Troubleshooting GROBID
+
 If GROBID fails to start:
+
 1. **Check Docker**: Ensure Docker is running on Windows (for local GROBID)
 2. **Check Port**: Verify port 8070 is not in use
 3. **Check Logs**: Run `docker logs grobid` to see container logs
 4. **Manual Start**: `docker start grobid` to manually start container
 
 If remote GROBID is unreachable:
+
 1. **Test Connectivity**: `curl http://p1:8070/api/isalive` (should return "true")
 2. **Check Firewall**: Ensure port 8070 is open on GROBID machine
 3. **Check Network**: Verify machines can reach each other (ping, SSH)
@@ -521,15 +591,15 @@ If remote GROBID is unreachable:
 
 ---
 
+
+
 ## Testing Commands
 
 **From Windows:**
+
 ```cmd
 REM Start/restart daemon before scanning
 F:\prog\research-tools\scripts\start_scanner_daemon_restart.vbs
-
-REM Test quiet launcher (post-scan action)
-F:\prog\research-tools\scripts\start_scanner_daemon_quiet.vbs
 
 REM Check daemon status
 wsl cat /mnt/i/FraScanner/papers/.daemon.pid
@@ -541,6 +611,7 @@ REM Stop daemon (Ctrl+C in daemon terminal)
 ```
 
 **From WSL:**
+
 ```bash
 # Start daemon manually
 cd /mnt/f/prog/research-tools
@@ -555,6 +626,8 @@ ps aux | grep paper_processor_daemon
 
 ---
 
+
+
 ## Next Steps
 
 1. ✅ Configure Epson Capture Pro
@@ -566,4 +639,3 @@ ps aux | grep paper_processor_daemon
 ---
 
 **Questions?** Check SESSION_SUMMARY_2025-10-11.md for detailed implementation notes.
-

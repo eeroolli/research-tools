@@ -355,10 +355,11 @@ class GrobidClient:
         if abstract_elem is not None and abstract_elem.text:
             metadata['abstract'] = abstract_elem.text.strip()
         
-        # Extract DOI
+        # Extract DOI (untrusted for later DOI lookup — OCR/TEI errors)
         doi_elem = root.find('.//{http://www.tei-c.org/ns/1.0}idno[@type="DOI"]')
         if doi_elem is not None and doi_elem.text:
             metadata['doi'] = doi_elem.text.strip()
+            metadata['doi_source'] = 'grobid'
         
         # Extract journal
         journal_elem = root.find('.//{http://www.tei-c.org/ns/1.0}monogr/{http://www.tei-c.org/ns/1.0}title')

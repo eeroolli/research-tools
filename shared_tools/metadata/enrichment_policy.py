@@ -11,6 +11,8 @@ import json
 import time
 import re
 
+from shared_tools.metadata.document_types import type_match_score
+
 
 @dataclass
 class MatchPolicyConfig:
@@ -219,9 +221,7 @@ class MatchPolicy:
     def _type_match(self, t1: Optional[str], t2: Optional[str]) -> float:
         if not t1 or not t2:
             return 0.0
-        # Normalize to a comparable form across Zotero (camelCase) and online sources (snake/kebab).
-        t1n = re.sub(r"[^a-z0-9]", "", t1.lower().strip())
-        t2n = re.sub(r"[^a-z0-9]", "", t2.lower().strip())
+        score = type_match_score(t1, t2)
         # #region agent log
         try:
             log_path = r"f:\prog\research-tools\.cursor\debug.log" if os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
@@ -232,18 +232,13 @@ class MatchPolicy:
                     "hypothesisId": "ENR_T1",
                     "location": "enrichment_policy.py:_type_match",
                     "message": "Type match compare",
-                    "data": {"t1": t1, "t2": t2, "t1n": t1n, "t2n": t2n},
+                    "data": {"t1": t1, "t2": t2, "score": score},
                     "timestamp": int(time.time() * 1000),
                 }) + "\n")
         except Exception:
             pass
         # #endregion
-        if t1n == t2n:
-            return 1.0
-        # partial match for journal vs conference
-        if {t1n, t2n} <= {"journalarticle", "conferencepaper"}:
-            return 0.3
-        return 0.0
+        return score
 
     def _language_match(
         self,

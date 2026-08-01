@@ -250,7 +250,7 @@ class TestPdfPreviewOptionAction(unittest.TestCase):
         daemon.move_to_done.assert_called_once_with(
             scan, log_entry={"status": "success", "split": "document_separator"}
         )
-        self.assertEqual(daemon._paper_queue.put.call_count, 2)
+        self.assertEqual(daemon._enqueue_paper.call_count, 2)
 
 
 if __name__ == '__main__':
