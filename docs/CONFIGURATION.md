@@ -70,7 +70,7 @@ Ollama service configuration for AI-powered metadata extraction (fallback) and f
   - For local setup: use `localhost`
 - `fallback_hosts`: Comma-separated IPs to try when `host` is a hostname that doesn't resolve (e.g. `192.168.178.176,192.168.178.129`). Leave empty to disable fallback.
 - `port`: Ollama port (default: `11434`)
-- `model`: Base Ollama model name. Used when role-specific models are not configured (default: `llama2:7b` in `config.conf`).
+- `model`: Base Ollama model name. Used when role-specific models are not configured (default: `llama3.2:8b` in `config.conf`).
 - `metadata_model` (optional): Model used for *PDF metadata extraction* and other heavy text-understanding tasks. If omitted or empty, falls back to `model`.
 - `title_model` (optional): Model used for *filename shortening* (`shorten_title`). If omitted or empty, falls back to `model`.
 - `metadata_temperature` (optional): Temperature for metadata extraction calls. If omitted or empty, a conservative default (≈ `0.1`) is used.
@@ -111,6 +111,56 @@ Processing configuration.
 
 - `tesseract_path`: Path to Tesseract OCR executable (optional)
 - Other processing settings
+
+### [ENRICHMENT]
+
+Controls how online metadata candidates are scored against an existing Zotero item and which fields can be applied automatically.
+
+- `auto_accept_threshold`: Minimum composite score for automatic acceptance (default: `0.85`).
+- `manual_review_threshold`: Minimum score for manual review; lower scores are rejected (default: `0.75`).
+- `language_confidence_min`: Ignores lower-confidence language evidence during scoring (default: `0.90`).
+- `weight_title`, `weight_authors`, `weight_year`, `weight_type`, `weight_language`: Relative contributions to the composite score. Document-type matching uses the aliases and partial matches in `document_types.conf`.
+- `field_policy`: Comma-separated `field:rule` entries. Supported rules are:
+  - `auto_if_missing`: Fill the field only when Zotero has no value.
+  - `auto_if_missing_with_confidence`: Fill a missing value only when its confidence check passes.
+  - `manual`: Show a changed value for manual review.
+  - `manual_on_conflict`: Fill a missing value, but require review when both sources have different values.
+
+Example:
+
+```ini
+[ENRICHMENT]
+auto_accept_threshold = 0.85
+manual_review_threshold = 0.75
+weight_title = 0.45
+weight_authors = 0.30
+weight_year = 0.15
+weight_type = 0.10
+weight_language = 0.05
+field_policy = doi:manual_on_conflict,issn:auto_if_missing,title:manual,authors:manual,document_type:manual
+```
+
+An exact DOI, ISBN, or ISSN match is accepted regardless of the composite threshold. A conflicting identifier requires manual review only when the composite score reaches `auto_accept_threshold`; otherwise the candidate is rejected.
+
+### Document type mappings
+
+The repo-root `document_types.conf` maps document labels from internal metadata, CrossRef/DataCite, CSL, and selected COAR terms to Zotero `itemType` values. These mappings are used by enrichment comparison and planning, metadata merging, and Zotero item creation and updates.
+
+```ini
+[aliases]
+journal-article = journalArticle
+article-journal = journalArticle
+book_chapter = bookSection
+
+[partial_matches]
+journalArticle = conferencePaper
+```
+
+- Alias keys are case-insensitive; spaces and hyphens are normalized to underscores and other punctuation is removed.
+- Alias values should be valid Zotero `itemType` strings such as `journalArticle` or `bookSection`.
+- Labels that map to the same value are equivalent and score `1.0`. A pair in `[partial_matches]` scores `0.3`; other or unmapped pairs score `0.0`.
+- Add mappings for every source label that should be treated as equivalent. An unmapped label is not considered a match.
+- Mappings are cached in a running process. Restart the daemon after editing `document_types.conf`.
 
 ### [TEXT_IGNORE]
 
@@ -222,6 +272,22 @@ Errors are reported with clear messages indicating what needs to be fixed.
    ```
 3. **Environment variables**: Use environment variables for API keys in production
 4. **Network security**: For distributed setups, ensure proper firewall rules for service ports
+
+## Daemon lifecycle commands
+
+Run these commands from the repository root in the same Windows or WSL environment used for the daemon:
+
+```bash
+python scripts/paper_processor_daemon.py --status
+python scripts/paper_processor_daemon.py --stop
+python scripts/paper_processor_daemon.py --restart
+```
+
+- `--status` prints `running (PID …)` and exits successfully when a worker is found; it prints `not running` and exits with status `1` otherwise.
+- `--stop` requests a graceful stop and clears the PID file.
+- `--restart` stops an existing worker, then starts a new interactive daemon in the current terminal.
+
+Status and stop first use `.daemon.pid` in `scanner_papers_dir`. If that file is missing or stale, the daemon also checks the Windows process list or Linux `pgrep`, so a live worker can still be found. The configured scanner directory must exist before any lifecycle command can run.
 
 ## Troubleshooting
 

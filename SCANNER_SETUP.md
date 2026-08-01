@@ -162,10 +162,10 @@ You can create similar profiles for other languages (Norwegian, German, etc.):
   - Recommended: Run this when you begin your scanning session or if you have any problems.
 2. **Verify daemon is running:**
   ```cmd
-   wsl cat /mnt/i/FraScanner/papers/.daemon.pid
-   wsl ps aux | findstr paper_processor_daemon
+   cd /D F:\prog\research-tools
+   python scripts\paper_processor_daemon.py --status
   ```
-   You should see the PID file and process running.
+   You should see `running (PID ...)`. Activate `research-tools-win` first if it is not already active.
 
 ---
 
@@ -185,12 +185,12 @@ You can create similar profiles for other languages (Norwegian, German, etc.):
   - Press your configured scanner button
   - Watch for:
     - PDF saved to I:\FraScanner\papers\
-    - Quiet VBS script runs silently (no popup)
-    - Daemon processes the file automatically
+    - The already-running daemon reports the new scan in its terminal
+    - No second daemon terminal opens
 3. **Verify daemon is running:**
   ```cmd
-   wsl cat /mnt/i/FraScanner/papers/.daemon.pid
-   wsl ps aux | findstr paper_processor_daemon
+   cd /D F:\prog\research-tools
+   python scripts\paper_processor_daemon.py --status
   ```
 4. **Check processing:**
   - Check daemon logs or terminal for activity
@@ -198,8 +198,8 @@ You can create similar profiles for other languages (Norwegian, German, etc.):
   - Should process automatically
 5. **Test second scan:**
   - Scan another document
-  - Quiet VBS script runs silently (daemon already running)
-  - New PDF processed automatically
+  - The same daemon terminal remains open
+  - The new PDF is processed automatically
 
 ---
 
@@ -568,7 +568,7 @@ For distributed processing where GROBID runs on one machine (P1) and the daemon 
 - **Smart Author Extraction** - Only processes first 2 pages to avoid extracting authors from references
 - **Document Type Detection** - Identifies journal articles, books, conferences, theses, reports, preprints
 - **Enhanced Metadata** - Extracts keywords, publisher, volume, issue, pages, language, conference info
-- **Fallback Support** - Falls back to Ollama 7B if GROBID is unavailable
+- **Fallback Support** - Falls back to the configured Ollama model if GROBID is unavailable
 - **Remote Access** - Can connect to GROBID on another machine over network
 
 
@@ -602,12 +602,11 @@ REM Start/restart daemon before scanning
 F:\prog\research-tools\scripts\start_scanner_daemon_restart.vbs
 
 REM Check daemon status
-wsl cat /mnt/i/FraScanner/papers/.daemon.pid
+cd /D F:\prog\research-tools
+python scripts\paper_processor_daemon.py --status
 
-REM View daemon output
-wsl tail -f /tmp/daemon.log
-
-REM Stop daemon (Ctrl+C in daemon terminal)
+REM Stop daemon (or press Ctrl+C in its terminal)
+python scripts\paper_processor_daemon.py --stop
 ```
 
 **From WSL:**
@@ -615,13 +614,13 @@ REM Stop daemon (Ctrl+C in daemon terminal)
 ```bash
 # Start daemon manually
 cd /mnt/f/prog/research-tools
-python scripts/start_paper_processor.py
+python scripts/paper_processor_daemon.py
 
 # Check if running
-cat /mnt/i/FraScanner/papers/.daemon.pid
-ps aux | grep paper_processor_daemon
+python scripts/paper_processor_daemon.py --status
 
-# Stop daemon (Ctrl+C in daemon terminal)
+# Stop daemon (or press Ctrl+C in its terminal)
+python scripts/paper_processor_daemon.py --stop
 ```
 
 ---

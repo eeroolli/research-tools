@@ -28,6 +28,7 @@ shared_tools/daemon/
 ├── zotero_workflow.py    # Zotero search, matching, attachment
 ├── enrichment_workflow.py# Online enrichment orchestration (match policy + planner)
 ├── enrichment_display.py # Console rendering for enrichment summaries
+├── process_detection.py  # Worker detection when the PID file is stale or missing
 ├── user_interaction.py   # Menus, prompts, input handling
 ├── display.py            # Metadata formatting and display
 ├── exceptions.py         # Exception hierarchy
@@ -58,6 +59,8 @@ shared_tools/metadata/
 ├── paper_processor.py    # Main paper metadata extraction orchestrator
 ├── jstor_handler.py      # JSTOR workflow orchestration
 ├── extractor.py          # Metadata extraction base classes
+├── document_types.py     # Config-driven source label → Zotero itemType mapping
+├── doi_provenance.py     # Trust markers for DOI-based online lookup
 ├── enrichment_policy.py  # Match policy scoring for online enrichment
 ├── enrichment_planner.py # Field-level update planning for enrichment
 └── ...                   # Other metadata modules
@@ -66,6 +69,7 @@ shared_tools/metadata/
 ### Enrichment Workflow (`enrichment_workflow.py`)
 
 - Evaluates online candidates (CrossRef/arXiv/etc.) with a match policy
+- Canonicalizes known document-type aliases before scoring and update planning
 - Builds a fill-only update plan (field policy-driven)
 - Applies safe fields to Zotero on auto-accept and logs applied/failed fields
 - Provides summary rendering via `enrichment_display.py`
