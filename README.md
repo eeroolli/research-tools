@@ -7,7 +7,7 @@ A comprehensive system for processing academic papers and books with ISBN extrac
 **✅ Book Processing**: Fully functional with advanced OCR capabilities  
 **✅ Paper Processing**: Complete interactive daemon with 3-step UX workflow  
 **✅ Zotero Integration**: Enhanced workflow for attaching PDFs to existing items  
-**🤖 AI Integration**: Ollama 7B installed and ready for paper processing
+**🤖 AI Integration**: Ollama fallback configured for paper processing
 
 For detailed development status, technical architecture, and upcoming features, see the [Implementation Plan](implementation-plan.md).
 
@@ -134,7 +134,7 @@ python scripts/paper_processor_daemon.py
 - **Smart Processing** - Extracts metadata from first 2 pages only (configurable)
 - **Document Type Detection** - Automatically identifies journal articles, books, conferences, theses, etc.
 - **Enhanced Metadata** - Extracts keywords, publisher, volume, issue, pages, language, conference info
-- **Fallback Processing** - Uses Ollama 7B when GROBID is unavailable
+- **Fallback Processing** - Uses the configured Ollama model when GROBID is unavailable
 - Look up complete metadata from academic databases (CrossRef, arXiv)
 - Add papers to Zotero with proper file linking and organization
 - **Enhanced 3-step workflow** for attaching PDFs to existing Zotero items
@@ -154,6 +154,7 @@ When a Zotero match is found, users get a sophisticated 3-step process:
 #### Step 3: Filename Editing
 - Filename preview and editing before processing
 - Choose between Zotero-based or OCR-based filename
+- Type a filename directly at the first prompt (or at the source-choice prompt) to use it as the terminal-edit default
 - Terminal editing for full control
 - Automatic validation and sanitization
 
@@ -171,7 +172,12 @@ When a Zotero match is found, users get a sophisticated 3-step process:
     - Auto-accept: defaults to apply after timeout (or Enter)
     - Manual review: defaults to skip after timeout; allows applying all or selecting fields (including explicit overwrites)
 
-Configuration: `config.conf [ENRICHMENT]` controls thresholds, weights, and field policy for what can be auto-filled vs manual.
+Configuration: [`config.conf [ENRICHMENT]`](docs/CONFIGURATION.md#enrichment) controls thresholds, weights, and field policy for what can be auto-filled vs manual.
+
+#### Document types and DOI lookup
+- **Type aliases:** Source labels such as `journal-article`, `article-journal`, and `journal_article` are mapped to Zotero `itemType` values through [`document_types.conf`](document_types.conf). The mapping is applied during enrichment scoring and planning, metadata merging, and Zotero item creation or updates. Equivalent aliases do not create a false conflict; configured partial matches contribute a score of `0.3`.
+- **DOI provenance:** Only a DOI from an online API result (`doi_source: online`) or an existing Zotero item (`doi_source: zotero`) triggers a direct DOI lookup. A GROBID-extracted DOI is retained, but does not drive direct lookup because OCR errors can produce an incorrect identifier; title and author searches can still run.
+- **Customization:** See [Document type mappings](docs/CONFIGURATION.md#document-type-mappings) before adding aliases or partial matches. Restart the daemon after changing `document_types.conf`.
 
 ### PDF Splitting Notes
 - Two-up splits use content-based gutter detection with an outer-edge fallback for skewed scans
@@ -273,7 +279,7 @@ data/
 - **MetadataExtractor** - International metadata lookup
 
 ### Planned Enhancements
-- **Ollama 7B Integration** - AI-powered identifier extraction for papers
+- **Ollama Integration** - AI-powered identifier extraction for papers
 - **Academic Metadata APIs** - CrossRef, PubMed, arXiv, OpenAlex
 - **Unified Metadata System** - Smart routing between books and papers
 - **Hybrid Photo Processing** - Experimental document type classification
@@ -289,7 +295,7 @@ For detailed technical architecture and development phases, see the [Implementat
 - CSV logging system
 - Configuration management
 - International metadata sources
-- Ollama 7B installation
+- Ollama installation
 - **Complete interactive paper processing workflow**
 - **3-step UX flow for Zotero PDF attachment**
 - **Enhanced metadata comparison and merging**
@@ -338,7 +344,7 @@ This project follows the coding standards defined in `programming_preferences.md
 
 - **[Implementation Plan](implementation-plan.md)** - Detailed technical roadmap and development phases
 - **[Programming Preferences](programming_preferences.md)** - Coding standards and best practices
-- **[Ollama Setup](ollama-network-sharing.md)** - Ollama 7B installation and configuration
+- **[Ollama Setup](docs/ollama-network-sharing.md)** - Ollama installation and configuration
 - **[GPU Optimization](gpu-optimization-suggestions.md)** - Performance optimization options
 - **[GROBID Setup](GROBID_SETUP.md)** - GROBID integration and configuration guide
 - **[Path Utilities](scripts/PATH_UTILS_README.md)** - WSL/Windows path handling utilities documentation
