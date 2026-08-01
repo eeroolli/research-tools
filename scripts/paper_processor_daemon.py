@@ -83,6 +83,19 @@ from shared_tools.daemon.service_manager import ServiceManager
 from shared_tools.daemon.config_loader import SecureConfigLoader
 from shared_tools.daemon.scanned_papers_logger import ScannedPapersLogger
 
+# Filename language prefixes → ISO 639-1 codes (Zotero-compatible).
+# SE_ is accepted as a Swedish alias; both SE_ and SV_ map to 'sv'.
+SCAN_LANGUAGE_MAP = {
+    'NO_': 'no',  # Norwegian
+    'EN_': 'en',  # English
+    'DE_': 'de',  # German
+    'FI_': 'fi',  # Finnish
+    'SV_': 'sv',  # Swedish (ISO 639-1)
+    'SE_': 'sv',  # Swedish alias (country-style prefix)
+    'DA_': 'da',  # Danish
+}
+SCAN_LANGUAGE_PREFIXES = tuple(SCAN_LANGUAGE_MAP.keys())
+
 
 class PaperProcessorDaemon:
     """Main daemon class."""
@@ -1028,7 +1041,8 @@ class PaperProcessorDaemon:
             metadata: Metadata dict (may already have document_type from extraction)
             
         Returns:
-            Updated metadata dict with confirmed document_type, or None if cancelled
+            Updated metadata dict with confirmed document_type, None if cancelled,
+            or the string 'RESTART' if user requested a full restart.
         """
         # Document type mapping (same as handle_failed_extraction for consistency)
         doc_type_map = {
@@ -1047,91 +1061,126 @@ class PaperProcessorDaemon:
         # Reverse mapping: document_type -> number choice
         reverse_map = {v[0]: k for k, v in doc_type_map.items()}
         
-        current_type = metadata.get('document_type', '').lower()
-        
-        print("\n" + "="*60, flush=True)
-        print(Colors.colorize("📚 DOCUMENT TYPE", ColorScheme.PAGE_TITLE), flush=True)
-        print("="*60, flush=True)
-        print(Colors.colorize("Getting the document type right helps guide search strategies.", ColorScheme.ACTION), flush=True)
-        print(Colors.colorize("This ensures we search the right APIs and ask for relevant fields.", ColorScheme.ACTION), flush=True)
-        print(flush=True)
-        
-        if current_type and current_type in reverse_map:
-            # Show detected type and ask for confirmation
-            current_name = next(name for num, (typ, name) in doc_type_map.items() 
-                              if typ == current_type)
-            print(f"📄 Detected type: {current_name}")
-            print()
-            print(Colors.colorize("[Enter] = Keep this type", ColorScheme.LIST))
-            print(Colors.colorize("[1-9] = Change to a different type", ColorScheme.LIST))
-            print(Colors.colorize("[q] = Cancel and skip this document", ColorScheme.LIST))
-            print()
+        while True:
+            current_type = (metadata.get('document_type') or '').lower()
             
-            print("Document types:")
-            for num, (typ, name) in doc_type_map.items():
-                if num == '0':  # Skip 0, it's just an alias
-                    continue
-                marker = " ← detected" if typ == current_type else ""
-                print(Colors.colorize(f"  [{num}] {name}{marker}", ColorScheme.LIST))
-            print()
+            print("\n" + "="*60, flush=True)
+            print(Colors.colorize("📚 DOCUMENT TYPE", ColorScheme.PAGE_TITLE), flush=True)
+            print("="*60, flush=True)
+            print(Colors.colorize("Getting the document type right helps guide search strategies.", ColorScheme.ACTION), flush=True)
+            print(Colors.colorize("This ensures we search the right APIs and ask for relevant fields.", ColorScheme.ACTION), flush=True)
+            print(flush=True)
             
-            try:
-                choice = input("Your choice: ").strip().lower()
+            if current_type and current_type in reverse_map:
+                # Show detected type and ask for confirmation
+                current_name = next(name for num, (typ, name) in doc_type_map.items() 
+                                  if typ == current_type)
+                print(f"📄 Detected type: {current_name}")
+                print()
+                print(Colors.colorize("[Enter] = Keep this type", ColorScheme.LIST))
+                print(Colors.colorize("[1-9] = Change to a different type", ColorScheme.LIST))
+                print(Colors.colorize("[z] = Back to year confirmation", ColorScheme.LIST))
+                print(Colors.colorize("[r] = Restart from beginning", ColorScheme.LIST))
+                print(Colors.colorize("[q] = Cancel and skip this document", ColorScheme.LIST))
+                print()
                 
-                if choice == 'q' or choice == 'quit':
-                    return None
-                elif choice == '':
-                    # Keep detected type
-                    print(f"✅ Keeping: {current_name}")
-                    metadata['_type_confirmed'] = True
-                    return metadata
-                elif choice in doc_type_map:
-                    # Change type
-                    new_type, new_name = doc_type_map[choice]
-                    metadata['document_type'] = new_type
-                    print(f"✅ Changed to: {new_name}")
-                    metadata['_type_confirmed'] = True
-                    return metadata
-                else:
-                    print_unacceptable_input()
-                    print("Keeping the detected type.")
-                    return metadata
+                print("Document types:")
+                for num, (typ, name) in doc_type_map.items():
+                    if num == '0':  # Skip 0, it's just an alias
+                        continue
+                    marker = " ← detected" if typ == current_type else ""
+                    print(Colors.colorize(f"  [{num}] {name}{marker}", ColorScheme.LIST))
+                print()
+                
+                try:
+                    choice = input("Your choice: ").strip().lower()
                     
-            except (KeyboardInterrupt, EOFError):
-                print("\n❌ Cancelled")
-                return None
-        else:
-            # No type detected - ask user to select
-            print(Colors.colorize("No document type detected. Please select:", ColorScheme.ACTION))
-            print()
-            print(Colors.colorize("[1] Journal Article", ColorScheme.LIST))
-            print(Colors.colorize("[2] Book Chapter", ColorScheme.LIST))
-            print(Colors.colorize("[3] Conference Paper", ColorScheme.LIST))
-            print(Colors.colorize("[4] Book", ColorScheme.LIST))
-            print(Colors.colorize("[5] Thesis/Dissertation", ColorScheme.LIST))
-            print(Colors.colorize("[6] Report", ColorScheme.LIST))
-            print(Colors.colorize("[7] News Article", ColorScheme.LIST))
-            print(Colors.colorize("[8] Working Paper/preprint", ColorScheme.LIST))
-            print(Colors.colorize("[9] Other", ColorScheme.LIST))
-            print()
-            
-            try:
-                while True:
-                    choice = input("Document type: ").strip()
-                    if choice in doc_type_map:
-                        doc_type, doc_type_name = doc_type_map[choice]
-                        metadata['document_type'] = doc_type
-                        print(f"✅ Selected: {doc_type_name}")
+                    if choice == 'q' or choice == 'quit':
+                        return None
+                    elif choice == 'r':
+                        print("🔄 Restarting from beginning...")
+                        return 'RESTART'
+                    elif choice == 'z':
+                        print("⬅️  Going back to year confirmation...")
+                        metadata.pop('_year_confirmed', None)
+                        year_result = self.prompt_for_year(metadata, allow_back=True, force_prompt=True)
+                        if year_result == 'RESTART':
+                            return 'RESTART'
+                        if year_result == 'BACK':
+                            # Year is the previous interactive step before doc type;
+                            # treat as restart to preprocess preview.
+                            return 'RESTART'
+                        metadata = year_result
+                        continue
+                    elif choice == '':
+                        # Keep detected type
+                        print(f"✅ Keeping: {current_name}")
                         metadata['_type_confirmed'] = True
                         return metadata
-                    elif choice.lower() in ['q', 'quit', 'cancel']:
-                        return None
+                    elif choice in doc_type_map:
+                        # Change type
+                        new_type, new_name = doc_type_map[choice]
+                        metadata['document_type'] = new_type
+                        print(f"✅ Changed to: {new_name}")
+                        metadata['_type_confirmed'] = True
+                        return metadata
                     else:
                         print_unacceptable_input()
+                        print("Keeping the detected type.")
+                        metadata['_type_confirmed'] = True
+                        return metadata
                         
-            except (KeyboardInterrupt, EOFError):
-                print("\n❌ Cancelled")
-                return None
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Cancelled")
+                    return None
+            else:
+                # No type detected - ask user to select
+                print(Colors.colorize("No document type detected. Please select:", ColorScheme.ACTION))
+                print()
+                print(Colors.colorize("[1] Journal Article", ColorScheme.LIST))
+                print(Colors.colorize("[2] Book Chapter", ColorScheme.LIST))
+                print(Colors.colorize("[3] Conference Paper", ColorScheme.LIST))
+                print(Colors.colorize("[4] Book", ColorScheme.LIST))
+                print(Colors.colorize("[5] Thesis/Dissertation", ColorScheme.LIST))
+                print(Colors.colorize("[6] Report", ColorScheme.LIST))
+                print(Colors.colorize("[7] News Article", ColorScheme.LIST))
+                print(Colors.colorize("[8] Working Paper/preprint", ColorScheme.LIST))
+                print(Colors.colorize("[9] Other", ColorScheme.LIST))
+                print(Colors.colorize("[z] = Back to year confirmation", ColorScheme.LIST))
+                print(Colors.colorize("[r] = Restart from beginning", ColorScheme.LIST))
+                print()
+                
+                try:
+                    while True:
+                        choice = input("Document type: ").strip().lower()
+                        if choice in doc_type_map:
+                            doc_type, doc_type_name = doc_type_map[choice]
+                            metadata['document_type'] = doc_type
+                            print(f"✅ Selected: {doc_type_name}")
+                            metadata['_type_confirmed'] = True
+                            return metadata
+                        elif choice == 'z':
+                            print("⬅️  Going back to year confirmation...")
+                            metadata.pop('_year_confirmed', None)
+                            year_result = self.prompt_for_year(metadata, allow_back=True, force_prompt=True)
+                            if year_result == 'RESTART':
+                                return 'RESTART'
+                            if year_result == 'BACK':
+                                return 'RESTART'
+                            metadata = year_result
+                            break  # re-show doc type menu (outer while)
+                        elif choice == 'r':
+                            print("🔄 Restarting from beginning...")
+                            return 'RESTART'
+                        elif choice in ['q', 'quit', 'cancel']:
+                            return None
+                        else:
+                            print_unacceptable_input()
+                    continue
+                        
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Cancelled")
+                    return None
     
     def _display_metadata_universal(self, metadata: dict):
         """Universal metadata display that handles any document type and source.
@@ -1447,6 +1496,49 @@ class PaperProcessorDaemon:
             else:
                 print_unacceptable_input()
     
+    def _run_zotero_selection_loop(
+        self,
+        starting_metadata: dict,
+        pdf_path: Path,
+        *,
+        force_prompt_year: bool = False,
+    ) -> tuple:
+        """Run Zotero selection/search loop with consistent z/r/q semantics.
+
+        Semantics:
+        - back_to_authors: re-enter search at author selection (stay in loop)
+        - back: leave loop so caller can re-show document type
+        - restart: restart processing for this same PDF
+        - quit: quit this PDF -> move to manual review
+        """
+        current_metadata = starting_metadata
+        prompt_year = force_prompt_year
+        while True:
+            action_value, selected_item_value, current_metadata = self.search_and_display_local_zotero(
+                current_metadata,
+                force_prompt_year=prompt_year,
+            )
+            # Only force year on the first entry (e.g. user chose change author/year).
+            prompt_year = False
+
+            if action_value == 'back_to_authors':
+                print("⬅️  Going back to author selection...")
+                if current_metadata.get('_all_authors'):
+                    current_metadata['authors'] = current_metadata['_all_authors'].copy()
+                continue
+            if action_value == 'back':
+                print("⬅️  Going back to previous step...")
+                return ('back', None, current_metadata)
+            if action_value == 'restart':
+                print("🔄 Restarting from beginning...")
+                return ('restart', None, current_metadata)
+            if action_value == 'quit':
+                print("📝 Quitting current PDF; moving to manual review...")
+                self.move_to_manual_review(pdf_path)
+                return ('handled', None, current_metadata)
+
+            return (action_value, selected_item_value, current_metadata)
+
     def search_and_display_local_zotero(self, metadata: dict, force_prompt_year: bool = False) -> tuple:
         """Interactive Zotero search with author selection and item selection.
         
@@ -1466,7 +1558,9 @@ class PaperProcessorDaemon:
             
         Returns:
             Tuple of (action, selected_item, updated_metadata):
-            - action: 'select', 'search', 'edit', 'create', 'skip', 'quit', or 'none'
+            - action: 'select', 'search', 'edit', 'create', 'skip', 'quit',
+              'back' (leave to document type), 'back_to_authors' (re-show author select),
+              'restart', 'manual', or 'none'
             - selected_item: The selected Zotero item dict (if action='select')
             - updated_metadata: Metadata dict with any edits made during author selection
         """
@@ -1487,7 +1581,7 @@ class PaperProcessorDaemon:
                 print(Colors.colorize("[1] Enter a different year and search again", ColorScheme.LIST))
                 print(Colors.colorize("[2] Proceed to create new Zotero item using the current metadata (title, authors, year, DOI, etc.)", ColorScheme.LIST))
                 print(Colors.colorize("[3] Move to manual review", ColorScheme.LIST))
-                print(Colors.colorize("  (z) Back to previous step", ColorScheme.LIST))
+                print(Colors.colorize("  (z) Back to author selection", ColorScheme.LIST))
                 print()
 
                 while True:
@@ -1504,7 +1598,7 @@ class PaperProcessorDaemon:
                     elif final_choice == '3':
                         return ('manual', None, metadata)
                     elif final_choice == 'z':
-                        return ('back', None, metadata)
+                        return ('back_to_authors', None, metadata)
                     else:
                         print_unacceptable_input()
 
@@ -1677,6 +1771,9 @@ class PaperProcessorDaemon:
                     pass
                 # #endregion
                 if action == 'select':
+                    return (action, item, metadata)
+                # Pass through navigation / menu actions (do not fall into author refinement)
+                if action in ('back', 'back_to_authors', 'restart', 'quit', 'search', 'edit', 'create', 'skip'):
                     return (action, item, metadata)
                 # If user doesn't select from matches, allow them to provide author for more refined search
                 if not has_author:
@@ -1881,7 +1978,7 @@ class PaperProcessorDaemon:
                     print(Colors.colorize("[1] Try again later (restart search)", ColorScheme.LIST))
                     print(Colors.colorize("[2] Proceed to create new Zotero item using the current metadata (title, authors, year, DOI, etc.)", ColorScheme.LIST))
                     print(Colors.colorize("[3] Move to manual review", ColorScheme.LIST))
-                    print(Colors.colorize("  (z) Back to previous step", ColorScheme.LIST))
+                    print(Colors.colorize("  (z) Back to author selection", ColorScheme.LIST))
                     print()
                     
                     while True:
@@ -1893,7 +1990,7 @@ class PaperProcessorDaemon:
                         elif final_choice == '3':
                             return ('manual', None, metadata)
                         elif final_choice == 'z':
-                            return ('back', None, metadata)
+                            return ('back_to_authors', None, metadata)
                         else:
                             print_unacceptable_input()
                     # Unreachable
@@ -4717,13 +4814,11 @@ class PaperProcessorDaemon:
         Returns:
             True if file should be processed (academic paper)
         """
-        # Only process files with academic paper prefixes
-        prefixes = ['NO_', 'EN_', 'DE_', 'SV_', 'FI_', 'DA_']
         name_lower = filename.lower()
         # Ignore our own generated split artifacts to prevent double-processing
         if name_lower.endswith('_split.pdf'):
             return False
-        return any(filename.startswith(p) for p in prefixes)
+        return any(filename.startswith(p) for p in SCAN_LANGUAGE_PREFIXES)
 
     # ------------------------
     # Document separator (one PDF -> multiple PDFs)
@@ -4733,12 +4828,12 @@ class PaperProcessorDaemon:
     def _split_prefix_and_stem(filename: str) -> tuple[str, str]:
         """Return (scan_prefix, base_stem_without_prefix_and_ext).
 
-        Scan prefix must be one of: NO_, EN_, DE_, SV_, FI_, DA_.
+        Scan prefix must be one of SCAN_LANGUAGE_PREFIXES
+        (NO_, EN_, DE_, SV_, SE_, FI_, DA_).
         """
         name = str(filename)
-        prefix_candidates = ("NO_", "EN_", "DE_", "SV_", "FI_", "DA_")
         prefix = ""
-        for p in prefix_candidates:
+        for p in SCAN_LANGUAGE_PREFIXES:
             if name.startswith(p):
                 prefix = p
                 break
@@ -5163,8 +5258,9 @@ class PaperProcessorDaemon:
                             title, authors, year_str, journal
                         )
                         if go_back:
-                            print("⬅️  Going back to previous step...")
-                            return 'RESTART'
+                            # Leave review page; proceed with current params (extraction is non-interactive).
+                            print("⬅️  Leaving search-parameter review...")
+                            skip_search = False
                         if skip_search:
                             has_search_params = False
                         else:
@@ -5552,7 +5648,7 @@ class PaperProcessorDaemon:
                                 break
                             elif year_input.lower() == 'z':
                                 print("⬅️  Going back to previous step...")
-                                return
+                                return 'RESTART'
                             elif year_input.lower() == 'r':
                                 # User wants to restart - go back to beginning of process_paper
                                 print("🔄 Restarting from beginning...")
@@ -5584,9 +5680,9 @@ class PaperProcessorDaemon:
                     year_result = self.prompt_for_year(metadata, allow_back=True)
                     # Handle special return values
                     if year_result == 'BACK':
-                        # User cancelled - return gracefully, daemon continues watching
-                        print("\n⏸️  Returning to watch mode - ready for next scan")
-                        return
+                        # Previous interactive step is preprocess preview → restart paper
+                        print("⬅️  Going back to previous step...")
+                        return 'RESTART'
                     elif year_result == 'RESTART':
                         # User wants to restart processing this file
                         print("🔄 Restarting from beginning...")
@@ -5612,6 +5708,8 @@ class PaperProcessorDaemon:
                 else:
                     # Confirm/select document type early (after year entry)
                     metadata = self.confirm_document_type_early(metadata)
+                    if metadata == 'RESTART':
+                        return 'RESTART'
                     if metadata is None:
                         # User cancelled
                         self.move_to_failed(pdf_path)
@@ -5669,39 +5767,42 @@ class PaperProcessorDaemon:
             should_restart_search = False
             
             def _run_zotero_selection_loop(starting_metadata: dict, *, force_prompt_year: bool = False):
-                """Run Zotero selection/search loop with consistent z/r/q semantics.
+                return self._run_zotero_selection_loop(
+                    starting_metadata,
+                    pdf_path,
+                    force_prompt_year=force_prompt_year,
+                )
 
-                Semantics:
-                - back: go back one page (stay on this PDF) -> re-enter selection
-                - restart: restart processing for this same PDF -> signal caller
-                - quit: quit this PDF -> move to manual review
-                """
-                current_metadata = starting_metadata
-                while True:
-                    action_value, selected_item_value, current_metadata = self.search_and_display_local_zotero(
-                        current_metadata,
-                        force_prompt_year=force_prompt_year,
-                    )
-
-                    if action_value == 'back':
-                        print("⬅️  Going back to previous step...")
-                        continue
-                    if action_value == 'restart':
-                        print("🔄 Restarting from beginning...")
-                        return ('restart', None, current_metadata)
-                    if action_value == 'quit':
-                        print("📝 Quitting current PDF; moving to manual review...")
-                        self.move_to_manual_review(pdf_path)
-                        return ('handled', None, current_metadata)
-
-                    return (action_value, selected_item_value, current_metadata)
+            def _reconfirm_doc_type_after_back(meta: dict) -> tuple:
+                """After author-select back: re-show doc type, then return next Zotero action."""
+                print("⬅️  Going back to document type...")
+                meta = dict(meta)
+                meta.pop('_type_confirmed', None)
+                type_result = self.confirm_document_type_early(meta)
+                if type_result is None:
+                    self.move_to_failed(pdf_path)
+                    return ('handled', None, meta)
+                if type_result == 'RESTART':
+                    return ('restart', None, meta)
+                return _run_zotero_selection_loop(type_result)
 
             if self.local_zotero:
-                action, selected_item, updated_metadata = _run_zotero_selection_loop(updated_metadata)
-                if action == 'restart':
-                    return 'RESTART'
-                if action == 'handled':
-                    return
+                while True:
+                    action, selected_item, updated_metadata = _run_zotero_selection_loop(updated_metadata)
+                    if action == 'restart':
+                        return 'RESTART'
+                    if action == 'handled':
+                        return
+                    if action == 'back':
+                        action, selected_item, updated_metadata = _reconfirm_doc_type_after_back(updated_metadata)
+                        if action == 'restart':
+                            return 'RESTART'
+                        if action == 'handled':
+                            return
+                        if action == 'back':
+                            continue
+                        break
+                    break
             
             def _handle_zotero_action(action_value, selected_item_value, metadata_value):
                 """Handle a resolved Zotero action.
@@ -5709,13 +5810,16 @@ class PaperProcessorDaemon:
                 Returns:
                     - 'handled': action completed for this paper
                     - 'continue_selection': return to Zotero selection flow
+                    - 'back_to_doc_type': author-select back; re-show document type
                     - 'exit': stop current paper processing
                     - 'restart': restart current paper from beginning
                 """
                 action_value = (str(action_value).strip().lower() if action_value is not None else 'none')
                 self.logger.info(f"Zotero search action resolved to: {action_value}")
 
-                if action_value == 'select' and selected_item_value:
+                if action_value == 'back':
+                    return 'back_to_doc_type'
+                elif action_value == 'select' and selected_item_value:
                     # User selected an item - offer to attach PDF (use preprocessed working PDF)
                     selection_outcome = self.handle_item_selected(pdf_to_use, metadata_value, selected_item_value)
                     if selection_outcome == 'back_to_item_selection':
@@ -5738,8 +5842,10 @@ class PaperProcessorDaemon:
                         metadata_value,
                         force_prompt_year=True,
                     )
+                    if action2 == 'back':
+                        return 'back_to_doc_type'
                     action2_outcome = _handle_zotero_action(action2, selected_item2, metadata_value)
-                    if action2_outcome in ('continue_selection', 'handled'):
+                    if action2_outcome in ('continue_selection', 'handled', 'back_to_doc_type'):
                         return action2_outcome
                     if action2_outcome == 'restart':
                         return 'restart'
@@ -5753,8 +5859,12 @@ class PaperProcessorDaemon:
                         # Re-run Zotero search with edited metadata
                         print("\n🔍 Searching Zotero with edited metadata...")
                         action2, selected_item2, final_metadata = _run_zotero_selection_loop(edited_metadata)
+                        if action2 == 'back':
+                            metadata_value.clear()
+                            metadata_value.update(final_metadata)
+                            return 'back_to_doc_type'
                         action2_outcome = _handle_zotero_action(action2, selected_item2, final_metadata)
-                        if action2_outcome in ('continue_selection', 'handled'):
+                        if action2_outcome in ('continue_selection', 'handled', 'back_to_doc_type'):
                             return action2_outcome
                         if action2_outcome == 'restart':
                             return 'restart'
@@ -5801,12 +5911,30 @@ class PaperProcessorDaemon:
             # Step 4: Handle action from Zotero search
             while True:
                 action_outcome = _handle_zotero_action(action, selected_item, updated_metadata)
+                if action_outcome == 'back_to_doc_type':
+                    action, selected_item, updated_metadata = _reconfirm_doc_type_after_back(updated_metadata)
+                    if action == 'restart':
+                        return 'RESTART'
+                    if action == 'handled':
+                        return
+                    if action == 'back':
+                        continue
+                    continue
                 if action_outcome == 'continue_selection':
                     action, selected_item, updated_metadata = _run_zotero_selection_loop(updated_metadata)
                     if action == 'restart':
                         return 'RESTART'
                     if action == 'handled':
                         return
+                    if action == 'back':
+                        action, selected_item, updated_metadata = _reconfirm_doc_type_after_back(updated_metadata)
+                        if action == 'restart':
+                            return 'RESTART'
+                        if action == 'handled':
+                            return
+                        if action == 'back':
+                            continue
+                        continue
                     continue
                 if action_outcome == 'restart':
                     return 'RESTART'
@@ -10713,7 +10841,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             elif choice == 'd':
                 return ('skip', None)
             elif choice == 'z':
-                return ('back', None)
+                return ('back_to_authors', None)
             elif choice == 'r':
                 return ('restart', None)
             elif choice == 'q':
@@ -11731,7 +11859,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         return extraction_result
     
     def _detect_language_from_filename(self, pdf_path: Path) -> Optional[str]:
-        """Detect language from filename prefix (NO_, EN_, DE_, etc.)
+        """Detect language from filename prefix (NO_, EN_, DE_, SV_/SE_, etc.)
         
         Args:
             pdf_path: Path to PDF file
@@ -11740,17 +11868,7 @@ if ($hwnd -ne [IntPtr]::Zero) {{
             ISO 639-1 language code (no, en, de, fi, sv, da) for Zotero compatibility
         """
         filename = pdf_path.name.upper()
-        # Map filename prefixes to ISO 639-1 language codes (for Zotero compatibility)
-        language_map = {
-            'NO_': 'no',  # Norwegian
-            'EN_': 'en',  # English
-            'DE_': 'de',  # German
-            'FI_': 'fi',  # Finnish
-            'SV_': 'sv',  # Swedish (ISO code is 'sv')
-            'DA_': 'da'   # Danish
-        }
-        
-        for prefix, lang_code in language_map.items():
+        for prefix, lang_code in SCAN_LANGUAGE_MAP.items():
             if filename.startswith(prefix):
                 return lang_code
         

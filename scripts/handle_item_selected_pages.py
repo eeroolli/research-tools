@@ -5,10 +5,28 @@ navigation system. Pages are self-contained units with display, input validation
 and navigation handlers.
 """
 
+from pathlib import Path
 from typing import Dict, List
 from shared_tools.ui.navigation import Page, NavigationResult
 from shared_tools.utils.filename_generator import FilenameGenerator
 from shared_tools.utils.enrichment_ui import parse_index_selection, clear_enrichment_context
+
+
+def _preprocess_restart_source(ctx, daemon) -> Path:
+    """Original two-up scan for preprocess restarts — never the already-split working PDF."""
+    src = getattr(daemon, '_original_scan_path', None)
+    if src is not None and Path(src).exists():
+        return Path(src)
+    return Path(ctx.get('original_pdf') or ctx['pdf_path'])
+
+
+def _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state) -> None:
+    """Update preview context and daemon reuse state after a preprocess restart."""
+    ctx['processed_pdf'] = processed_pdf
+    ctx['preprocessing_state'] = new_state
+    ctx['original_pdf'] = _preprocess_restart_source(ctx, daemon)
+    daemon._working_pdf = processed_pdf
+    daemon._preprocessing_state = new_state
 
 
 def create_review_and_proceed_page(daemon) -> Page:
@@ -1093,7 +1111,6 @@ def create_proposed_actions_page(daemon) -> Page:
         
         # Step 1: Reuse early preprocessing from process_paper when available
         # (avoids a second split/trim pass on an already-corrected PDF).
-        from pathlib import Path
         early_pdf = getattr(daemon, '_working_pdf', None)
         early_state = getattr(daemon, '_preprocessing_state', None)
         if (
@@ -1121,6 +1138,7 @@ def create_proposed_actions_page(daemon) -> Page:
         try:
             import json, os, time
             log_path = r'f:\prog\research-tools\.cursor\debug.log' if os.name == 'nt' else '/mnt/f/prog/research-tools/.cursor/debug.log'
+            restart_src = _preprocess_restart_source(ctx, daemon)
             with open(log_path, 'a', encoding='utf-8') as f:
                 f.write(json.dumps({
                     'sessionId': 'debug-session',
@@ -1131,7 +1149,7 @@ def create_proposed_actions_page(daemon) -> Page:
                     'data': {
                         'processed_pdf': str(processed_pdf) if processed_pdf else None,
                         'processed_pdf_is_original': str(processed_pdf) == str(pdf_path) if processed_pdf else False,
-                        'original_pdf': str(pdf_path),
+                        'original_pdf': str(restart_src),
                         'split_succeeded': preprocessing_state.get('split_succeeded', False),
                         'split_attempted': preprocessing_state.get('split_attempted', False),
                         'split_method': preprocessing_state.get('split_method', 'none')
@@ -1143,7 +1161,7 @@ def create_proposed_actions_page(daemon) -> Page:
         
         # Store processed PDF and state in context for preview page
         ctx['processed_pdf'] = processed_pdf
-        ctx['original_pdf'] = pdf_path
+        ctx['original_pdf'] = _preprocess_restart_source(ctx, daemon)
         ctx['preprocessing_state'] = preprocessing_state
         
         # Navigate to PDF preview page
@@ -1207,7 +1225,6 @@ def create_pdf_conflict_decision_page(daemon) -> Page:
         return candidates[0]
 
     def _preprocess_then_show_preview(ctx):
-        from pathlib import Path
         pdf_path = ctx['pdf_path']
         early_pdf = getattr(daemon, '_working_pdf', None)
         early_state = getattr(daemon, '_preprocessing_state', None)
@@ -1228,7 +1245,7 @@ def create_pdf_conflict_decision_page(daemon) -> Page:
             )
 
         ctx['processed_pdf'] = processed_pdf
-        ctx['original_pdf'] = pdf_path
+        ctx['original_pdf'] = _preprocess_restart_source(ctx, daemon)
         ctx['preprocessing_state'] = preprocessing_state
         return NavigationResult.show_page('pdf_preview')
 
@@ -1548,7 +1565,7 @@ def create_pdf_preview_page(daemon) -> Page:
             'z': handler_z
         },
         default='1',
-        back_page='pdf_preview',
+        back_page='proposed_actions',
         quit_action=quit_action,
         timeout_seconds=daemon.prompt_timeout * 2  # 2x timeout for PDF inspection
     )
@@ -1629,7 +1646,7 @@ def _handle_separate_documents(ctx, daemon):
 
 def _handle_drop_border_removal(ctx, daemon):
     """Handler for dropping border removal - reprocess PDF."""
-    original_pdf = ctx['pdf_path']
+    original_pdf = _preprocess_restart_source(ctx, daemon)
     preprocessing_state = ctx.get('preprocessing_state', {}).copy()
     preprocessing_state['border_removal'] = False
     print("\n🔄 Restarting preprocessing without border removal...")
@@ -1642,15 +1659,14 @@ def _handle_drop_border_removal(ctx, daemon):
         manual_split_ratio=preprocessing_state.get('manual_split_ratio'),
     )
     
-    ctx['processed_pdf'] = processed_pdf
-    ctx['preprocessing_state'] = new_state
+    _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
     # Stay on preview page to show updated result
     return NavigationResult.show_page('pdf_preview')
 
 
 def _handle_drop_split(ctx, daemon):
     """Handler for dropping split - reprocess PDF."""
-    original_pdf = ctx['pdf_path']
+    original_pdf = _preprocess_restart_source(ctx, daemon)
     preprocessing_state = ctx.get('preprocessing_state', {}).copy()
     preprocessing_state['split_method'] = 'none'
     print("\n🔄 Restarting preprocessing without split...")
@@ -1662,14 +1678,13 @@ def _handle_drop_split(ctx, daemon):
         trim_leading=preprocessing_state.get('trim_leading', True)
     )
     
-    ctx['processed_pdf'] = processed_pdf
-    ctx['preprocessing_state'] = new_state
+    _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
     return NavigationResult.show_page('pdf_preview')
 
 
 def _handle_use_5050_split(ctx, daemon):
     """Handler for using 50/50 split instead - reprocess PDF."""
-    original_pdf = ctx['pdf_path']
+    original_pdf = _preprocess_restart_source(ctx, daemon)
     preprocessing_state = ctx.get('preprocessing_state', {}).copy()
     print("\n🔄 Restarting preprocessing with 50/50 split...")
     
@@ -1680,14 +1695,13 @@ def _handle_use_5050_split(ctx, daemon):
         trim_leading=preprocessing_state.get('trim_leading', True)
     )
     
-    ctx['processed_pdf'] = processed_pdf
-    ctx['preprocessing_state'] = new_state
+    _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
     return NavigationResult.show_page('pdf_preview')
 
 
 def _handle_improve_split_gutter_and_borders(ctx, daemon):
     """Handler for rerunning split using gutter detection + border removal."""
-    original_pdf = ctx['pdf_path']
+    original_pdf = _preprocess_restart_source(ctx, daemon)
     preprocessing_state = ctx.get('preprocessing_state', {}).copy()
     print("\n🔄 Improving split (gutter detection + border removal)...")
     
@@ -1698,14 +1712,13 @@ def _handle_improve_split_gutter_and_borders(ctx, daemon):
         trim_leading=preprocessing_state.get('trim_leading', True)
     )
     
-    ctx['processed_pdf'] = processed_pdf
-    ctx['preprocessing_state'] = new_state
+    _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
     return NavigationResult.show_page('pdf_preview')
 
 
 def _handle_drop_trimming(ctx, daemon):
     """Handler for dropping trimming - reprocess PDF."""
-    original_pdf = ctx['pdf_path']
+    original_pdf = _preprocess_restart_source(ctx, daemon)
     preprocessing_state = ctx.get('preprocessing_state', {}).copy()
     print("\n🔄 Restarting preprocessing without trimming...")
     
@@ -1717,14 +1730,13 @@ def _handle_drop_trimming(ctx, daemon):
         manual_split_ratio=preprocessing_state.get('manual_split_ratio'),
     )
     
-    ctx['processed_pdf'] = processed_pdf
-    ctx['preprocessing_state'] = new_state
+    _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
     return NavigationResult.show_page('pdf_preview')
 
 
 def _handle_add_trimming(ctx, daemon):
     """Handler for adding trimming - reprocess PDF."""
-    original_pdf = ctx['pdf_path']
+    original_pdf = _preprocess_restart_source(ctx, daemon)
     preprocessing_state = ctx.get('preprocessing_state', {}).copy()
     print("\n🔄 Restarting preprocessing with trimming...")
     
@@ -1736,14 +1748,13 @@ def _handle_add_trimming(ctx, daemon):
         manual_split_ratio=preprocessing_state.get('manual_split_ratio'),
     )
     
-    ctx['processed_pdf'] = processed_pdf
-    ctx['preprocessing_state'] = new_state
+    _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
     return NavigationResult.show_page('pdf_preview')
 
 
 def _handle_manual_split(ctx, daemon):
     """Handler for manual split - prompt for ratio, then restart full pipeline."""
-    original_pdf = ctx['pdf_path']
+    original_pdf = _preprocess_restart_source(ctx, daemon)
     preprocessing_state = ctx.get('preprocessing_state', {}).copy()
     
     print("\n📐 Manual Split Definition")
@@ -1782,9 +1793,7 @@ def _handle_manual_split(ctx, daemon):
         trim_leading=preprocessing_state.get('trim_leading', False),
         manual_split_ratio=ratio,
     )
-    ctx['processed_pdf'] = processed_pdf
-    ctx['preprocessing_state'] = new_state
-    ctx['original_pdf'] = original_pdf
+    _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
     return NavigationResult.show_page('pdf_preview')
 
 
