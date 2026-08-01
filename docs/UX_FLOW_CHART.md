@@ -573,9 +573,18 @@ paper flow.
 
 ### Non-Page Prompt Back Semantics
 
-For key non-page prompts (for example year confirmation and search-parameter review),
-`z` is treated as one-step back to the previous workflow stage. Any partial edits made
-inside the current prompt may be discarded when going back.
+The metadata and Zotero search prompts use these explicit `z` routes:
+
+- **Author selection** → document type. The daemon leaves the search loop before
+  showing document type again; it does not redisplay the same author page.
+- **Zotero matches or final no-match menu** → author selection. The complete detected
+  author list is restored before the author choices are shown again.
+- **Document type** → year confirmation. After the year is confirmed or changed, the
+  document-type menu is shown again.
+- **Year confirmation reached from document type** → restart the same scan at the
+  early preprocessing/preview flow.
+
+Partial edits made inside the stage being left may be discarded.
 
 ---
 

@@ -1,6 +1,12 @@
 # Explore manual split trim flow
 _Exported on 8/1/2026 at 14:49:13 GMT+2 from Cursor (3.13.25)_
 
+> **Status: resolved (August 2026).** The current preview handlers preserve
+> `manual_split_ratio` when trimming or border-removal settings change, and
+> item-selected preprocessing restarts from the original scan. Regression coverage
+> is in `tests/test_manual_split_handler.py`. The report below describes the pre-fix
+> behavior and is retained as investigation history; its line numbers are not current.
+
 ---
 
 **User**
