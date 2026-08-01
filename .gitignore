@@ -25,3 +25,7 @@ test_temp/
 
 # Cursor IDE plans
 .cursor/
+
+# UltraEdit backup files
+*.bak
+
