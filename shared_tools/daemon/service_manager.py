@@ -87,6 +87,9 @@ class ServiceManager:
         self.grobid_client: Optional[GrobidClient] = None
         self.ollama_client: Optional[OllamaClient] = None
         self.ollama_process: Optional[subprocess.Popen] = None
+        # True after a successful remote wake/health proves the host is up (not asleep).
+        # Wake-on-LAN is per-machine; do not re-wait for each service at startup.
+        self._remote_host_awake = False
         
         # Detect if services are local
         self.is_local_grobid = self._is_localhost(self.grobid_host)
@@ -103,6 +106,76 @@ class ServiceManager:
             True if host is localhost
         """
         return host.lower() in ('localhost', '127.0.0.1', '::1', '0.0.0.0')
+
+    def _wake_remote_p1_service(self, service: str, *, wait_for_service: bool = True) -> bool:
+        """Wake p1 via ackerstr Ensure-P1Service if the remote host may be asleep.
+
+        Uses F:\\prog\\ackerstr\\scripts\\Ensure-P1Service.ps1 (or WSL bash twin).
+        Returns True if the ensure script exits 0, False if missing/failed.
+        Localhost services skip this (no-op True).
+
+        If the host is already known awake (e.g. GROBID answered), skips the long
+        wake-and-poll — Ollama being down is a service issue, not sleep.
+
+        wait_for_service: when False, only send a magic packet if needed and return
+        quickly (used for lazy Ollama startup checks).
+        """
+        if service == "grobid" and self.is_local_grobid:
+            return True
+        if service == "ollama" and self.is_local_ollama:
+            return True
+
+        if self._remote_host_awake:
+            self.logger.debug(
+                "Remote host already awake; skipping Wake-on-LAN wait for %s", service
+            )
+            return True
+
+        timeout = max(30, int(self.health_check_timeout) * 10)
+        if not wait_for_service:
+            # Quick path: probe once; if down, one short wake poll (host may be sleeping).
+            timeout = min(timeout, 15)
+
+        ps1 = Path(r"F:\prog\ackerstr\scripts\Ensure-P1Service.ps1")
+        sh = Path("/mnt/f/prog/ackerstr/scripts/ensure-p1-service.sh")
+
+        try:
+            if ps1.is_file():
+                cmd = [
+                    "pwsh", "-NoProfile", "-File", str(ps1),
+                    "-Service", service, "-TimeoutSec", str(timeout),
+                ]
+                self.logger.info("Ensuring remote p1 %s (Wake-on-LAN if asleep)...", service)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 30)
+                if result.stdout:
+                    self.logger.info(result.stdout.strip())
+                if result.returncode == 0:
+                    self._remote_host_awake = True
+                    return True
+                if result.stderr:
+                    self.logger.warning(result.stderr.strip())
+                return False
+
+            if sh.is_file():
+                cmd = ["bash", str(sh), service, str(timeout)]
+                self.logger.info("Ensuring remote p1 %s via bash (Wake-on-LAN if asleep)...", service)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 30)
+                if result.stdout:
+                    self.logger.info(result.stdout.strip())
+                if result.returncode == 0:
+                    self._remote_host_awake = True
+                    return True
+                if result.stderr:
+                    self.logger.warning(result.stderr.strip())
+                return False
+
+            self.logger.debug(
+                "Ensure-P1Service not found; skipping Wake-on-LAN (see ackerstr scripts/Wake-on-LAN-P1.md)"
+            )
+            return False
+        except Exception as exc:
+            self.logger.warning("Wake-on-LAN ensure for %s failed: %s", service, exc)
+            return False
     
     def initialize_grobid(self) -> bool:
         """Initialize GROBID service.
@@ -139,6 +212,9 @@ class ServiceManager:
             ssh_host = (self.grobid_remote_ssh_host or primary_host).strip()
             self.logger.info(f"Auto-start enabled for remote GROBID; attempting remote start on {ssh_host}...")
             self._try_remote_grobid_start(ssh_host)
+
+        if not is_primary_local:
+            self._wake_remote_p1_service("grobid")
         
         last_error = None
         
@@ -157,6 +233,8 @@ class ServiceManager:
             
             if is_available:
                 self.grobid_ready = True
+                if not self.is_local_grobid:
+                    self._remote_host_awake = True
                 location = "Local" if self.is_local_grobid else f"Remote ({self.grobid_host})"
                 self.logger.info(f"GROBID initialized successfully ({location})")
                 return True
@@ -222,12 +300,18 @@ class ServiceManager:
         
         # Create Ollama client (it loads config internally)
         self.ollama_client = OllamaClient()
+
+        # Do not run a long Wake-on-LAN wait here. GROBID already woke/proved the
+        # host when possible; Ollama is lazy and may be down even when p1 is awake.
+        # A full Ensure-P1Service poll for :11434 was taking ~50–90s at daemon start.
         
         # Just check availability, don't start yet
-        is_available, error_msg = self.check_ollama_health()
+        is_available, error_msg = self.check_ollama_health(quick=True)
         
         if is_available:
             self.ollama_ready = True
+            if not self.is_local_ollama:
+                self._remote_host_awake = True
             location = "Local" if self.is_local_ollama else f"Remote ({self.ollama_host})"
             self.logger.info(f"Ollama available ({location})")
             return True
@@ -252,10 +336,15 @@ class ServiceManager:
                 self.grobid_ready = False
                 self.logger.warning("GROBID was ready but is now unavailable")
         
+        if not self.is_local_grobid:
+            self._wake_remote_p1_service("grobid")
+
         # Re-check with retries
         is_available, error_msg = self.check_grobid_health()
         if is_available:
             self.grobid_ready = True
+            if not self.is_local_grobid:
+                self._remote_host_awake = True
             return True
         else:
             self.logger.debug(f"GROBID not ready: {error_msg}")
@@ -268,16 +357,23 @@ class ServiceManager:
             True if Ollama is ready
         """
         if self.ollama_ready:
-            is_available, _ = self.check_ollama_health()
+            is_available, _ = self.check_ollama_health(quick=True)
             if is_available:
                 return True
             else:
                 self.ollama_ready = False
         
+        if not self.is_local_ollama:
+            # Wake machine only if not already proven awake; still wait for Ollama
+            # when we actually need it (fallback path).
+            self._wake_remote_p1_service("ollama", wait_for_service=not self._remote_host_awake)
+
         # Check health
         is_available, error_msg = self.check_ollama_health()
         if is_available:
             self.ollama_ready = True
+            if not self.is_local_ollama:
+                self._remote_host_awake = True
             return True
         
         # Try to start if local
@@ -324,8 +420,11 @@ class ServiceManager:
             health_check_fn=check_grobid
         )
     
-    def check_ollama_health(self) -> Tuple[bool, Optional[str]]:
+    def check_ollama_health(self, quick: bool = False) -> Tuple[bool, Optional[str]]:
         """Check Ollama health with retries and exponential backoff.
+
+        quick: one attempt with a short TCP precheck (daemon startup). Avoids
+        multi-second HTTP timeouts when :11434 is closed/reset.
         
         Returns:
             Tuple of (is_healthy, error_message)
@@ -334,13 +433,32 @@ class ServiceManager:
             return False, "Ollama client not initialized"
         
         health_url = f"http://{self.ollama_host}:{self.ollama_port}/api/tags"
+        tcp_timeout = 1.0 if quick else float(self.grobid_tcp_precheck_timeout)
+        http_timeout = 2 if quick else self.health_check_timeout
         
         def check_ollama() -> Tuple[bool, Optional[str]]:
-            response = requests.get(health_url, timeout=self.health_check_timeout)
+            tcp_ok, tcp_err = self._tcp_can_connect(
+                host=self.ollama_host,
+                port=self.ollama_port,
+                timeout_s=tcp_timeout,
+            )
+            if not tcp_ok:
+                return False, f"TCP connect failed: {tcp_err}"
+
+            response = requests.get(health_url, timeout=http_timeout)
             if response.status_code == 200:
                 return True, None
             return False, f"HTTP bad response: status={response.status_code}"
         
+        if quick:
+            try:
+                ok, msg = check_ollama()
+                if ok:
+                    return True, None
+                return False, msg or "Ollama quick health check failed"
+            except requests.RequestException as e:
+                return False, str(e)
+
         return self._check_service_health(
             service_name="Ollama",
             health_url=health_url,
