@@ -90,6 +90,11 @@ These settings help handle network failures and service unavailability gracefull
 - `health_check_backoff_multiplier`: Exponential backoff multiplier for retries (default: `2`)
   - With multiplier 2: retry delays are 1s, 2s, 4s
 
+These values apply to full GROBID and Ollama health checks. Daemon startup uses a
+separate quick Ollama probe: one TCP attempt with a 1-second timeout, then one
+HTTP request to `/api/tags` with a 2-second timeout. It does not retry. A failed
+quick probe does not block startup; Ollama receives a full check when first needed.
+
 **Future enhancements** (currently disabled):
 - `circuit_breaker_enabled`: Enable circuit breaker pattern (default: `false`)
 - `circuit_breaker_failure_threshold`: Number of failures before opening circuit
@@ -203,6 +208,23 @@ health_check_timeout = 5
 health_check_retries = 3
 health_check_backoff_multiplier = 2
 ```
+
+### Remote P1 startup behavior
+
+When GROBID is remote, daemon initialization tries to wake P1 through the
+companion ackerstr `Ensure-P1Service` script before running the configured health
+checks. It looks in these fixed locations:
+
+- Windows: `F:\prog\ackerstr\scripts\Ensure-P1Service.ps1`
+- WSL: `/mnt/f/prog/ackerstr/scripts/ensure-p1-service.sh`
+
+The wake poll uses `max(30, health_check_timeout * 10)` seconds (50 seconds with
+the default configuration). If the script is absent or fails, startup continues
+with normal health checks.
+
+Ollama is only probed quickly during startup. When Ollama is first required, the
+daemon wakes P1 if no previous remote wake or successful health check has shown
+that it is already awake, then performs the full configured health check.
 
 ### On P1 (services run here):
 
