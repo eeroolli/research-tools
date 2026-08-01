@@ -1060,13 +1060,11 @@ def create_proposed_actions_page(daemon) -> Page:
             "Will perform:",
             *(["⚠️ Existing target PDF detected. Next you can choose keep/replace/keep-both."]
               if conflict_exists else []),
-            f"  1. Split landscape/two-up pages using 50/50 geometric (fast default)",
-            f"  2. Gutter detection + border removal (only if you reject 50/50 in preview)",
-            f"  3. Trim leading pages (optional)",
-            f"  4. Generate filename: {target_filename}",
-            f"  5. Copy to publications: {publications_dir}/",
-            f"  6. Attach as linked file in Zotero",
-            f"  7. Move scan to: done/",
+            f"  1. Reuse PDF preprocessing from the start of this scan (or adjust in preview)",
+            f"  2. Generate filename: {target_filename}",
+            f"  3. Copy to publications: {publications_dir}/",
+            f"  4. Attach as linked file in Zotero",
+            f"  5. Move scan to: done/",
             "",
             "  (y/Enter) Proceed with all actions",
             "  (z) Go back to review",
@@ -1075,14 +1073,13 @@ def create_proposed_actions_page(daemon) -> Page:
         return lines
     
     def handler_y(ctx):
-        """Proceed - do PDF preprocessing and go to PDF PREVIEW."""
+        """Proceed - reuse early preprocessing (or preprocess) and go to PDF PREVIEW."""
         daemon = ctx['daemon']
         pdf_path = ctx['pdf_path']
         target_filename = ctx.get('target_filename')
 
         # Early routing: if the target publications PDF already exists, ask how
-        # to handle it *before* preprocessing (preprocessing causes split/prep
-        # work and can lead to collisions later).
+        # to handle it *before* opening the preview.
         if target_filename:
             try:
                 conflict_target_path = daemon.publications_dir / target_filename
@@ -1094,18 +1091,31 @@ def create_proposed_actions_page(daemon) -> Page:
                 # If existence check fails, fall back to original preprocessing flow.
                 pass
         
-        # Step 1: Preprocess PDF with default options
-        print("\n" + "="*70)
-        print("PDF PREPROCESSING")
-        print("="*70)
-        processed_pdf, preprocessing_state = daemon._preprocess_pdf_with_options(
-            pdf_path,
-            # Fast path: avoid gutter detection + border removal for speed.
-            # If the 50/50 preview looks wrong, the user can rerun the slower logic from the preview menu.
-            border_removal=False,
-            split_method='50-50',
-            trim_leading=True
-        )
+        # Step 1: Reuse early preprocessing from process_paper when available
+        # (avoids a second split/trim pass on an already-corrected PDF).
+        from pathlib import Path
+        early_pdf = getattr(daemon, '_working_pdf', None)
+        early_state = getattr(daemon, '_preprocessing_state', None)
+        if (
+            early_pdf
+            and Path(early_pdf).exists()
+            and isinstance(early_state, dict)
+        ):
+            print("\nℹ️  Reusing PDF preprocessing from the start of this scan.")
+            processed_pdf = Path(early_pdf)
+            preprocessing_state = dict(early_state)
+        else:
+            print("\n" + "="*70)
+            print("PDF PREPROCESSING")
+            print("="*70)
+            processed_pdf, preprocessing_state = daemon._preprocess_pdf_with_options(
+                pdf_path,
+                # Fast path: avoid gutter detection + border removal for speed.
+                # If the 50/50 preview looks wrong, the user can rerun the slower logic from the preview menu.
+                border_removal=False,
+                split_method='50-50',
+                trim_leading=True
+            )
         
         # #region agent log
         try:
@@ -1197,13 +1207,25 @@ def create_pdf_conflict_decision_page(daemon) -> Page:
         return candidates[0]
 
     def _preprocess_then_show_preview(ctx):
+        from pathlib import Path
         pdf_path = ctx['pdf_path']
-        processed_pdf, preprocessing_state = daemon._preprocess_pdf_with_options(
-            pdf_path,
-            border_removal=False,
-            split_method='50-50',
-            trim_leading=True
-        )
+        early_pdf = getattr(daemon, '_working_pdf', None)
+        early_state = getattr(daemon, '_preprocessing_state', None)
+        if (
+            early_pdf
+            and Path(early_pdf).exists()
+            and isinstance(early_state, dict)
+        ):
+            print("\nℹ️  Reusing PDF preprocessing from the start of this scan.")
+            processed_pdf = Path(early_pdf)
+            preprocessing_state = dict(early_state)
+        else:
+            processed_pdf, preprocessing_state = daemon._preprocess_pdf_with_options(
+                pdf_path,
+                border_removal=False,
+                split_method='50-50',
+                trim_leading=True
+            )
 
         ctx['processed_pdf'] = processed_pdf
         ctx['original_pdf'] = pdf_path

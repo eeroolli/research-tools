@@ -1,7 +1,7 @@
 # Paper Processor Daemon - UX Flow Chart
 
-**Last Updated:** January 2026  
-**Status:** Current implementation with color coding, timeout improvements, and filename editing workflow
+**Last Updated:** August 2026  
+**Status:** Current implementation with early PDF preprocessing (split/trim before metadata extraction)
 
 ## Overview
 
@@ -26,16 +26,27 @@ This document describes the complete user experience flow for the paper processo
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  2. Metadata Extraction                                         │
-│     ├─ GROBID extraction (first 2 pages)                        │
+│  2. PDF Preprocessing (BEFORE metadata extraction)              │
+│     ├─ Detect landscape/two-up (_double filename or wide page)  │
+│     ├─ Split into single pages (50/50 fast path; improve later) │
+│     ├─ Optional trim of leading/trailing pages                  │
+│     ├─ Optional border removal (from PDF PREVIEW menu)          │
+│     └─ PDF PREVIEW: accept, adjust, cancel, or separate docs    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  3. Metadata Extraction (on the preprocessed PDF)               │
 │     ├─ Regex identifier extraction (DOI, arXiv, URL, JSTOR)     │
+│     ├─ API lookup by identifier                                 │
+│     ├─ GROBID extraction (first 2 pages) as fallback            │
 │     ├─ Document type detection                                  │
 │     └─ Fallback to Ollama if needed                             │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  3. Year Confirmation                                           │
+│  4. Year Confirmation                                           │
 │     - Multi-source validation (GREP, GROBID, API)               │
 │     - Conflict detection and resolution                          │
 │     - Manual entry option                                       │
@@ -43,14 +54,14 @@ This document describes the complete user experience flow for the paper processo
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  4. Document Type Selection                                     │
+│  5. Document Type Selection                                     │
 │     - Auto-detection with confirmation                          │
 │     - Manual selection menu (journal, book, chapter, etc.)       │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  5. Author Selection                                            │
+│  6. Author Selection                                            │
 │     - Interactive author list with letters (a-z)                 │
 │     - Zotero recognition (paper counts)                         │
 │     - Weak name-only hits are marked as unconfirmed suggestions │
@@ -60,7 +71,7 @@ This document describes the complete user experience flow for the paper processo
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  6. Zotero Search                                               │
+│  7. Zotero Search                                               │
 │     - Search by selected authors + year                         │
 │     - Local Zotero database query                               │
 │     - If no author match: metadata fallback (DOI/URL/title/year)│
@@ -185,19 +196,12 @@ This document describes the complete user experience flow for the paper processo
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  STEP 4: PDF Preprocessing & Attachment                         │
+│  STEP 4: PDF Attachment (already preprocessed)                  │
 │  ┌─────────────────────────────────────────────────────────────┐ │
-│  │  1/6 Detect landscape/two-up pages (BEFORE border removal)   │ │
-│  │     ├─ Check for _double.pdf pattern                        │ │
-│  │     └─ Analyze aspect ratio and content for two-up layout   │ │
-│  │  2/6 Remove borders (consistent UX for all pages)            │ │
-│  │  3/6 Intelligent split for two-up files (if detected)       │ │
-│  │     ├─ Detect gutter position (spine or content gap)       │ │
-│  │     └─ Split at detected position                           │ │
-│  │  4/6 Trim leading pages (optional)                          │ │
-│  │  5/6 Copying to publications directory                      │ │
-│  │  6/6 Attaching to Zotero item                               │ │
-│  │  7/6 Moving original to done/                                │ │
+│  │  1/4 Copying preprocessed PDF to publications directory     │ │
+│  │  2/4 Attaching to Zotero item                               │ │
+│  │  3/4 Moving original scan to done/                          │ │
+│  │  4/4 (Optional) Handwritten note                            │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -380,7 +384,7 @@ Some scans contain multiple scientific papers in one PDF, separated by a physica
 - **User-visible label:** “Separate this PDF into files (two or more papers)”
 - **Entry points:**
   - **Early (automatic):** before metadata extraction (before GREP/GROBID/search). If separator pages are detected, the daemon proposes separation and asks for confirmation.
-  - **Late (manual):** from the `PDF PREVIEW` menu during PDF preprocessing or attachment: both the **new-scan** preprocessing preview (`paper_processor_daemon`) and the **item-selected** preview (`handle_item_selected_pages`, e.g. after `PROPOSED ACTIONS` → PDF conflict → preprocessing) offer the same option, so you can separate a multi-paper scan when attaching to an existing Zotero item.
+  - **Manual:** from the early `PDF PREVIEW` menu during PDF preprocessing at the start of a scan (`paper_processor_daemon`), and from the **item-selected** preview (`handle_item_selected_pages`) when attaching to an existing Zotero item.
 
 #### Separator detection (reliable + cheap)
 
@@ -420,20 +424,18 @@ Examples:
 - **Benefit:** Catches path issues before attempting operations
 - **Use:** Validates source files exist before copying
 
-### 7. PROPOSED ACTIONS Page Update (January 2026)
-- **Enhanced Message:** Now shows all operations that will occur during PDF processing
+### 7. PROPOSED ACTIONS Page Update (August 2026)
+- **Enhanced Message:** Shows operations that will occur during final attachment
 - **Operations Listed:**
-  1. Check and remove dark borders (if detected)
-  2. Split landscape/two-up pages (if detected)
-  3. Trim leading pages (optional)
-  4. Generate filename
-  5. Copy to publications directory
-  6. Attach as linked file in Zotero
-  7. Move scan to done/
-- **Benefit:** Users see complete workflow before confirming, reducing surprises during processing
+  1. Generate filename
+  2. Copy preprocessed PDF to publications directory
+  3. Attach as linked file in Zotero
+  4. Move scan to done/
+- **Note:** Split / trim / border preprocessing already ran at the start of the scan
+- **Benefit:** Users see the remaining workflow before confirming
 
-### 9. Filename Editing Workflow (January 2026)
-- **Location:** After item confirmation, before PDF preprocessing
+### 9. Filename Editing Workflow (August 2026)
+- **Location:** After item confirmation, before copy/attach (preprocessing already done)
 - **Features:**
   - Shows generated filename based on Zotero metadata
   - Option to approve [Enter] or edit [e]

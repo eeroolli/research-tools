@@ -158,11 +158,15 @@ When a Zotero match is found, users get a sophisticated 3-step process:
 - Automatic validation and sanitization
 
 #### Step 4: PDF Attachment
-- PDF preprocessing (border removal, splitting, trimming)
-- Preview and modify preprocessing options
+- Uses the PDF already preprocessed at the start of the scan (split/trim/border)
 - Conflict resolution with filename editing (when file exists)
 - Smart filename generation and duplicate handling
 - Complete file management and cleanup
+
+### PDF Preprocessing (runs first)
+- Runs immediately after document-separator check, **before** metadata extraction
+- Landscape/two-up split, optional trim, optional border removal, PDF PREVIEW menu
+- Ensures GROBID and DOI lookup read the corrected first page (e.g. right-hand page of a journal spread)
 
 ### Enrichment behavior (existing items)
 - After selecting an existing Zotero item, the daemon automatically:

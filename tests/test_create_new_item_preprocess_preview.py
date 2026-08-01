@@ -116,7 +116,6 @@ def test_create_new_item_uses_preprocessed_pdf_for_attachment(
     final_pdf = tmp_path / "FINAL_dummy_split.pdf"
     _write_dummy_pdf(final_pdf)
 
-    processed_calls: list[tuple[Path, Path]] = []
     copy_calls: list[tuple[Path, Path]] = []
     find_identical_calls: list[Path] = []
     add_paper_calls: list[tuple[dict, str | None]] = []
@@ -143,28 +142,15 @@ def test_create_new_item_uses_preprocessed_pdf_for_attachment(
     # Generate a deterministic filename (without extension; code appends ".pdf")
     daemon.generate_filename = lambda _meta: "Test_File"
 
-    # Preprocessing/preview pipeline: we want to verify its return value is used for copy + attach.
-    daemon._preprocess_pdf_with_options = lambda *_args, **_kwargs: (
-        processed_pdf,
-        {
-            "border_removal": False,
-            "split_method": "50-50",
-            "split_attempted": True,
-            "split_succeeded": True,
-            "trim_leading": True,
-        },
-    )
-
-    daemon._preview_and_modify_preprocessing = lambda *_args, **_kwargs: (
-        final_pdf,
-        {
-            "border_removal": False,
-            "split_method": "50-50",
-            "split_attempted": True,
-            "split_succeeded": True,
-            "trim_leading": True,
-        },
-    )
+    # Early preprocessing already ran in process_paper; create flow just copies.
+    daemon._working_pdf = final_pdf
+    daemon._preprocessing_state = {
+        "border_removal": False,
+        "split_method": "50-50",
+        "split_attempted": True,
+        "split_succeeded": True,
+        "trim_leading": True,
+    }
 
     daemon._find_identical_in_publications = lambda candidate_pdf: (
         find_identical_calls.append(candidate_pdf) or None
@@ -211,7 +197,7 @@ def test_create_new_item_uses_preprocessed_pdf_for_attachment(
     assert attach_target is not None
     assert attach_target.endswith("Test_File.pdf")
 
-    # Logging must reflect preprocessing decisions derived from final_state.
+    # Logging must reflect preprocessing decisions from early state.
     assert log_calls, "Expected scanned_papers_logger.log_processing to be called"
     logged = log_calls[0]
     assert logged["final_filename"] == "Test_File.pdf"
@@ -220,7 +206,7 @@ def test_create_new_item_uses_preprocessed_pdf_for_attachment(
     assert logged["trim"] == "yes"
 
 
-def test_create_new_item_shows_preprocessing_preview_menu_on_accept(
+def test_create_new_item_does_not_rerun_preprocessing_preview(
     daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     pdf_path = tmp_path / "EN_20260101-120000_002_double.pdf"
@@ -242,25 +228,27 @@ def test_create_new_item_shows_preprocessing_preview_menu_on_accept(
     # 1) Search online libraries? -> 'n'
     # 2) Attach this PDF now? -> 'y'
     # 3) Use this filename? -> 'y'
-    # 4) PDF PREVIEW menu choice -> '1' (accept)
-    input_answers = iter(["n", "y", "y", "1"])
+    input_answers = iter(["n", "y", "y"])
     monkeypatch.setattr(builtins, "input", lambda *_args, **_kwargs: next(input_answers))
 
     daemon.generate_filename = lambda _meta: "Test_File"
+    daemon._working_pdf = processed_pdf
+    daemon._preprocessing_state = {
+        "border_removal": False,
+        "split_method": "50-50",
+        "split_attempted": True,
+        "split_succeeded": True,
+        "trim_leading": True,
+    }
 
-    # Let the real `_preview_and_modify_preprocessing` run, but avoid opening a viewer.
-    daemon._open_pdf_in_viewer = lambda *_args, **_kwargs: True
+    preprocess_calls = {"count": 0}
 
-    daemon._preprocess_pdf_with_options = lambda *_args, **_kwargs: (
-        processed_pdf,
-        {
-            "border_removal": False,
-            "split_method": "50-50",
-            "split_attempted": True,
-            "split_succeeded": True,
-            "trim_leading": True,
-        },
-    )
+    def _preprocess_should_not_run(*_args, **_kwargs):
+        preprocess_calls["count"] += 1
+        raise AssertionError("handle_create_new_item must not re-run preprocessing")
+
+    daemon._preprocess_pdf_with_options = _preprocess_should_not_run
+    daemon._preview_and_modify_preprocessing = _preprocess_should_not_run
 
     daemon._find_identical_in_publications = lambda _candidate_pdf: None
 
@@ -288,10 +276,11 @@ def test_create_new_item_shows_preprocessing_preview_menu_on_accept(
 
     ok = daemon.handle_create_new_item(pdf_path, extracted_metadata)
     assert ok is True
+    assert preprocess_calls["count"] == 0
 
     captured = capsys.readouterr()
-    # The actual preview loop prints this header; we assert we reached it.
-    assert "PDF PREVIEW" in captured.out
+    assert "PDF PREVIEW" not in captured.out
+    assert "PDF PREPROCESSING" not in captured.out
 
 
 def test_search_skips_broad_surname_fallback_when_author_confirmed(
@@ -371,6 +360,8 @@ def test_process_paper_no_match_create_path_does_not_move_to_manual(
 ) -> None:
     pdf_path = tmp_path / "EN_20260326_0001_double.pdf"
     _write_dummy_pdf(pdf_path)
+    working_pdf = tmp_path / "WORKING_early.pdf"
+    _write_dummy_pdf(working_pdf)
 
     daemon._close_sumatra_all_tabs = lambda: True
     daemon._open_pdf_in_viewer = lambda *_args, **_kwargs: True
@@ -380,28 +371,44 @@ def test_process_paper_no_match_create_path_does_not_move_to_manual(
     daemon.display_metadata = lambda *_args, **_kwargs: None
     daemon._handle_isbn_lookup_result = lambda result: result
     daemon.prompt_for_document_type = lambda metadata: metadata
+    daemon._maybe_auto_document_separator_early = lambda *_args, **_kwargs: False
+    daemon._preprocess_pdf_with_options = lambda pdf, **_kwargs: (working_pdf, {"split_method": "none"})
+    daemon._preview_and_modify_preprocessing = lambda *_args, **_kwargs: (
+        working_pdf,
+        {"split_method": "none", "border_removal": False, "trim_leading": False},
+    )
     monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: "")
 
+    extract_paths: list[Path] = []
     daemon.metadata_processor = SimpleNamespace(
-        process_pdf=lambda *_args, **_kwargs: {
-            "success": True,
-            "metadata": {
-                "title": "A title",
-                "authors": ["Bean, C"],
-                "year": "1994",
-                "document_type": "journal_article",
-            },
-            "method": "grep",
-            "identifiers_found": {},
-        }
+        process_pdf=lambda pdf, **_kwargs: (
+            extract_paths.append(Path(pdf))
+            or {
+                "success": True,
+                "metadata": {
+                    "title": "A title",
+                    "authors": ["Bean, C"],
+                    "year": "1994",
+                    "document_type": "journal_article",
+                },
+                "method": "grep",
+                "identifiers_found": {},
+            }
+        )
     )
     daemon.service_manager = SimpleNamespace(ensure_grobid_ready=lambda: False, grobid_ready=False, grobid_client=None)
     daemon.local_zotero = object()
     daemon.search_and_display_local_zotero = lambda metadata, force_prompt_year=False: ("create", None, metadata)
 
-    create_calls = {"count": 0}
+    create_calls = {"count": 0, "pdf": None}
     manual_calls = {"count": 0}
-    daemon.handle_create_new_item = lambda *_args, **_kwargs: create_calls.__setitem__("count", create_calls["count"] + 1) or True
+
+    def _create(pdf, metadata):
+        create_calls["count"] += 1
+        create_calls["pdf"] = Path(pdf)
+        return True
+
+    daemon.handle_create_new_item = _create
     daemon.move_to_manual_review = lambda *_args, **_kwargs: manual_calls.__setitem__("count", manual_calls["count"] + 1)
 
     result = daemon.process_paper(pdf_path)
@@ -409,6 +416,8 @@ def test_process_paper_no_match_create_path_does_not_move_to_manual(
     assert result is None
     assert create_calls["count"] == 1
     assert manual_calls["count"] == 0
+    assert extract_paths == [working_pdf]
+    assert create_calls["pdf"] == working_pdf
 
 
 def test_process_paper_create_failure_falls_back_to_manual_review(
@@ -416,6 +425,8 @@ def test_process_paper_create_failure_falls_back_to_manual_review(
 ) -> None:
     pdf_path = tmp_path / "EN_20260326_0002_double.pdf"
     _write_dummy_pdf(pdf_path)
+    working_pdf = tmp_path / "WORKING_early2.pdf"
+    _write_dummy_pdf(working_pdf)
 
     daemon._close_sumatra_all_tabs = lambda: True
     daemon._open_pdf_in_viewer = lambda *_args, **_kwargs: True
@@ -425,6 +436,12 @@ def test_process_paper_create_failure_falls_back_to_manual_review(
     daemon.display_metadata = lambda *_args, **_kwargs: None
     daemon._handle_isbn_lookup_result = lambda result: result
     daemon.prompt_for_document_type = lambda metadata: metadata
+    daemon._maybe_auto_document_separator_early = lambda *_args, **_kwargs: False
+    daemon._preprocess_pdf_with_options = lambda pdf, **_kwargs: (working_pdf, {"split_method": "none"})
+    daemon._preview_and_modify_preprocessing = lambda *_args, **_kwargs: (
+        working_pdf,
+        {"split_method": "none", "border_removal": False, "trim_leading": False},
+    )
     monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: "")
 
     daemon.metadata_processor = SimpleNamespace(

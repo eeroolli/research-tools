@@ -272,3 +272,78 @@ def test_non_double_filename_does_not_split_without_two_up(daemon: PaperProcesso
     assert state.get("split_succeeded") is not True
     assert state.get("split_method") in ("none", "auto")
     assert processed == pdf_path
+
+
+def test_process_paper_runs_preprocessing_before_metadata_extraction(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Extraction must receive the early-preprocessed PDF path, not the raw scan."""
+    pdf_path = tmp_path / "EN_20260801_0001_double.pdf"
+    _make_dummy_pdf(pdf_path)
+    working_pdf = tmp_path / "PREPROCESSED_early.pdf"
+    _make_dummy_pdf(working_pdf)
+
+    call_order: list[str] = []
+    extract_paths: list[Path] = []
+
+    daemon._close_sumatra_all_tabs = lambda: True
+    daemon._open_pdf_in_viewer = lambda *_args, **_kwargs: True
+    daemon._return_focus_to_terminal = lambda: None
+    daemon._close_pdf_viewer = lambda: None
+    daemon.move_to_failed = lambda *_args, **_kwargs: None
+    daemon.display_metadata = lambda *_args, **_kwargs: None
+    daemon._handle_isbn_lookup_result = lambda result: result
+    daemon.prompt_for_document_type = lambda metadata: metadata
+    daemon._maybe_auto_document_separator_early = lambda *_args, **_kwargs: False
+
+    def _preprocess(pdf, **_kwargs):
+        call_order.append("preprocess")
+        return working_pdf, {"split_method": "50-50", "split_attempted": True, "split_succeeded": True}
+
+    def _preview(*_args, **_kwargs):
+        call_order.append("preview")
+        return working_pdf, {
+            "split_method": "50-50",
+            "split_attempted": True,
+            "split_succeeded": True,
+            "border_removal": False,
+            "trim_leading": True,
+        }
+
+    daemon._preprocess_pdf_with_options = _preprocess
+    daemon._preview_and_modify_preprocessing = _preview
+
+    def _process_pdf(pdf, **_kwargs):
+        call_order.append("extract")
+        extract_paths.append(Path(pdf))
+        return {
+            "success": True,
+            "metadata": {
+                "title": "Right-hand page title",
+                "authors": ["Author, A"],
+                "year": "1999",
+                "document_type": "journal_article",
+            },
+            "method": "grep",
+            "identifiers_found": {},
+        }
+
+    daemon.metadata_processor = SimpleNamespace(process_pdf=_process_pdf)
+    daemon.service_manager = SimpleNamespace(
+        ensure_grobid_ready=lambda: False, grobid_ready=False, grobid_client=None
+    )
+    daemon.local_zotero = object()
+    daemon.search_and_display_local_zotero = lambda metadata, force_prompt_year=False: (
+        "manual",
+        None,
+        metadata,
+    )
+    daemon.move_to_manual_review = lambda *_args, **_kwargs: None
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: "")
+
+    daemon.process_paper(pdf_path)
+
+    assert call_order[:3] == ["preprocess", "preview", "extract"]
+    assert extract_paths == [working_pdf]
+    assert daemon._working_pdf == working_pdf
+    assert daemon._preprocessing_state.get("split_succeeded") is True

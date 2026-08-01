@@ -320,10 +320,10 @@ Scans whose filenames contain `_double` (for example `EN_20260312-130734_001_dou
 are treated as two-up pages and are split automatically during the PDF preprocessing step:
 
 - **When it happens**
-  - After metadata is finalized and before the PDF is copied to the publications folder / attached to Zotero, the daemon runs a **PDF PREPROCESSING** phase.
+  - At the **start** of processing a scan (after any document-separator check, **before** metadata extraction / GROBID / online search), the daemon runs a **PDF PREPROCESSING** phase.
   - If the original filename contains `_double`, preprocessing will **always attempt to split** the scan into single pages using the automatic (gutter-based) method.
 - **What you see in the terminal**
-  - A `PDF PREPROCESSING` header appears after the filename confirmation.
+  - A `PDF PREPROCESSING` header appears near the beginning of processing (before GREP/GROBID).
   - For `_double` scans you should see:
     - `Auto-splitting due to '_double' in filename...`
   - In the preprocessing preview menu, the `Current preprocessing` section shows:

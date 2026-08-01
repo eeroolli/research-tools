@@ -3756,24 +3756,29 @@ class PaperProcessorDaemon:
             "You can enter DOI manually (supports: 10.1234/example, "
             "https://doi.org/10.1234/example, http://dx.doi.org/..., doi:10.1234/example)"
         )
-        new_value = input("New DOI (or Enter to keep current): ").strip()
+        new_value = input("New DOI (or Enter to keep current, 'clear' to remove): ").strip()
         
         if new_value:
-            validator = self.metadata_processor.validator
-            is_valid, cleaned_doi, reason = validator.validate_doi(new_value)
-            if is_valid and cleaned_doi:
-                apply_manual_doi(cleaned_doi, reason)
+            if new_value.lower() == 'clear':
+                edited['doi'] = ''
+                edited.pop('doi_source', None)
+                print("✅ DOI cleared")
             else:
-                print(f"❌ {reason}")
-                while True:
-                    corrected = input("Enter corrected DOI (Enter or n to skip): ").strip()
-                    if not corrected or corrected.lower() in ('n', 'no'):
-                        break
-                    is_valid, cleaned_doi, reason = validator.validate_doi(corrected)
-                    if is_valid and cleaned_doi:
-                        apply_manual_doi(cleaned_doi, reason)
-                        break
+                validator = self.metadata_processor.validator
+                is_valid, cleaned_doi, reason = validator.validate_doi(new_value)
+                if is_valid and cleaned_doi:
+                    apply_manual_doi(cleaned_doi, reason)
+                else:
                     print(f"❌ {reason}")
+                    while True:
+                        corrected = input("Enter corrected DOI (Enter or n to skip): ").strip()
+                        if not corrected or corrected.lower() in ('n', 'no'):
+                            break
+                        is_valid, cleaned_doi, reason = validator.validate_doi(corrected)
+                        if is_valid and cleaned_doi:
+                            apply_manual_doi(cleaned_doi, reason)
+                            break
+                        print(f"❌ {reason}")
         elif online_metadata and online_metadata.get('doi') and not edited.get('doi'):
             edited['doi'] = online_metadata['doi']
             print(f"✅ Auto-filled from online: {online_metadata['doi']}")
@@ -4958,9 +4963,52 @@ class PaperProcessorDaemon:
         temp_pdf_path = None
         effective_page_offset = 0
         self._temp_pdf_path = None
+        self._working_pdf = None
+        self._preprocessing_state = {}
         
         try:
-            # Step 1: Extract metadata
+            # Step 0: Split / trim / border BEFORE metadata extraction so GROBID
+            # and regex DOI lookup read the corrected first page (e.g. right-hand
+            # page of a landscape two-up journal scan after trimming bibliography).
+            print("\n" + "=" * 70)
+            print("PDF PREPROCESSING")
+            print("=" * 70)
+            processed_pdf, preprocessing_state = self._preprocess_pdf_with_options(
+                pdf_path,
+                border_removal=False,
+                split_method='50-50',
+                trim_leading=True,
+            )
+            final_pdf, final_state = self._preview_and_modify_preprocessing(
+                pdf_path,
+                processed_pdf,
+                preprocessing_state,
+            )
+            if final_pdf is None:
+                if final_state.get('restart'):
+                    print("\n🔄 Document separator: output PDFs were queued; continuing with the queue.")
+                    return
+                if final_state.get('back'):
+                    print("\n⬅️  Cancelled this scan — restarting from beginning...")
+                    return 'RESTART'
+                if final_state.get('quit'):
+                    moved = self.move_to_manual_review(pdf_path)
+                    if moved:
+                        print("✅ Moved to manual review")
+                    return
+                print("❌ Processing cancelled")
+                return
+
+            pdf_to_use = Path(final_pdf)
+            self._working_pdf = pdf_to_use
+            self._preprocessing_state = final_state if isinstance(final_state, dict) else {}
+            # Trimmed pages are already removed from the working PDF; page_offset stays 0.
+            effective_page_offset = 0
+            if pdf_to_use.resolve() != Path(pdf_path).resolve():
+                temp_pdf_path = pdf_to_use
+                self._temp_pdf_path = pdf_to_use
+
+            # Step 1: Extract metadata from the (possibly) preprocessed PDF
             self.logger.info("Extracting metadata...")
             
             # Step 1a: Try GREP first (fast identifier extraction + API lookup)
@@ -5642,8 +5690,8 @@ class PaperProcessorDaemon:
                 self.logger.info(f"Zotero search action resolved to: {action_value}")
 
                 if action_value == 'select' and selected_item_value:
-                    # User selected an item - offer to attach PDF
-                    selection_outcome = self.handle_item_selected(pdf_path, metadata_value, selected_item_value)
+                    # User selected an item - offer to attach PDF (use preprocessed working PDF)
+                    selection_outcome = self.handle_item_selected(pdf_to_use, metadata_value, selected_item_value)
                     if selection_outcome == 'back_to_item_selection':
                         return 'continue_selection'
                     if selection_outcome == 'restart':
@@ -5694,10 +5742,10 @@ class PaperProcessorDaemon:
                     # Create new Zotero item with online library check
                     # Use metadata_value which includes any edited authors
                     self.logger.info(
-                        f"Dispatching create flow for {pdf_path.name} "
+                        f"Dispatching create flow for {pdf_to_use.name} "
                         f"(title='{(metadata_value or {}).get('title', '')[:80]}')"
                     )
-                    success = self.handle_create_new_item(pdf_path, metadata_value)
+                    success = self.handle_create_new_item(pdf_to_use, metadata_value)
                     if not success:
                         # User cancelled or error occurred; avoid silent "jump" to next scan.
                         print("❌ Item creation cancelled or failed; moved to manual review.")
@@ -5804,7 +5852,11 @@ class PaperProcessorDaemon:
                     except ValueError:
                         print_unacceptable_input()
             
-            success = self.attach_to_existing_zotero_item(pdf_path, selected_match, metadata)
+            success = self.attach_to_existing_zotero_item(
+                getattr(self, '_working_pdf', None) or pdf_path,
+                selected_match,
+                metadata,
+            )
             if success:
                 self.logger.info("Successfully attached to existing Zotero item")
             else:
@@ -6547,7 +6599,7 @@ class PaperProcessorDaemon:
         - Improve split (gutter detection + border removal) when currently using fast 50/50
         - Use 50/50 split instead
         - Drop trimming
-        - Go back to metadata
+        - Cancel this scan
         - Quit to manual review
         
         Args:
@@ -6610,7 +6662,7 @@ class PaperProcessorDaemon:
             
             # Show menu - build dynamically based on current state
             print(Colors.colorize("Options:", ColorScheme.ACTION))
-            print(Colors.colorize("  [1] Accept and proceed to Zotero", ColorScheme.LIST))
+            print(Colors.colorize("  [1] Accept and proceed", ColorScheme.LIST))
             
             # Build dynamic options with sequential numbering
             option_num = 1
@@ -6662,7 +6714,7 @@ class PaperProcessorDaemon:
             option_map[option_num] = 'separate_documents'
             print(Colors.colorize(f"  [{option_num}] Separate this PDF into files (two or more papers)", ColorScheme.LIST))
             
-            print(Colors.colorize("  [z] Go back to metadata", ColorScheme.LIST))
+            print(Colors.colorize("  [z] Cancel this scan", ColorScheme.LIST))
             print(Colors.colorize("  [q] Quit - move to manual review", ColorScheme.LIST))
             print()
             
@@ -6834,7 +6886,7 @@ class PaperProcessorDaemon:
             except ValueError:
                 # Not a number, check for letter choices
                 if choice == 'z':
-                    # Go back to metadata (caller should handle this)
+                    # Cancel this scan (caller should handle restart/cancel)
                     return None, {'back': True}
                 
                 elif choice == 'q':
@@ -9997,66 +10049,10 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 print("❌ Cancelled")
                 return False
         
-        # Step 1: Preprocess PDF with default options
-        original_pdf = pdf_path
-        print("\n" + "="*70)
-        print("PDF PREPROCESSING")
-        print("="*70)
-        processed_pdf, preprocessing_state = self._preprocess_pdf_with_options(
-            original_pdf,
-            # Fast path: geometric 50/50 split first, postpone gutter detection + border removal.
-            border_removal=False,
-            split_method='50-50',
-            trim_leading=True
-        )
-        
-        # Step 2: Preview and allow modification
-        final_pdf, final_state = self._preview_and_modify_preprocessing(
-            original_pdf,
-            processed_pdf,
-            preprocessing_state
-        )
-        
-        # Handle user choices from preview menu
-        if final_pdf is None:
-            if final_state.get('restart'):
-                # Split-into-documents path already queued outputs and moved original.
-                print("\n🔄 Document separator: output PDFs were queued; continuing with the queue.")
-                return True
-            if final_state.get('back'):
-                # User wants to go back - this should be handled by caller
-                print("\n⬅️  Going back...")
-                return False
-            elif final_state.get('quit'):
-                # User wants to quit to manual review
-                # #region agent log
-                try:
-                    import time as _time, json as _json
-                    log_path = r"f:\prog\research-tools\.cursor\debug.log" if os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
-                    with open(log_path, "a", encoding="utf-8") as f:
-                        f.write(_json.dumps({
-                            "sessionId": "debug-session",
-                            "runId": "run1",
-                            "hypothesisId": "MR_CALL1",
-                            "location": "paper_processor_daemon.py:_handle_pdf_attachment_step",
-                            "message": "Manual review requested (preprocess preview)",
-                            "data": {"pdf_path": str(pdf_path)},
-                            "timestamp": int(_time.time() * 1000),
-                        }) + "\n")
-                except Exception:
-                    pass
-                # #endregion
-                moved = self.move_to_manual_review(pdf_path)
-                if moved:
-                    print("✅ Moved to manual review")
-                return False
-            else:
-                # Cancelled or error
-                print("❌ Processing cancelled")
-                return False
-        
-        # Use final processed PDF for copy/attachment
-        pdf_to_copy = final_pdf
+        # Preprocessing already ran at the start of process_paper; copy the PDF we were given.
+        pdf_to_copy = getattr(self, '_working_pdf', None) or pdf_path
+        if not Path(pdf_to_copy).exists():
+            pdf_to_copy = pdf_path
         
         # Copy to publications directory with _scanned logic and conflict handling
         base_path = self.publications_dir / proposed_filename
@@ -12041,38 +12037,13 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 print("❌ Cancelled")
                 return False
 
-        # ------------------------
-        # PDF preprocess + preview
-        # ------------------------
-        print("\n" + "="*70)
-        print("PDF PREPROCESSING")
-        print("="*70)
-
-        processed_pdf, preprocessing_state = self._preprocess_pdf_with_options(
-            pdf_path,
-            # Fast path first: geometric 50/50 split preview.
-            border_removal=False,
-            split_method='50-50',
-            trim_leading=True
-        )
-
-        final_pdf, final_state = self._preview_and_modify_preprocessing(
-            pdf_path,
-            processed_pdf,
-            preprocessing_state
-        )
-        final_state = final_state if isinstance(final_state, dict) else {}
-
-        if final_pdf is None:
-            # User cancelled the preview flow.
-            if final_state.get('restart'):
-                print("\n🔄 Document separator: output PDFs were queued; continuing with the queue.")
-                return True
-            if final_state.get('quit'):
-                moved = self.move_to_manual_review(pdf_path)
-                if moved:
-                    print("✅ Moved to manual review")
-            return False
+        # Preprocessing already ran at the start of process_paper; copy the PDF we were given.
+        final_pdf = getattr(self, '_working_pdf', None) or pdf_path
+        if not Path(final_pdf).exists():
+            final_pdf = pdf_path
+        final_state = getattr(self, '_preprocessing_state', None)
+        if not isinstance(final_state, dict):
+            final_state = {}
 
         # Derive log values once for both the "reuse" and "copy" paths.
         split_status = 'no'
@@ -12762,78 +12733,30 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     'split_attempted': False
                 }
         else:
-            # Determine which PDF to use (original or page-offset temp)
-            # Check if there's a temporary PDF created from page offset
-            pdf_to_copy = getattr(self, '_temp_pdf_path', None)
-            # Determine original PDF (before any preprocessing)
-            original_pdf = pdf_path
-            if pdf_to_copy is None or not pdf_to_copy.exists():
-                # No temp PDF, use original
+            # Preprocessing already ran at the start of process_paper (or caller
+            # passed the working PDF). Copy that; do not re-preprocess.
+            pdf_to_copy = getattr(self, '_working_pdf', None) or getattr(self, '_temp_pdf_path', None)
+            if pdf_to_copy is None or not Path(pdf_to_copy).exists():
                 pdf_to_copy = pdf_path
             else:
-                self.logger.info(f"Using temporary PDF from page offset: {pdf_to_copy.name}")
-                # Keep original for preprocessing, but use pdf_to_copy as starting point if from offset
-                # For preprocessing preview workflow, we want to work from original after page offset
-                original_pdf = pdf_to_copy
-            
-            # Step 1: Preprocess PDF with default options
-            print("\n" + "="*70)
-            print("PDF PREPROCESSING")
-            print("="*70)
-            processed_pdf, preprocessing_state = self._preprocess_pdf_with_options(
-                original_pdf,
-                # Fast path: geometric 50/50 split first, postpone gutter detection + border removal.
-                border_removal=False,
-                split_method='50-50',
-                trim_leading=True
-            )
-            
-            # Step 2: Preview and allow modification
-            final_pdf, final_state = self._preview_and_modify_preprocessing(
-                original_pdf,
-                processed_pdf,
-                preprocessing_state
-            )
-            
-            # Handle user choices
-            if final_pdf is None:
-                if final_state.get('restart'):
-                    print("\n🔄 Document separator: output PDFs were queued; continuing with the queue.")
-                    return
-                if final_state.get('back'):
-                    # User wants to go back to metadata
-                    print("\n⬅️  Going back to metadata...")
-                    return
-                elif final_state.get('quit'):
-                    # User wants to quit to manual review
-                    # #region agent log
-                    try:
-                        import time as _time, json as _json
-                        log_path = r"f:\prog\research-tools\.cursor\debug.log" if os.name == "nt" else "/mnt/f/prog/research-tools/.cursor/debug.log"
-                        with open(log_path, "a", encoding="utf-8") as f:
-                            f.write(_json.dumps({
-                                "sessionId": "debug-session",
-                                "runId": "run1",
-                                "hypothesisId": "MR_CALL2",
-                                "location": "paper_processor_daemon.py:_handle_pdf_attachment_step",
-                                "message": "Manual review requested (attachment step)",
-                                "data": {"pdf_path": str(pdf_path)},
-                                "timestamp": int(_time.time() * 1000),
-                            }) + "\n")
-                    except Exception:
-                        pass
-                    # #endregion
-                    moved = self.move_to_manual_review(pdf_path)
-                    if moved:
-                        print("✅ Moved to manual review")
-                    return
-                else:
-                    # Cancelled or error
-                    print("❌ Processing cancelled")
-                    return
-            
-            # Use final processed PDF
-            pdf_to_copy = final_pdf
+                self.logger.info(f"Using early-preprocessed / working PDF: {Path(pdf_to_copy).name}")
+
+            early_state = getattr(self, '_preprocessing_state', None)
+            if isinstance(early_state, dict) and early_state:
+                final_state = {
+                    'split_method': early_state.get('split_method', 'none'),
+                    'border_removal': early_state.get('border_removal', False),
+                    'trim_leading': early_state.get('trim_leading', False),
+                    'split_attempted': early_state.get('split_attempted', False),
+                    'split_succeeded': early_state.get('split_succeeded', False),
+                }
+            else:
+                final_state = {
+                    'split_method': 'none',
+                    'border_removal': False,
+                    'trim_leading': False,
+                    'split_attempted': False,
+                }
         name_lower = pdf_to_copy.name.lower()
         
         # Step 2: Check if target file exists and show comparison/choice if needed
