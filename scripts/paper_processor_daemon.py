@@ -22,6 +22,7 @@ import configparser
 import os
 import json
 import io
+import webbrowser
 from typing import Optional, Tuple, List, Dict
 import subprocess
 import socket
@@ -246,6 +247,9 @@ class PaperProcessorDaemon:
         
         # Get DAEMON configuration
         self.remote_check_host = self.config.get('DAEMON', 'remote_check_host', fallback='').strip()
+        self.zotero_web_library_url = self.config.get(
+            'PATHS', 'zotero_web_library_url', fallback=''
+        ).strip()
         
         # Get GROBID configuration
         self.grobid_host = self.config.get('GROBID', 'host', fallback='localhost').strip()
@@ -8707,6 +8711,7 @@ class PaperProcessorDaemon:
         # Wait for terminal window to be ready
         time.sleep(2.0)  # Give terminal window time to be fully ready
         self._position_terminal_window()
+        self._open_web_zotero_library()
         
         # Note: Removed second positioning call to prevent window jumping
         # If positioning fails, it will be retried when PDF viewer opens
@@ -9308,6 +9313,181 @@ public struct RECT {
             self.logger.warning("Terminal snap script timed out")
         except Exception as e:
             self.logger.warning(f"Could not snap terminal window: {e}")
+
+    def _open_url_default_browser(self, url: str) -> None:
+        """Open URL with the Windows default browser; prefer a new window when supported."""
+        exe = None
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice",
+            ) as key:
+                prog_id, _ = winreg.QueryValueEx(key, "ProgId")
+            command = None
+            for root, subkey in (
+                (winreg.HKEY_CURRENT_USER, rf"Software\Classes\{prog_id}\shell\open\command"),
+                (winreg.HKEY_CLASSES_ROOT, rf"{prog_id}\shell\open\command"),
+            ):
+                try:
+                    with winreg.OpenKey(root, subkey) as key:
+                        command, _ = winreg.QueryValueEx(key, None)
+                    if command:
+                        break
+                except OSError:
+                    continue
+            if command:
+                cmd = command.strip()
+                if cmd.startswith('"'):
+                    end = cmd.find('"', 1)
+                    exe = Path(cmd[1:end]) if end > 1 else None
+                else:
+                    exe = Path(cmd.split(' ', 1)[0].strip('"'))
+                if exe and not exe.is_file():
+                    exe = None
+        except Exception:
+            exe = None
+
+        if exe and exe.name.lower() in {
+            'msedge.exe', 'chrome.exe', 'brave.exe', 'opera.exe', 'vivaldi.exe'
+        }:
+            subprocess.Popen(
+                [str(exe), '--new-window', url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        if exe:
+            subprocess.Popen([str(exe), url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        os.startfile(url)
+
+    def _open_web_zotero_library(self) -> None:
+        """Open configured Web Zotero URL (skipped if empty). Place on other screen when possible."""
+        url = (getattr(self, 'zotero_web_library_url', None) or '').strip()
+        if not url:
+            return
+
+        try:
+            self.logger.info(f"Opening Web Zotero library: {url}")
+            if not self.is_windows:
+                webbrowser.open(url, new=2)
+                return
+
+            # Same virtual desktop as the terminal, then move to the other monitor.
+            self._return_focus_to_terminal()
+            self._open_url_default_browser(url)
+            time.sleep(2.0)
+            self._position_browser_on_other_screen()
+            time.sleep(0.5)
+            self._return_focus_to_terminal()
+        except Exception as e:
+            self.logger.warning(f"Could not open Web Zotero library: {e}")
+
+    def _position_browser_on_other_screen(self) -> None:
+        """Activate browser on this desktop; maximize on the non-terminal monitor if present."""
+        if sys.platform != 'win32':
+            return
+
+        terminal_hwnd = 0
+        if getattr(self, '_terminal_window_handle', None):
+            try:
+                terminal_hwnd = int(self._terminal_window_handle)
+            except (ValueError, TypeError):
+                terminal_hwnd = 0
+
+        for attempt in range(3):
+            try:
+                ps_script = f'''
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32Browser {{
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+}}
+public struct RECT {{ public int Left; public int Top; public int Right; public int Bottom; }}
+"@
+
+$terminalHwnd = [IntPtr]{terminal_hwnd}
+if ($terminalHwnd -ne [IntPtr]::Zero -and [Win32Browser]::IsWindowVisible($terminalHwnd)) {{
+    [Win32Browser]::ShowWindow($terminalHwnd, 9)
+    Start-Sleep -Milliseconds 150
+    [Win32Browser]::SetForegroundWindow($terminalHwnd)
+    Start-Sleep -Milliseconds 400
+}}
+
+$screens = [System.Windows.Forms.Screen]::AllScreens
+$terminalScreen = [System.Windows.Forms.Screen]::PrimaryScreen
+if ($terminalHwnd -ne [IntPtr]::Zero -and [Win32Browser]::IsWindowVisible($terminalHwnd)) {{
+    $r = New-Object RECT
+    if ([Win32Browser]::GetWindowRect($terminalHwnd, [ref]$r)) {{
+        $pt = New-Object System.Drawing.Point(([int](($r.Left+$r.Right)/2)), ([int](($r.Top+$r.Bottom)/2)))
+        foreach ($s in $screens) {{ if ($s.Bounds.Contains($pt)) {{ $terminalScreen = $s; break }} }}
+    }}
+}}
+
+$otherScreen = $null
+if ($screens.Count -ge 2) {{
+    foreach ($s in $screens) {{
+        if ($s.DeviceName -ne $terminalScreen.DeviceName) {{ $otherScreen = $s; break }}
+    }}
+}}
+
+$names = @('msedge','chrome','firefox','brave','opera','vivaldi')
+$candidates = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {{
+    $_.MainWindowHandle -ne [IntPtr]::Zero -and ($names -contains $_.ProcessName.ToLower())
+}})
+$browserHwnd = [IntPtr]::Zero
+foreach ($p in $candidates) {{
+    if ($p.MainWindowTitle -like '*Zotero*' -or $p.MainWindowTitle -like '*zotero.org*') {{
+        $browserHwnd = $p.MainWindowHandle; break
+    }}
+}}
+if ($browserHwnd -eq [IntPtr]::Zero -and $candidates.Count -gt 0) {{
+    $browserHwnd = ($candidates | Sort-Object StartTime -Descending | Select-Object -First 1).MainWindowHandle
+}}
+if ($browserHwnd -eq [IntPtr]::Zero) {{ Write-Host "BROWSER_NOT_FOUND"; exit 1 }}
+
+[Win32Browser]::ShowWindow($browserHwnd, 9)
+Start-Sleep -Milliseconds 100
+[Win32Browser]::SetForegroundWindow($browserHwnd)
+Start-Sleep -Milliseconds 300
+
+if ($otherScreen) {{
+    $wa = $otherScreen.WorkingArea
+    if ([Win32Browser]::SetWindowPos($browserHwnd, [IntPtr]::Zero, $wa.X, $wa.Y, $wa.Width, $wa.Height, 0x0040)) {{
+        [Win32Browser]::ShowWindow($browserHwnd, 3)
+        [Win32Browser]::SetForegroundWindow($browserHwnd)
+        Write-Host "SUCCESS"
+    }} else {{ Write-Host "SETWINDOWPOS_FAILED"; exit 1 }}
+}} else {{
+    Write-Host "SINGLE_MONITOR"
+}}
+'''
+                result = subprocess.run(
+                    ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10,
+                    text=True,
+                )
+                output = (result.stdout or '').strip()
+                if "SUCCESS" in output or "SINGLE_MONITOR" in output:
+                    self.logger.info(f"Web Zotero browser ready: {output.splitlines()[-1] if output else 'ok'}")
+                    return
+                if attempt < 2:
+                    time.sleep(0.6)
+                else:
+                    self.logger.warning(f"Could not place Web Zotero browser: {output or 'no output'}")
+            except Exception as e:
+                self.logger.debug(f"Browser placement attempt {attempt + 1} failed: {e}")
+                if attempt < 2:
+                    time.sleep(0.6)
     
     def _position_pdf_window(self, pdf_path: Path):
         """Position PDF viewer window on the left half of the screen and ensure it's on the same desktop as terminal.

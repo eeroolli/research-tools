@@ -22,6 +22,7 @@ Directory paths for the daemon.
 
 - `scanner_papers_dir`: Directory to watch for new scanned PDFs (WSL or Windows format)
 - `publications_dir`: Directory where processed PDFs are copied
+- `zotero_web_library_url`: Web Zotero library URL opened in the default browser at daemon start (e.g. `https://www.zotero.org/your.name/library`). Leave empty to disable.
 
 Recommended Windows-first setup (native Windows Python, CMD/PowerShell):
 
@@ -29,6 +30,7 @@ Recommended Windows-first setup (native Windows Python, CMD/PowerShell):
 [PATHS]
 scanner_papers_dir = I:\FraScanner\papers
 publications_dir = I:\publications
+zotero_web_library_url = https://www.zotero.org/your.name/library
 ```
 
 Equivalent WSL-style paths (when running the daemon inside WSL):
@@ -304,6 +306,7 @@ In this mode (`sys.platform == 'win32'`):
 
 - Windows-style paths in `[PATHS]` (like `I:\FraScanner\papers` and `I:\publications`) are used directly.
 - The daemon can manage the terminal window position and the PDF viewer window using Windows APIs.
+- At startup, if `PATHS.zotero_web_library_url` is set, the default browser opens that Web Zotero library; with two or more monitors the browser is moved to the screen that does not host the terminal.
 - PDF files are opened with the default Windows PDF viewer (e.g. SumatraPDF, Edge, Acrobat) using `os.startfile`.
 
 Running the daemon from inside WSL is still supported as a best-effort mode, but Windows-specific features (terminal snapping, PDF window positioning, PowerShell-based file copying) are skipped, and only Linux tools such as `wslview` and `xdg-open` are used for opening PDFs.
