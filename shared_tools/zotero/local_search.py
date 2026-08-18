@@ -21,6 +21,18 @@ from shared_tools.utils.isbn_matcher import ISBNMatcher
 
 class ZoteroLocalSearch:
     """Search local Zotero database for matching items."""
+
+    # SQLite/Zotero fieldName values loaded onto every match dict.
+    BIBLIOGRAPHIC_FIELD_NAMES = (
+        'volume',
+        'issue',
+        'pages',
+        'ISSN',
+        'publisher',
+        'url',
+        'ISBN',
+        'language',
+    )
     
     def __init__(self, db_path: str = None):
         """
@@ -231,7 +243,7 @@ class ZoteroLocalSearch:
                 tags = self._get_tags(item_id)
                 creators = self._get_item_creators(cursor, item_id)
                 
-                matches.append({
+                match = {
                     'item_key': item_key,
                     'title': title or "Unknown",
                     'authors': authors,
@@ -246,7 +258,9 @@ class ZoteroLocalSearch:
                     'abstract': abstract,
                     'tags': tags,
                     'creators': creators
-                })
+                }
+                self._attach_bibliographic_fields(match, item_id)
+                matches.append(match)
         
         except Exception as e:
             self.logger.error(f"Error searching by DOI: {e}")
@@ -313,7 +327,7 @@ class ZoteroLocalSearch:
                 creators = self._get_item_creators(cursor, item_id)
                 year = self._extract_year(date_str)
 
-                matches.append({
+                match = {
                     'item_key': item_key,
                     'title': title or "Unknown",
                     'authors': authors,
@@ -329,7 +343,9 @@ class ZoteroLocalSearch:
                     'tags': tags,
                     'creators': creators,
                     'isbn': isbn_value
-                })
+                }
+                self._attach_bibliographic_fields(match, item_id)
+                matches.append(match)
                 processed_ids.add(item_id)
 
                 if len(matches) >= limit:
@@ -381,7 +397,7 @@ class ZoteroLocalSearch:
                     creators = self._get_item_creators(cursor, item_id)
                     year = self._extract_year(date_str)
 
-                    matches.append({
+                    match = {
                         'item_key': item_key,
                         'title': title or "Unknown",
                         'authors': authors,
@@ -397,7 +413,9 @@ class ZoteroLocalSearch:
                         'tags': tags,
                         'creators': creators,
                         'isbn': extra_value
-                    })
+                    }
+                    self._attach_bibliographic_fields(match, item_id)
+                    matches.append(match)
                     processed_ids.add(item_id)
 
                     if len(matches) >= limit:
@@ -442,7 +460,7 @@ class ZoteroLocalSearch:
                 abstract = self._get_abstract(item_id)
                 tags = self._get_tags(item_id)
                 creators = self._get_item_creators(cursor, item_id)
-                matches.append({
+                match = {
                     'item_key': item_key,
                     'title': title or "Unknown",
                     'authors': authors,
@@ -457,7 +475,9 @@ class ZoteroLocalSearch:
                     'abstract': abstract,
                     'tags': tags,
                     'creators': creators,
-                })
+                }
+                self._attach_bibliographic_fields(match, item_id)
+                matches.append(match)
             except Exception as e:
                 self.logger.error(f"Error building arXiv match for {item_key}: {e}")
 
@@ -622,7 +642,7 @@ class ZoteroLocalSearch:
                     tags = self._get_tags(item_id)
                     creators = self._get_item_creators(self.db_connection.cursor(), item_id)
                     
-                    matches.append({
+                    match = {
                         'item_key': item_key,
                         'title': db_title,
                         'authors': item_authors,
@@ -637,7 +657,9 @@ class ZoteroLocalSearch:
                         'abstract': abstract,
                         'tags': tags,
                         'creators': creators
-                    })
+                    }
+                    self._attach_bibliographic_fields(match, item_id)
+                    matches.append(match)
         
         except Exception as e:
             self.logger.error(f"Error in fuzzy title search: {e}")
@@ -813,6 +835,43 @@ class ZoteroLocalSearch:
             self.logger.debug(f"Error getting journal: {e}")
         
         return None
+
+    def _get_item_data_fields(self, item_id: int, field_names=None) -> Dict[str, str]:
+        """Fetch Zotero itemData fields in one query.
+
+        Returns a dict keyed by SQLite/Zotero fieldName (e.g. 'ISSN', 'volume').
+        """
+        names = tuple(field_names) if field_names is not None else self.BIBLIOGRAPHIC_FIELD_NAMES
+        if not names or not self.db_connection:
+            return {}
+        try:
+            placeholders = ','.join('?' * len(names))
+            query = f"""
+            SELECT fields.fieldName, itemDataValues.value
+            FROM itemData
+            JOIN fields ON itemData.fieldID = fields.fieldID
+            JOIN itemDataValues ON itemData.valueID = itemDataValues.valueID
+            WHERE itemData.itemID = ?
+              AND fields.fieldName IN ({placeholders})
+            """
+            cursor = self.db_connection.cursor()
+            cursor.execute(query, (item_id, *names))
+            result = {}
+            for field_name, value in cursor.fetchall():
+                if value:
+                    result[field_name] = value
+            return result
+        except Exception as e:
+            self.logger.debug(f"Error getting bibliographic fields: {e}")
+            return {}
+
+    def _attach_bibliographic_fields(self, item: dict, item_id: int) -> dict:
+        """Copy SQLite bibliographic fields onto a match dict without overwriting."""
+        fields = self._get_item_data_fields(item_id)
+        for name, value in fields.items():
+            if value and not item.get(name):
+                item[name] = value
+        return item
     
     def _get_doi(self, item_id: int) -> Optional[str]:
         """Get DOI for an item."""
@@ -1035,6 +1094,7 @@ class ZoteroLocalSearch:
                 
                 # Check for attachments
                 item['hasAttachment'] = self._has_attachment(item['itemID'])
+                self._attach_bibliographic_fields(item, item['itemID'])
                 
                 results.append(item)
             
@@ -1177,6 +1237,7 @@ class ZoteroLocalSearch:
                 item['url'] = self._get_url(item['itemID'])
                 item['abstractNote'] = self._get_abstract(item['itemID'])
                 item['tags'] = self._get_tags(item['itemID'])
+                self._attach_bibliographic_fields(item, item['itemID'])
                 
                 # Calculate match score based on author order
                 item['order_score'] = self._calculate_author_order_score(

@@ -49,3 +49,29 @@ def test_planner_ignores_equivalent_document_type_aliases():
     plan = planner.build_plan(zotero, candidate, {"evidence": {}})
     assert "document_type" not in plan["manual_fields"]
     assert plan["updates"].get("pages") == "1-2"
+
+
+def test_planner_skips_present_volume_issue_pages():
+    planner = EnrichmentPlanner()
+    zotero = {
+        "title": "Paper",
+        "authors": ["Doe"],
+        "year": "2002",
+        "volume": "36",
+        "issue": "1",
+        "pages": "48-72",
+    }
+    candidate = {
+        "title": "Paper",
+        "authors": ["Doe"],
+        "year": "2002",
+        "volume": "36",
+        "issue": "1",
+        "pages": "48-72",
+        "doi": "10.1177/example",
+    }
+    plan = planner.build_plan(zotero, candidate, {"evidence": {}})
+    assert "volume" not in plan["updates"]
+    assert "issue" not in plan["updates"]
+    assert "pages" not in plan["updates"]
+    assert plan["updates"].get("doi") == "10.1177/example"

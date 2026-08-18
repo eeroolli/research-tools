@@ -3306,8 +3306,8 @@ class PaperProcessorDaemon:
         metadata = {
             'title': zotero_item.get('title', ''),
             'year': zotero_item.get('year', ''),
-            'document_type': zotero_item.get('itemType', 'unknown'),
-            'zotero_key': zotero_item.get('key'),
+            'document_type': zotero_item.get('itemType') or zotero_item.get('item_type') or 'unknown',
+            'zotero_key': zotero_item.get('key') or zotero_item.get('item_key'),
             'from_zotero': True,
             'source': 'Zotero',
             'method': 'zotero_manual'
@@ -3324,37 +3324,37 @@ class PaperProcessorDaemon:
                     authors.append(f"{last}, {first}" if first else last)
         metadata['authors'] = authors
         
-        # Copy other fields if present
-        if zotero_item.get('DOI'):
-            metadata['doi'] = zotero_item['DOI']
+        # Copy other fields if present. Accept Zotero names and mixed local_search keys.
+        doi = zotero_item.get('DOI') or zotero_item.get('doi')
+        if doi:
+            metadata['doi'] = doi
             metadata['doi_source'] = 'zotero'
         # Journal: prefer publicationTitle, fallback to journal (from local DB)
         if zotero_item.get('publicationTitle'):
             metadata['journal'] = zotero_item['publicationTitle']
         elif zotero_item.get('journal'):
             metadata['journal'] = zotero_item['journal']
-        if zotero_item.get('abstractNote'):
-            metadata['abstract'] = zotero_item['abstractNote']
-        # ISSN: check both uppercase and lowercase variants
-        if zotero_item.get('ISSN'):
-            metadata['issn'] = zotero_item['ISSN']
-        elif zotero_item.get('issn'):
-            metadata['issn'] = zotero_item['issn']
-        # URL
+        abstract = zotero_item.get('abstractNote') or zotero_item.get('abstract')
+        if abstract:
+            metadata['abstract'] = abstract
+        issn = zotero_item.get('ISSN') or zotero_item.get('issn')
+        if issn:
+            metadata['issn'] = issn
+        isbn = zotero_item.get('ISBN') or zotero_item.get('isbn')
+        if isbn:
+            metadata['isbn'] = isbn
         if zotero_item.get('url'):
             metadata['url'] = zotero_item['url']
-        # Pages
         if zotero_item.get('pages'):
             metadata['pages'] = zotero_item['pages']
-        # Volume
         if zotero_item.get('volume'):
             metadata['volume'] = zotero_item['volume']
-        # Issue
         if zotero_item.get('issue'):
             metadata['issue'] = zotero_item['issue']
-        # Publisher
         if zotero_item.get('publisher'):
             metadata['publisher'] = zotero_item['publisher']
+        if zotero_item.get('language'):
+            metadata['language'] = zotero_item['language']
         
         # #region agent log
         try:
