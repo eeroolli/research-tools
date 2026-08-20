@@ -1447,7 +1447,7 @@ def create_pdf_preview_page(daemon) -> Page:
         # If the preview looks wrong, rerun with gutter detection + border removal.
         if preprocessing_state.get('split_method', 'none') == '50-50':
             option_num += 1
-            lines.append(f"  [{option_num}] Improve split (gutter detection + border removal)")
+            lines.append(f"  [{option_num}] Improve border detection and split")
         
         if preprocessing_state.get('border_removal', False):
             option_num += 1
@@ -1703,7 +1703,7 @@ def _handle_improve_split_gutter_and_borders(ctx, daemon):
     """Handler for rerunning split using gutter detection + border removal."""
     original_pdf = _preprocess_restart_source(ctx, daemon)
     preprocessing_state = ctx.get('preprocessing_state', {}).copy()
-    print("\n🔄 Improving split (gutter detection + border removal)...")
+    print("\n🔄 Improving border detection and split...")
     
     processed_pdf, new_state = daemon._preprocess_pdf_with_options(
         original_pdf,

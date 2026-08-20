@@ -321,13 +321,13 @@ are treated as two-up pages and are split automatically during the PDF preproces
 
 - **When it happens**
   - At the **start** of processing a scan (after any document-separator check, **before** metadata extraction / GROBID / online search), the daemon runs a **PDF PREPROCESSING** phase.
-  - If the original filename contains `_double`, preprocessing will **always attempt to split** the scan into single pages using a fast **50/50 geometric** split without border removal. From **PDF PREVIEW**, choose **Improve split (gutter detection + border removal)** when the pages need a content-aware split.
+  - If the original filename contains `_double`, preprocessing will **always attempt to split** the scan into single pages using a fast **50/50 geometric** split without border removal. From **PDF PREVIEW**, choose **Improve border detection and split** when the pages need a content-aware split.
 - **What you see in the terminal**
   - A `PDF PREPROCESSING` header appears near the beginning of processing (before GREP/GROBID).
   - For `_double` scans you should see:
     - `Auto-splitting due to '_double' in filename...`
   - In the preprocessing preview menu, the `Current preprocessing` section shows:
-    - `Split: ✓ Applied (50/50 geometric)` after the initial pass, or `Split: ✓ Applied (gutter detection)` after using **Improve split**.
+    - `Split: ✓ Applied (50/50 geometric)` after the initial pass, or `Split: ✓ Applied (gutter detection)` after using **Improve border detection and split**.
 - **How it is logged**
   - The CSV log at `data/logs/scanned_papers_log.csv` contains a `split` column:
     - `"yes"`  – split was attempted and succeeded.

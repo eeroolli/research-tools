@@ -6754,7 +6754,7 @@ class PaperProcessorDaemon:
         - Accept and proceed
         - Drop border removal
         - Drop split
-        - Improve split (gutter detection + border removal) when currently using fast 50/50
+        - Improve border detection and split when currently using fast 50/50
         - Use 50/50 split instead
         - Drop trimming
         - Cancel this scan
@@ -6834,7 +6834,7 @@ class PaperProcessorDaemon:
             if preprocessing_state.get('split_method', 'none') == '50-50':
                 option_num += 1
                 option_map[option_num] = 'improve_split'
-                print(Colors.colorize(f"  [{option_num}] Improve split (gutter detection + border removal)", ColorScheme.LIST))
+                print(Colors.colorize(f"  [{option_num}] Improve border detection and split", ColorScheme.LIST))
             
             if preprocessing_state.get('split_method', 'none') != 'none':
                 option_num += 1
@@ -6911,7 +6911,7 @@ class PaperProcessorDaemon:
                     elif action == 'improve_split':
                         # Rerun with gutter detection and border removal (slower, higher accuracy).
                         new_state = preprocessing_state.copy()
-                        print("\n🔄 Improving split (gutter detection + border removal)...")
+                        print("\n🔄 Improving border detection and split...")
                         processed_pdf, new_state = self._preprocess_pdf_with_options(
                             original_pdf,
                             border_removal=True,
