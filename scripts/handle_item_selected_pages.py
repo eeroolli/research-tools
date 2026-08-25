@@ -10,6 +10,7 @@ from typing import Dict, List
 from shared_tools.ui.navigation import Page, NavigationResult
 from shared_tools.utils.filename_generator import FilenameGenerator
 from shared_tools.utils.enrichment_ui import parse_index_selection, clear_enrichment_context
+from shared_tools.pdf.trim_pages import format_page_list
 
 
 def _preprocess_restart_source(ctx, daemon) -> Path:
@@ -1425,7 +1426,13 @@ def create_pdf_preview_page(daemon) -> Page:
         else:
             split_status = "✗ Not applied"
         
-        trim_status = "✓ Applied" if preprocessing_state.get('trim_leading', False) else "✗ Not applied"
+        trim_pages = preprocessing_state.get('trim_pages') or []
+        if preprocessing_state.get('trim_leading', False) and trim_pages:
+            trim_status = f"✓ Applied (pages {format_page_list(trim_pages)})"
+        elif preprocessing_state.get('trim_leading', False):
+            trim_status = "✓ Applied"
+        else:
+            trim_status = "✗ Not applied"
         
         lines = [
             "",
@@ -1461,10 +1468,12 @@ def create_pdf_preview_page(daemon) -> Page:
             option_num += 1
             lines.append(f"  [{option_num}] Use 50/50 split instead")
         
-        # Show "Add trimming" if not applied, "Drop trimming" if applied
+        # Show "Add trimming" if not applied; "Drop" + "Add more" if applied
         if preprocessing_state.get('trim_leading', False):
             option_num += 1
             lines.append(f"  [{option_num}] Drop trimming")
+            option_num += 1
+            lines.append(f"  [{option_num}] Add more pages to trim")
         else:
             option_num += 1
             lines.append(f"  [{option_num}] Add trimming")
@@ -1517,6 +1526,8 @@ def create_pdf_preview_page(daemon) -> Page:
                 return _handle_drop_trimming(ctx, daemon)
             elif action == 'add_trim':
                 return _handle_add_trimming(ctx, daemon)
+            elif action == 'add_more_trim':
+                return _handle_add_more_trimming(ctx, daemon)
             elif action == 'manual_split':
                 return _handle_manual_split(ctx, daemon)
             elif action == 'separate_documents':
@@ -1575,7 +1586,7 @@ def _get_pdf_preview_option_action(option_num: int, preprocessing_state: dict) -
     """Determine what action corresponds to an option number based on current state.
     
     Returns: 'accept', 'drop_border', 'drop_split', 'use_5050', 'drop_trim', 'add_trim',
-    'manual_split', 'separate_documents', or None
+    'add_more_trim', 'manual_split', 'separate_documents', or None
     """
     if option_num == 1:
         return 'accept'
@@ -1602,12 +1613,17 @@ def _get_pdf_preview_option_action(option_num: int, preprocessing_state: dict) -
         if option_count == option_num:
             return 'use_5050'
     
-    # Handle trimming: "Drop trimming" if applied, "Add trimming" if not applied
-    option_count += 1
-    if option_count == option_num:
-        if preprocessing_state.get('trim_leading', False):
+    # Trimming: Add, or Drop + Add more
+    if preprocessing_state.get('trim_leading', False):
+        option_count += 1
+        if option_count == option_num:
             return 'drop_trim'
-        else:
+        option_count += 1
+        if option_count == option_num:
+            return 'add_more_trim'
+    else:
+        option_count += 1
+        if option_count == option_num:
             return 'add_trim'
     
     # Manual split option - always available
@@ -1655,8 +1671,9 @@ def _handle_drop_border_removal(ctx, daemon):
         original_pdf,
         border_removal=False,
         split_method=preprocessing_state.get('split_method', 'auto'),
-        trim_leading=preprocessing_state.get('trim_leading', True),
+        trim_leading=False,
         manual_split_ratio=preprocessing_state.get('manual_split_ratio'),
+        trim_pages=preprocessing_state.get('trim_pages') or None,
     )
     
     _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
@@ -1675,7 +1692,8 @@ def _handle_drop_split(ctx, daemon):
         original_pdf,
         border_removal=preprocessing_state.get('border_removal', True),
         split_method='none',
-        trim_leading=preprocessing_state.get('trim_leading', True)
+        trim_leading=False,
+        trim_pages=preprocessing_state.get('trim_pages') or None,
     )
     
     _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
@@ -1692,7 +1710,8 @@ def _handle_use_5050_split(ctx, daemon):
         original_pdf,
         border_removal=preprocessing_state.get('border_removal', True),
         split_method='50-50',
-        trim_leading=preprocessing_state.get('trim_leading', True)
+        trim_leading=False,
+        trim_pages=preprocessing_state.get('trim_pages') or None,
     )
     
     _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
@@ -1709,7 +1728,9 @@ def _handle_improve_split_gutter_and_borders(ctx, daemon):
         original_pdf,
         border_removal=True,
         split_method='auto',
-        trim_leading=preprocessing_state.get('trim_leading', True)
+        trim_leading=False,
+        trim_pages=preprocessing_state.get('trim_pages') or None,
+        manual_split_ratio=preprocessing_state.get('manual_split_ratio'),
     )
     
     _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
@@ -1728,6 +1749,7 @@ def _handle_drop_trimming(ctx, daemon):
         split_method=preprocessing_state.get('split_method', 'auto'),
         trim_leading=False,
         manual_split_ratio=preprocessing_state.get('manual_split_ratio'),
+        trim_pages=None,
     )
     
     _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
@@ -1735,7 +1757,7 @@ def _handle_drop_trimming(ctx, daemon):
 
 
 def _handle_add_trimming(ctx, daemon):
-    """Handler for adding trimming - reprocess PDF."""
+    """Handler for adding trimming - reprocess PDF (prompts; no stored list)."""
     original_pdf = _preprocess_restart_source(ctx, daemon)
     preprocessing_state = ctx.get('preprocessing_state', {}).copy()
     print("\n🔄 Restarting preprocessing with trimming...")
@@ -1746,8 +1768,34 @@ def _handle_add_trimming(ctx, daemon):
         split_method=preprocessing_state.get('split_method', 'auto'),
         trim_leading=True,
         manual_split_ratio=preprocessing_state.get('manual_split_ratio'),
+        trim_pages=None,
     )
     
+    _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
+    return NavigationResult.show_page('pdf_preview')
+
+
+def _handle_add_more_trimming(ctx, daemon):
+    """Add more pages to an existing trim list (map from current preview)."""
+    original_pdf = _preprocess_restart_source(ctx, daemon)
+    preprocessing_state = ctx.get('preprocessing_state', {}).copy()
+    current_pdf = ctx.get('processed_pdf') or ctx.get('pdf_path')
+    unioned = daemon._prompt_add_more_trim_pages(
+        Path(current_pdf),
+        list(preprocessing_state.get('trim_pages') or []),
+    )
+    if unioned is None:
+        return NavigationResult.show_page('pdf_preview')
+    
+    print("\n🔄 Restarting preprocessing with updated trim...")
+    processed_pdf, new_state = daemon._preprocess_pdf_with_options(
+        original_pdf,
+        border_removal=preprocessing_state.get('border_removal', False),
+        split_method=preprocessing_state.get('split_method', 'none'),
+        trim_leading=False,
+        manual_split_ratio=preprocessing_state.get('manual_split_ratio'),
+        trim_pages=unioned,
+    )
     _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
     return NavigationResult.show_page('pdf_preview')
 
@@ -1784,14 +1832,15 @@ def _handle_manual_split(ctx, daemon):
             print("\n❌ Cancelled")
             return NavigationResult.show_page('pdf_preview')
     
-    # Restart from original: border → manual split → trim (re-applies prior trim if set)
+    # Restart from original: border → manual split → silent trim if list set
     print("\n🔄 Restarting preprocessing with manual split...")
     processed_pdf, new_state = daemon._preprocess_pdf_with_options(
         original_pdf,
         border_removal=preprocessing_state.get('border_removal', False),
         split_method='manual',
-        trim_leading=preprocessing_state.get('trim_leading', False),
+        trim_leading=False,
         manual_split_ratio=ratio,
+        trim_pages=preprocessing_state.get('trim_pages') or None,
     )
     _store_preprocess_restart_result(ctx, daemon, processed_pdf, new_state)
     return NavigationResult.show_page('pdf_preview')

@@ -232,6 +232,22 @@ def test_stem_for_preprocessed_artifacts_strips_trailing_double() -> None:
     assert PaperProcessorDaemon._stem_for_preprocessed_artifacts(p2) == "EN_x_004_double__part1"
 
 
+def test_stem_for_preprocessed_artifacts_strips_existing_preprocessed_prefix() -> None:
+    """Border→split must not yield PREPROCESSED_PREPROCESSED_* names."""
+    chained = Path("/tmp/pdf_splits/PREPROCESSED_EN_x_004_no_borders.pdf")
+    assert (
+        PaperProcessorDaemon._stem_for_preprocessed_artifacts(chained)
+        == "EN_x_004_no_borders"
+    )
+    double = Path("/tmp/PREPROCESSED_PREPROCESSED_EN_x_no_borders_split.pdf")
+    assert (
+        PaperProcessorDaemon._stem_for_preprocessed_artifacts(double)
+        == "EN_x_no_borders_split"
+    )
+    plain = Path("/tmp/EN_x_004.pdf")
+    assert PaperProcessorDaemon._stem_for_preprocessed_artifacts(plain) == "EN_x_004"
+
+
 def test_enqueue_paper_dedupes_duplicate_paths(daemon: PaperProcessorDaemon, tmp_path: Path) -> None:
     """Watcher + separator must not queue the same resolved path twice."""
     pdf_path = tmp_path / "watch" / "EN_x__part1.pdf"

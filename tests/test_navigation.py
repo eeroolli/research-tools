@@ -222,6 +222,20 @@ class TestPdfPreviewOptionAction(unittest.TestCase):
         self.assertEqual(_get_pdf_preview_option_action(7, state), "separate_documents")
         self.assertEqual(_get_pdf_preview_option_action(6, state), "manual_split")
 
+    def test_add_more_trim_option_when_trim_applied(self):
+        from handle_item_selected_pages import _get_pdf_preview_option_action
+
+        state = {
+            "split_method": "none",
+            "border_removal": False,
+            "trim_leading": True,
+            "trim_pages": [1],
+        }
+        # 1 accept, 2 drop trim, 3 add more, 4 manual, 5 separate
+        self.assertEqual(_get_pdf_preview_option_action(2, state), "drop_trim")
+        self.assertEqual(_get_pdf_preview_option_action(3, state), "add_more_trim")
+        self.assertEqual(_get_pdf_preview_option_action(5, state), "separate_documents")
+
     def test_last_option_separate_documents_minimal_menu(self):
         from handle_item_selected_pages import _get_pdf_preview_option_action
 
@@ -251,6 +265,55 @@ class TestPdfPreviewOptionAction(unittest.TestCase):
             scan, log_entry={"status": "success", "split": "document_separator"}
         )
         self.assertEqual(daemon._enqueue_paper.call_count, 2)
+
+    def test_handle_separate_documents_uses_scan_path_and_processed_page_source(self):
+        """Separator outputs/done use watch-folder scan; page indices use processed PDF."""
+        from handle_item_selected_pages import _handle_separate_documents
+
+        scan = Path("/watch/EN_20260820_0001.pdf")
+        processed = Path(
+            "/tmp/pdf_splits/PREPROCESSED_EN_20260820_0001_no_borders_split.pdf"
+        )
+        p1 = Path("/watch/EN_20260820_0001__part1.pdf")
+        p2 = Path("/watch/EN_20260820_0001__part2.pdf")
+        daemon = MagicMock()
+        daemon._separate_pdf_into_files_interactive.return_value = [p1, p2]
+        daemon.should_process.return_value = True
+        ctx = {"pdf_path": scan, "processed_pdf": processed}
+        with patch.object(Path, "exists", return_value=True):
+            result = _handle_separate_documents(ctx, daemon)
+        self.assertEqual(result.type, NavigationResult.Type.SEPARATE_DOCUMENTS_QUEUED)
+        daemon._separate_pdf_into_files_interactive.assert_called_once_with(
+            scan, page_source_pdf=processed
+        )
+        daemon.move_to_done.assert_called_once_with(
+            scan, log_entry={"status": "success", "split": "document_separator"}
+        )
+
+    def test_proposed_actions_scan_line_uses_context_pdf_path(self):
+        """PROPOSED ACTIONS 'Scan:' must show watch-folder identity (ctx pdf_path)."""
+        from handle_item_selected_pages import create_proposed_actions_page
+
+        scan = Path("/watch/EN_20260820_0001.pdf")
+        page = create_proposed_actions_page(MagicMock(publications_dir=Path("/pubs")))
+        daemon = MagicMock()
+        daemon.publications_dir = Path("/pubs")
+        daemon._pub_exists.return_value = False
+        ctx = {
+            "daemon": daemon,
+            "pdf_path": scan,
+            "scan_size_mb": 12.3,
+            "target_filename": "Author_1991_Title__scan.pdf",
+        }
+        lines = page.content(ctx)
+        self.assertTrue(
+            any(line.startswith("Scan: EN_20260820_0001.pdf") for line in lines),
+            lines,
+        )
+        self.assertFalse(
+            any("PREPROCESSED_" in line for line in lines if line.startswith("Scan:")),
+            lines,
+        )
 
 
 if __name__ == '__main__':

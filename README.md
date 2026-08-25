@@ -344,6 +344,19 @@ This project follows the coding standards defined in `programming_preferences.md
 - Write robust, clear, and maintainable code
 - Follow industry best practices for security and testing
 
+## Library maintenance
+
+One-off (and safely re-runnable) Zotero cleanup scripts:
+
+- **Author name order** — fix old-import one-field names like `Brendon Swedlow` into `Swedlow, Brendon`. Scan → confirm → backup → Web API apply; second run is a no-op when the library is clean.
+
+```bash
+python scripts/fix_zotero_author_name_order.py          # scan only
+python scripts/fix_zotero_author_name_order.py --review # approve, then optional apply
+```
+
+Full guide: [docs/fix_zotero_author_name_order.md](docs/fix_zotero_author_name_order.md)
+
 ## Documentation
 
 - **[Implementation Plan](implementation-plan.md)** - Detailed technical roadmap and development phases
@@ -352,6 +365,7 @@ This project follows the coding standards defined in `programming_preferences.md
 - **[GPU Optimization](gpu-optimization-suggestions.md)** - Performance optimization options
 - **[GROBID Setup](GROBID_SETUP.md)** - GROBID integration and configuration guide
 - **[Path Utilities](scripts/PATH_UTILS_README.md)** - WSL/Windows path handling utilities documentation
+- **[Fix Zotero author name order](docs/fix_zotero_author_name_order.md)** - One-field → Last, First cleanup with backup/revert
 
 ## License
 

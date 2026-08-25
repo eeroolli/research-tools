@@ -8,6 +8,7 @@ import re
 from typing import Optional, List
 
 from .identifier_extractor import IdentifierExtractor
+from .author_name_splitter import lastname_in_text
 import os
 import json
 import time
@@ -178,22 +179,20 @@ class GrobidValidator:
                     matched_by = 'partial_expand'
                     break
 
-            if last_name and len(last_name) > 2:
-                last_name_escaped = re.escape(last_name)
-                pattern = r'\b' + last_name_escaped + r'\b'
-                if re.search(pattern, doc_text):
-                    last_name_found = True
-                    found_in_text = True
-                    matched_by = matched_by or 'last_name_word_boundary'
-                elif last_name in doc_text:
-                    idx = doc_text.find(last_name)
-                    if idx >= 0:
-                        before_ok = (idx == 0 or not doc_text[idx - 1].isalnum())
-                        after_ok = (idx + len(last_name) >= len(doc_text) or not doc_text[idx + len(last_name)].isalnum())
-                        if before_ok and after_ok:
-                            last_name_found = True
-                            found_in_text = True
-                            matched_by = matched_by or 'last_name_fallback'
+            if last_name and lastname_in_text(
+                last_name, doc_text, allow_substring_if_long=True
+            ):
+                last_name_found = True
+                found_in_text = True
+                # Prefer word-boundary semantics; substring only for long names.
+                if re.search(
+                    r"\b" + re.escape(last_name) + r"\b",
+                    doc_text,
+                    flags=re.IGNORECASE,
+                ):
+                    matched_by = matched_by or "last_name_word_boundary"
+                else:
+                    matched_by = matched_by or "last_name_fallback"
 
             if last_name_found and first_name and len(first_name) > 1:
                 first_pattern = r'\b' + re.escape(first_name) + r'\b'

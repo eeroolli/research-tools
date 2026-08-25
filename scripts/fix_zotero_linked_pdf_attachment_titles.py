@@ -34,6 +34,7 @@ if str(ROOT) not in sys.path:
 import requests
 
 from shared_tools.config.io import read_config_files
+from shared_tools.utils.author_name_splitter import as_name_str
 from shared_tools.zotero.paper_processor import ZoteroPaperProcessor
 
 
@@ -126,12 +127,12 @@ def _author_summary(creators: List[Dict[str, Any]]) -> str:
     if not creators:
         return ""
     first = creators[0] or {}
-    last = (first.get("lastName") or "").strip()
-    first_name = (first.get("firstName") or "").strip()
+    last = as_name_str(first.get("lastName"))
+    first_name = as_name_str(first.get("firstName"))
     name = " ".join([x for x in [first_name, last] if x]).strip()
     if name:
         return name
-    return (first.get("name") or "").strip()
+    return as_name_str(first.get("name"))
 
 
 def _fetch_parent_metadata(

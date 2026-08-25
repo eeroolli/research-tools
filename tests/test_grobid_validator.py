@@ -59,3 +59,21 @@ def test_grobid_validator_uses_regex_when_all_filtered(monkeypatch, tmp_path):
         logger=logging.getLogger()
     )
     assert updated["authors"] == ["Georg Simmel"]
+
+
+def test_grobid_validator_keeps_digit_lastname(monkeypatch, tmp_path):
+    """Short/digit last names (e.g. 6) must not be filtered when present in text."""
+    metadata = {
+        "authors": ["6, Perry", "Ghost, Author"],
+        "extraction_method": "grobid",
+    }
+    monkeypatch.setattr(
+        identifier_extractor_module.IdentifierExtractor,
+        "extract_text",
+        classmethod(lambda cls, *args, **kwargs: "Essay by Perry 6 on methods."),
+    )
+    updated = GrobidValidator.validate_authors(
+        metadata, tmp_path / "dummy.pdf", logger=logging.getLogger()
+    )
+    assert "6, Perry" in updated["authors"]
+    assert "Ghost, Author" not in updated["authors"]

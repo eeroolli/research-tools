@@ -24,6 +24,7 @@ from shared_tools.config.io import read_config_files
 from shared_tools.utils.identifier_extractor import IdentifierExtractor
 from shared_tools.utils.identifier_validator import IdentifierValidator
 from shared_tools.utils.api_priority_manager import APIPriorityManager
+from shared_tools.utils.author_name_splitter import lastname_in_text
 from shared_tools.api.crossref_client import CrossRefClient
 from shared_tools.api.arxiv_client import ArxivClient
 from shared_tools.api.openalex_client import OpenAlexClient
@@ -152,12 +153,11 @@ class PaperMetadataProcessor:
                     parts = author_lower.split()
                     last_name = parts[-1].strip() if parts else ""
                 
-                if last_name and len(last_name) > 2:
+                if last_name and lastname_in_text(
+                    last_name, doc_text_lower, allow_substring_if_long=False
+                ):
                     # Check if last name appears in text (word boundary matching)
-                    import re
-                    pattern = r'\b' + re.escape(last_name) + r'\b'
-                    if re.search(pattern, doc_text_lower):
-                        authors_found += 1
+                    authors_found += 1
             
             # If at least one author last name found, consider it a match
             if authors_found >= 1:

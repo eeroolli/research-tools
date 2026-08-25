@@ -61,10 +61,12 @@ sys.modules.setdefault("yaml", yaml_mod)
 
 try:
     from handle_item_selected_pages import (
+        _handle_add_more_trimming,
         _handle_add_trimming,
         _handle_drop_border_removal,
         _handle_drop_trimming,
         _handle_manual_split,
+        _handle_use_5050_split,
         _preprocess_restart_source,
     )
     from scripts.paper_processor_daemon import PaperProcessorDaemon
@@ -105,7 +107,7 @@ def daemon(tmp_path: Path) -> PaperProcessorDaemon:
 def test_handle_manual_split_restarts_pipeline_with_prior_trim(
     daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Manual split must restart preprocess with trim_leading preserved (not split-only)."""
+    """Manual split must restart preprocess with trim_pages forwarded (silent re-apply)."""
     pdf_path = tmp_path / "EN_scan_double.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
 
@@ -114,14 +116,21 @@ def test_handle_manual_split_restarts_pipeline_with_prior_trim(
 
     captured: dict = {}
 
-    def fake_preprocess(pdf_path_arg, border_removal=True, split_method="auto",
-                        trim_leading=True, manual_split_ratio=None):
+    def fake_preprocess(
+        pdf_path_arg,
+        border_removal=True,
+        split_method="auto",
+        trim_leading=True,
+        manual_split_ratio=None,
+        trim_pages=None,
+    ):
         captured["args"] = {
             "pdf_path": pdf_path_arg,
             "border_removal": border_removal,
             "split_method": split_method,
             "trim_leading": trim_leading,
             "manual_split_ratio": manual_split_ratio,
+            "trim_pages": trim_pages,
         }
         return final_out, {
             "border_removal": False,
@@ -129,7 +138,8 @@ def test_handle_manual_split_restarts_pipeline_with_prior_trim(
             "split_attempted": True,
             "split_succeeded": True,
             "manual_split_ratio": manual_split_ratio,
-            "trim_leading": True,
+            "trim_leading": bool(trim_pages),
+            "trim_pages": list(trim_pages or []),
         }
 
     monkeypatch.setattr(daemon, "_preprocess_pdf_with_options", fake_preprocess)
@@ -142,6 +152,7 @@ def test_handle_manual_split_restarts_pipeline_with_prior_trim(
             "split_attempted": True,
             "split_succeeded": True,
             "trim_leading": True,
+            "trim_pages": [1],
             "border_removal": False,
         },
     }
@@ -152,7 +163,8 @@ def test_handle_manual_split_restarts_pipeline_with_prior_trim(
     assert result.page_id == "pdf_preview"
     assert captured["args"]["pdf_path"] == pdf_path
     assert captured["args"]["split_method"] == "manual"
-    assert captured["args"]["trim_leading"] is True
+    assert captured["args"]["trim_leading"] is False
+    assert captured["args"]["trim_pages"] == [1]
     assert captured["args"]["manual_split_ratio"] == 55
     assert captured["args"]["border_removal"] is False
     assert ctx["processed_pdf"] == final_out
@@ -160,13 +172,14 @@ def test_handle_manual_split_restarts_pipeline_with_prior_trim(
     assert state["split_method"] == "manual"
     assert state["split_succeeded"] is True
     assert state["manual_split_ratio"] == 55
+    assert state["trim_pages"] == [1]
     assert state["trim_leading"] is True
 
 
 def test_preprocess_manual_split_reapplies_trim(
     daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pipeline: manual split then trim when trim_leading=True — not silent drop."""
+    """Pipeline: manual split then prompt when trim_leading=True and no stored list."""
     pdf_path = tmp_path / "EN_scan_double.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
 
@@ -188,9 +201,9 @@ def test_preprocess_manual_split_reapplies_trim(
 
     def fake_trim(pdf_arg):
         trim_calls.append(pdf_arg)
-        return trimmed_out, True
+        return trimmed_out, [1]
 
-    monkeypatch.setattr(daemon, "_prompt_trim_leading_pages_for_attachment", fake_trim)
+    monkeypatch.setattr(daemon, "_prompt_trim_pages_for_attachment", fake_trim)
 
     result_pdf, state = daemon._preprocess_pdf_with_options(
         pdf_path,
@@ -206,6 +219,67 @@ def test_preprocess_manual_split_reapplies_trim(
     assert state["split_method"] == "manual"
     assert state["split_succeeded"] is True
     assert state["manual_split_ratio"] == 45
+    assert state["trim_leading"] is True
+    assert state["trim_pages"] == [1]
+
+
+def test_preprocess_silent_reapply_trim_pages_no_prompt(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stored trim_pages are applied silently — prompt must not run."""
+    pdf_path = tmp_path / "EN_scan_double.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    split_out = tmp_path / "PREPROCESSED_EN_scan_split.pdf"
+    split_out.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    trimmed_out = tmp_path / "PREPROCESSED_EN_scan_drop.pdf"
+    trimmed_out.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    fake_fitz = types.ModuleType("fitz")
+
+    class _Doc:
+        def __init__(self, n: int) -> None:
+            self._n = n
+
+        def __len__(self) -> int:
+            return self._n
+
+        def close(self) -> None:
+            pass
+
+        def __getitem__(self, i: int) -> _FakePage:
+            return _FakePage(846.8)
+
+    fake_fitz.open = lambda _path: _Doc(10)
+    monkeypatch.setitem(sys.modules, "fitz", fake_fitz)
+
+    monkeypatch.setattr(
+        daemon,
+        "_split_with_custom_gutter",
+        lambda *_args, **_kwargs: (split_out, None),
+    )
+
+    def fail_if_prompt(_pdf):
+        raise AssertionError("prompt must not run when trim_pages is set")
+
+    monkeypatch.setattr(daemon, "_prompt_trim_pages_for_attachment", fail_if_prompt)
+    monkeypatch.setattr(
+        daemon,
+        "_drop_pdf_pages",
+        lambda _pdf, pages: trimmed_out if pages == [1, 5] else None,
+    )
+
+    result_pdf, state = daemon._preprocess_pdf_with_options(
+        pdf_path,
+        border_removal=False,
+        split_method="manual",
+        trim_leading=False,
+        manual_split_ratio=45,
+        trim_pages=[1, 5],
+    )
+
+    assert result_pdf == trimmed_out
+    assert state["trim_pages"] == [1, 5]
     assert state["trim_leading"] is True
 
 
@@ -232,7 +306,7 @@ def test_preprocess_manual_split_skips_trim_when_not_requested(
     def fail_if_trim(_pdf):
         raise AssertionError("trim should not be prompted when trim_leading=False")
 
-    monkeypatch.setattr(daemon, "_prompt_trim_leading_pages_for_attachment", fail_if_trim)
+    monkeypatch.setattr(daemon, "_prompt_trim_pages_for_attachment", fail_if_trim)
 
     result_pdf, state = daemon._preprocess_pdf_with_options(
         pdf_path,
@@ -246,6 +320,7 @@ def test_preprocess_manual_split_skips_trim_when_not_requested(
     assert state["split_method"] == "manual"
     assert state["split_succeeded"] is True
     assert state["trim_leading"] is False
+    assert state.get("trim_pages") == []
 
 
 def _manual_split_state() -> dict:
@@ -256,6 +331,7 @@ def _manual_split_state() -> dict:
         "split_succeeded": True,
         "manual_split_ratio": 52.0,
         "trim_leading": False,
+        "trim_pages": [],
     }
 
 
@@ -268,6 +344,7 @@ def _capture_preprocess(final_out: Path):
         split_method="auto",
         trim_leading=True,
         manual_split_ratio=None,
+        trim_pages=None,
     ):
         captured["args"] = {
             "pdf_path": pdf_path_arg,
@@ -275,14 +352,17 @@ def _capture_preprocess(final_out: Path):
             "split_method": split_method,
             "trim_leading": trim_leading,
             "manual_split_ratio": manual_split_ratio,
+            "trim_pages": trim_pages,
         }
+        applied = list(trim_pages or [])
         return final_out, {
             "border_removal": border_removal,
             "split_method": split_method,
             "split_attempted": True,
             "split_succeeded": True,
             "manual_split_ratio": manual_split_ratio,
-            "trim_leading": trim_leading,
+            "trim_leading": bool(applied) or (trim_leading and not applied),
+            "trim_pages": applied,
         }
 
     return captured, fake_preprocess
@@ -312,6 +392,7 @@ def test_handle_add_trimming_preserves_manual_split_ratio(
     assert captured["args"]["split_method"] == "manual"
     assert captured["args"]["manual_split_ratio"] == 52.0
     assert captured["args"]["trim_leading"] is True
+    assert captured["args"]["trim_pages"] is None
     assert captured["args"]["border_removal"] is False
     assert ctx["preprocessing_state"]["manual_split_ratio"] == 52.0
 
@@ -330,6 +411,7 @@ def test_handle_drop_trimming_preserves_manual_split_ratio(
 
     state = _manual_split_state()
     state["trim_leading"] = True
+    state["trim_pages"] = [1]
     ctx = {
         "pdf_path": pdf_path,
         "preprocessing_state": state,
@@ -342,7 +424,9 @@ def test_handle_drop_trimming_preserves_manual_split_ratio(
     assert captured["args"]["split_method"] == "manual"
     assert captured["args"]["manual_split_ratio"] == 52.0
     assert captured["args"]["trim_leading"] is False
+    assert captured["args"]["trim_pages"] is None
     assert ctx["preprocessing_state"]["manual_split_ratio"] == 52.0
+    assert ctx["preprocessing_state"].get("trim_pages") == []
 
 
 def test_handle_drop_border_preserves_manual_split_ratio(
@@ -359,6 +443,8 @@ def test_handle_drop_border_preserves_manual_split_ratio(
 
     state = _manual_split_state()
     state["border_removal"] = True
+    state["trim_leading"] = True
+    state["trim_pages"] = [1, 5]
     ctx = {
         "pdf_path": pdf_path,
         "preprocessing_state": state,
@@ -372,6 +458,7 @@ def test_handle_drop_border_preserves_manual_split_ratio(
     assert captured["args"]["manual_split_ratio"] == 52.0
     assert captured["args"]["border_removal"] is False
     assert captured["args"]["trim_leading"] is False
+    assert captured["args"]["trim_pages"] == [1, 5]
     assert ctx["preprocessing_state"]["manual_split_ratio"] == 52.0
 
 
@@ -476,3 +563,77 @@ def test_preprocess_restart_source_falls_back_without_original_scan(
 
     src = _preprocess_restart_source({"pdf_path": pdf}, daemon)
     assert src == pdf
+def test_handle_use_5050_forwards_trim_pages(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """50/50 restart must silently keep existing trim_pages."""
+    pdf_path = tmp_path / "EN_scan_double.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    final_out = tmp_path / "PREPROCESSED_EN_scan_5050.pdf"
+    final_out.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    captured, fake_preprocess = _capture_preprocess(final_out)
+    monkeypatch.setattr(daemon, "_preprocess_pdf_with_options", fake_preprocess)
+
+    ctx = {
+        "pdf_path": pdf_path,
+        "preprocessing_state": {
+            "border_removal": False,
+            "split_method": "auto",
+            "split_attempted": True,
+            "split_succeeded": True,
+            "trim_leading": True,
+            "trim_pages": [1, 11],
+        },
+    }
+
+    result = _handle_use_5050_split(ctx, daemon)
+
+    assert result.type == NavigationResult.Type.SHOW_PAGE
+    assert captured["args"]["split_method"] == "50-50"
+    assert captured["args"]["trim_leading"] is False
+    assert captured["args"]["trim_pages"] == [1, 11]
+
+
+def test_handle_add_more_trimming_unions_and_restarts(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add-more maps current-view pages, unions with existing list, restarts silently."""
+    original = tmp_path / "EN_scan_double.pdf"
+    original.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    working = tmp_path / "PREPROCESSED_EN_scan_trimmed.pdf"
+    working.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    final_out = tmp_path / "PREPROCESSED_EN_scan_updated.pdf"
+    final_out.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    daemon._original_scan_path = original
+
+    captured, fake_preprocess = _capture_preprocess(final_out)
+    monkeypatch.setattr(daemon, "_preprocess_pdf_with_options", fake_preprocess)
+    monkeypatch.setattr(
+        daemon,
+        "_prompt_add_more_trim_pages",
+        lambda _pdf, existing: [1, 6],
+    )
+
+    ctx = {
+        "pdf_path": working,
+        "processed_pdf": working,
+        "preprocessing_state": {
+            "border_removal": False,
+            "split_method": "50-50",
+            "split_attempted": True,
+            "split_succeeded": True,
+            "trim_leading": True,
+            "trim_pages": [1],
+        },
+    }
+
+    result = _handle_add_more_trimming(ctx, daemon)
+
+    assert result.type == NavigationResult.Type.SHOW_PAGE
+    assert captured["args"]["pdf_path"] == original
+    assert captured["args"]["split_method"] == "50-50"
+    assert captured["args"]["trim_leading"] is False
+    assert captured["args"]["trim_pages"] == [1, 6]
+    assert ctx["preprocessing_state"]["trim_pages"] == [1, 6]

@@ -17,6 +17,7 @@ import configparser
 
 from shared_tools.config.io import read_config_file, read_config_files
 from shared_tools.utils.isbn_matcher import ISBNMatcher
+from shared_tools.utils.author_name_splitter import as_name_str
 
 
 class ZoteroLocalSearch:
@@ -1367,8 +1368,8 @@ class ZoteroLocalSearch:
         item_authors = []
         for creator in creators:
             if creator.get('creatorType') == 'author':
-                last = creator.get('lastName', '').lower()
-                first = creator.get('firstName', '').lower()
+                last = as_name_str(creator.get('lastName')).lower()
+                first = as_name_str(creator.get('firstName')).lower()
                 item_authors.append(f"{first} {last}".strip())
         
         if not item_authors:
@@ -1422,8 +1423,8 @@ class ZoteroLocalSearch:
             
             for last_name, first_name, creator_type in results:
                 creators.append({
-                    'lastName': last_name,
-                    'firstName': first_name,
+                    'lastName': as_name_str(last_name),
+                    'firstName': as_name_str(first_name),
                     'creatorType': creator_type
                 })
         

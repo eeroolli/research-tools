@@ -306,13 +306,16 @@ def test_process_paper_quit_from_zotero_selection_moves_to_manual_review(
     assert moved_manual["count"] == 1
 
 
-def test_process_paper_restart_from_zotero_selection_returns_restart(
+def test_process_paper_select_passes_original_scan_not_working_pdf(
     daemon: PaperProcessorDaemon,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pdf_path = tmp_path / "EN_20260331_0003_double.pdf"
+    """Zotero select must hand handle_item_selected the watch-folder scan, not the temp working PDF."""
+    pdf_path = tmp_path / "EN_20260820_0001.pdf"
     _write_dummy_pdf(pdf_path)
+    working = tmp_path / "temp" / "PREPROCESSED_EN_20260820_0001_no_borders_split.pdf"
+    _write_dummy_pdf(working)
 
     daemon._close_sumatra_all_tabs = lambda: True
     daemon._open_pdf_in_viewer = lambda *_args, **_kwargs: True
@@ -321,31 +324,150 @@ def test_process_paper_restart_from_zotero_selection_returns_restart(
     daemon.move_to_failed = lambda *_args, **_kwargs: None
     daemon.display_metadata = lambda *_args, **_kwargs: None
     daemon._handle_isbn_lookup_result = lambda result: result
+    daemon._maybe_auto_document_separator_early = lambda *_args, **_kwargs: False
     monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: "")
+
+    daemon._preprocess_pdf_with_options = lambda *_args, **_kwargs: (
+        working,
+        {
+            "border_removal": True,
+            "split_method": "auto",
+            "split_attempted": True,
+            "split_succeeded": True,
+            "trim_leading": False,
+        },
+    )
+    daemon._preview_and_modify_preprocessing = lambda original, processed, state: (
+        processed,
+        state,
+    )
 
     daemon.metadata_processor = SimpleNamespace(
         process_pdf=lambda *_args, **_kwargs: {
             "success": True,
             "metadata": {
-                "title": "A title",
-                "authors": ["Bean", "Papadakis"],
-                "year": "1994",
+                "title": "Theories of Risk Perception",
+                "authors": ["Dake", "Wildavsky"],
+                "year": "1991",
                 "document_type": "journal_article",
             },
             "method": "grep",
             "identifiers_found": {},
         }
     )
-    daemon.prompt_for_year = lambda metadata, force_prompt=False: {**metadata, "_year_confirmed": True}
+    daemon.prompt_for_year = lambda metadata, force_prompt=False: {
+        **metadata,
+        "_year_confirmed": True,
+    }
     daemon.prompt_for_document_type = lambda metadata: metadata
-    daemon.service_manager = SimpleNamespace(ensure_grobid_ready=lambda: False, grobid_ready=False, grobid_client=None)
+    daemon.service_manager = SimpleNamespace(
+        ensure_grobid_ready=lambda: False, grobid_ready=False, grobid_client=None
+    )
     daemon.local_zotero = object()
 
-    daemon.search_and_display_local_zotero = lambda *_args, **_kwargs: ("restart", None, {"title": "A title"})
+    selected = {"key": "K1", "title": "Theories of Risk Perception", "authors": ["Dake"]}
+    daemon.search_and_display_local_zotero = lambda *_args, **_kwargs: (
+        "select",
+        selected,
+        {"title": "Theories of Risk Perception", "authors": ["Dake"], "_year_confirmed": True},
+    )
+
+    received: list[Path] = []
+
+    def _capture_item_selected(scan_arg, metadata_arg, selected_arg):
+        received.append(Path(scan_arg))
+        assert daemon._working_pdf is not None
+        assert Path(daemon._working_pdf).resolve() == working.resolve()
+        return "processed"
+
+    daemon.handle_item_selected = _capture_item_selected
 
     result = daemon.process_paper(pdf_path)
 
-    assert result == "RESTART"
+    assert result is None
+    assert received == [pdf_path]
+    assert received[0].name == "EN_20260820_0001.pdf"
+    assert not received[0].name.startswith("PREPROCESSED_")
+
+
+def test_process_paper_create_passes_original_scan_not_working_pdf(
+    daemon: PaperProcessorDaemon,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create-new-item must receive watch-folder scan; attach still uses _working_pdf."""
+    pdf_path = tmp_path / "EN_20260820_0002.pdf"
+    _write_dummy_pdf(pdf_path)
+    working = tmp_path / "temp" / "PREPROCESSED_EN_20260820_0002_split.pdf"
+    _write_dummy_pdf(working)
+
+    daemon._close_sumatra_all_tabs = lambda: True
+    daemon._open_pdf_in_viewer = lambda *_args, **_kwargs: True
+    daemon._return_focus_to_terminal = lambda: None
+    daemon._close_pdf_viewer = lambda: None
+    daemon.move_to_failed = lambda *_args, **_kwargs: None
+    daemon.display_metadata = lambda *_args, **_kwargs: None
+    daemon._handle_isbn_lookup_result = lambda result: result
+    daemon._maybe_auto_document_separator_early = lambda *_args, **_kwargs: False
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: "")
+
+    daemon._preprocess_pdf_with_options = lambda *_args, **_kwargs: (
+        working,
+        {
+            "border_removal": False,
+            "split_method": "50-50",
+            "split_attempted": True,
+            "split_succeeded": True,
+            "trim_leading": True,
+        },
+    )
+    daemon._preview_and_modify_preprocessing = lambda original, processed, state: (
+        processed,
+        state,
+    )
+
+    daemon.metadata_processor = SimpleNamespace(
+        process_pdf=lambda *_args, **_kwargs: {
+            "success": True,
+            "metadata": {
+                "title": "A title",
+                "authors": ["Author"],
+                "year": "1991",
+                "document_type": "journal_article",
+            },
+            "method": "grep",
+            "identifiers_found": {},
+        }
+    )
+    daemon.prompt_for_year = lambda metadata, force_prompt=False: {
+        **metadata,
+        "_year_confirmed": True,
+    }
+    daemon.prompt_for_document_type = lambda metadata: metadata
+    daemon.service_manager = SimpleNamespace(
+        ensure_grobid_ready=lambda: False, grobid_ready=False, grobid_client=None
+    )
+    daemon.local_zotero = object()
+    daemon.search_and_display_local_zotero = lambda *_args, **_kwargs: (
+        "create",
+        None,
+        {"title": "A title", "authors": ["Author"], "_year_confirmed": True},
+    )
+
+    received: list[Path] = []
+
+    def _capture_create(scan_arg, metadata_arg):
+        received.append(Path(scan_arg))
+        assert Path(daemon._working_pdf).resolve() == working.resolve()
+        return True
+
+    daemon.handle_create_new_item = _capture_create
+
+    result = daemon.process_paper(pdf_path)
+
+    assert result is None
+    assert received == [pdf_path]
+    assert received[0].name == "EN_20260820_0002.pdf"
 
 
 def test_close_pdf_viewer_calls_close_sumatra_all_tabs_on_windows(

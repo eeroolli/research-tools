@@ -48,6 +48,7 @@ from shared_tools.zotero.paper_processor import ZoteroPaperProcessor
 from shared_tools.zotero.local_search import ZoteroLocalSearch
 from shared_tools.utils.filename_generator import FilenameGenerator
 from shared_tools.utils.author_extractor import AuthorExtractor
+from shared_tools.utils.author_name_splitter import as_name_str
 from shared_tools.utils.text_ignore import sanitize_text
 from shared_tools.utils.grobid_validator import GrobidValidator
 from shared_tools.utils.author_filter import AuthorFilter
@@ -66,6 +67,14 @@ from shared_tools.utils.isbn_matcher import ISBNMatcher
 
 # Import border remover for scanned documents
 from shared_tools.pdf.border_remover import BorderRemover
+from shared_tools.pdf.trim_pages import (
+    TrimPageSpecError,
+    filter_trim_pages_to_count,
+    format_page_list,
+    map_current_view_to_source,
+    parse_page_spec,
+    union_trim_pages,
+)
 from shared_tools.pdf.document_separator import (
     SeparationPlanError,
     build_plan_from_drop_pages,
@@ -5824,8 +5833,8 @@ class PaperProcessorDaemon:
                 if action_value == 'back':
                     return 'back_to_doc_type'
                 elif action_value == 'select' and selected_item_value:
-                    # User selected an item - offer to attach PDF (use preprocessed working PDF)
-                    selection_outcome = self.handle_item_selected(pdf_to_use, metadata_value, selected_item_value)
+                    # Scan identity stays the watch-folder file; preview/attach use _working_pdf.
+                    selection_outcome = self.handle_item_selected(pdf_path, metadata_value, selected_item_value)
                     if selection_outcome == 'back_to_item_selection':
                         return 'continue_selection'
                     if selection_outcome == 'restart':
@@ -5880,12 +5889,13 @@ class PaperProcessorDaemon:
                     return 'handled'
                 elif action_value == 'create':
                     # Create new Zotero item with online library check
-                    # Use metadata_value which includes any edited authors
+                    # Use metadata_value which includes any edited authors.
+                    # Pass watch-folder scan; attach copies from _working_pdf when set.
                     self.logger.info(
-                        f"Dispatching create flow for {pdf_to_use.name} "
+                        f"Dispatching create flow for {pdf_path.name} "
                         f"(title='{(metadata_value or {}).get('title', '')[:80]}')"
                     )
-                    success = self.handle_create_new_item(pdf_to_use, metadata_value)
+                    success = self.handle_create_new_item(pdf_path, metadata_value)
                     if not success:
                         # User cancelled or error occurred; avoid silent "jump" to next scan.
                         print("❌ Item creation cancelled or failed; moved to manual review.")
@@ -6496,8 +6506,15 @@ class PaperProcessorDaemon:
 
     @staticmethod
     def _stem_for_preprocessed_artifacts(pdf_path: Path) -> str:
-        """Stem for PREPROCESSED_* temps; strip `_double` tag, keep optional DCP counter."""
-        return PaperProcessorDaemon._DOUBLE_STEM_RE.sub("", pdf_path.stem)
+        """Stem for PREPROCESSED_* temps; strip `_double` tag, keep optional DCP counter.
+
+        If the input is already a PREPROCESSED_* artifact (border → split chain),
+        strip that prefix once so names do not become PREPROCESSED_PREPROCESSED_*.
+        """
+        stem = pdf_path.stem
+        while stem.startswith("PREPROCESSED_"):
+            stem = stem[len("PREPROCESSED_"):]
+        return PaperProcessorDaemon._DOUBLE_STEM_RE.sub("", stem)
 
     def _preprocess_split_if_needed(self, pdf_path: Path) -> Optional[Path]:
         """Detect and split two-up pages when appropriate.
@@ -6559,6 +6576,7 @@ class PaperProcessorDaemon:
         split_method: str = 'auto',  # 'auto', '50-50', 'none', 'manual'
         trim_leading: bool = True,
         manual_split_ratio: Optional[float] = None,
+        trim_pages: Optional[List[int]] = None,
     ) -> tuple[Optional[Path], dict]:
         """Preprocess PDF with specified options.
         
@@ -6570,8 +6588,10 @@ class PaperProcessorDaemon:
             border_removal: Whether to remove borders
             split_method: Split method - 'auto' (gutter detection), '50-50' (geometric),
                 'manual' (custom ratio), 'none' (no split)
-            trim_leading: Whether to trim leading pages
+            trim_leading: Whether to prompt for trim when trim_pages is empty
             manual_split_ratio: Left-page percentage (30-70) when split_method is 'manual'
+            trim_pages: 1-based page indices to drop (post-split). When non-empty,
+                applied silently with no prompt.
         
         Returns:
             Tuple of (processed_pdf_path, preprocessing_state)
@@ -6583,6 +6603,7 @@ class PaperProcessorDaemon:
               - split_reason: str (optional, e.g. 'filename_double', 'landscape_two_up')
               - manual_split_ratio: float (optional, when method is manual)
               - trim_leading: bool
+              - trim_pages: list[int] (1-based pages dropped; empty if none)
         """
         current_pdf = pdf_path
         # Store original filename for _double detection (before any renaming)
@@ -6593,6 +6614,7 @@ class PaperProcessorDaemon:
             'split_method': 'none',
             'split_attempted': False,
             'trim_leading': False,
+            'trim_pages': [],
         }
         
         # Step 1: Remove borders if requested
@@ -6732,13 +6754,45 @@ class PaperProcessorDaemon:
                         )
                         preprocessing_state['split_succeeded'] = False
         
-        # Step 3: Trim leading pages if requested
-        if trim_leading:
-            trimmed_pdf, trimmed = self._prompt_trim_leading_pages_for_attachment(current_pdf)
-            if trimmed:
+        # Step 3: Trim pages — silent re-apply when trim_pages is set; else prompt if requested
+        pages_to_drop: List[int] = list(trim_pages) if trim_pages else []
+        if pages_to_drop:
+            try:
+                import fitz
+                doc = fitz.open(str(current_pdf))
+                page_count = len(doc)
+                doc.close()
+            except Exception:
+                page_count = 0
+            valid = filter_trim_pages_to_count(pages_to_drop, page_count) if page_count else []
+            dropped = sorted(set(pages_to_drop) - set(valid))
+            if dropped:
+                print(
+                    f"⚠️  Trim pages out of range after reprocess "
+                    f"(PDF now has {page_count} page(s)); dropped: {format_page_list(dropped)}"
+                )
+            if valid:
+                print(f"ℹ️  Re-applying trim: drop pages {format_page_list(valid)}")
+                trimmed_pdf = self._drop_pdf_pages(current_pdf, valid)
+                if trimmed_pdf:
+                    current_pdf = trimmed_pdf
+                    preprocessing_state['trim_pages'] = valid
+                    preprocessing_state['trim_leading'] = True
+                    self.logger.debug(f"Trim pages applied: {format_page_list(valid)}")
+                else:
+                    print("⚠️  Failed to apply stored trim; continuing without trim")
+                    preprocessing_state['trim_pages'] = []
+                    preprocessing_state['trim_leading'] = False
+            else:
+                preprocessing_state['trim_pages'] = []
+                preprocessing_state['trim_leading'] = False
+        elif trim_leading:
+            trimmed_pdf, applied_pages = self._prompt_trim_pages_for_attachment(current_pdf)
+            if applied_pages:
                 current_pdf = trimmed_pdf
+                preprocessing_state['trim_pages'] = list(applied_pages)
                 preprocessing_state['trim_leading'] = True
-                self.logger.debug(f"Leading pages trimmed: {trimmed_pdf.name}")
+                self.logger.debug(f"Trim pages applied: {format_page_list(applied_pages)}")
         
         return current_pdf, preprocessing_state
     
@@ -6811,7 +6865,13 @@ class PaperProcessorDaemon:
             else:
                 split_status = "✗ Not applied"
             
-            trim_status = "✓ Applied" if preprocessing_state.get('trim_leading', False) else "✗ Not applied"
+            trim_pages = preprocessing_state.get('trim_pages') or []
+            if preprocessing_state.get('trim_leading', False) and trim_pages:
+                trim_status = f"✓ Applied (pages {format_page_list(trim_pages)})"
+            elif preprocessing_state.get('trim_leading', False):
+                trim_status = "✓ Applied"
+            else:
+                trim_status = "✗ Not applied"
             
             print(f"  - Border removal: {border_status}")
             print(f"  - Split: {split_status}")
@@ -6846,11 +6906,14 @@ class PaperProcessorDaemon:
                 option_map[option_num] = 'use_5050'
                 print(Colors.colorize(f"  [{option_num}] Use 50/50 split instead", ColorScheme.LIST))
             
-            # Show "Add trimming" if not applied, "Drop trimming" if applied
+            # Show "Add trimming" if not applied; "Drop" + "Add more" if applied
             if preprocessing_state.get('trim_leading', False):
                 option_num += 1
                 option_map[option_num] = 'drop_trim'
                 print(Colors.colorize(f"  [{option_num}] Drop trimming", ColorScheme.LIST))
+                option_num += 1
+                option_map[option_num] = 'add_more_trim'
+                print(Colors.colorize(f"  [{option_num}] Add more pages to trim", ColorScheme.LIST))
             else:
                 option_num += 1
                 option_map[option_num] = 'add_trim'
@@ -6901,8 +6964,9 @@ class PaperProcessorDaemon:
                             original_pdf,
                             border_removal=False,
                             split_method=new_state.get('split_method', 'auto'),
-                            trim_leading=new_state.get('trim_leading', True),
+                            trim_leading=False,
                             manual_split_ratio=new_state.get('manual_split_ratio'),
+                            trim_pages=new_state.get('trim_pages') or None,
                         )
                         preprocessing_state = new_state
                         last_previewed_pdf = None
@@ -6916,7 +6980,9 @@ class PaperProcessorDaemon:
                             original_pdf,
                             border_removal=True,
                             split_method='auto',
-                            trim_leading=new_state.get('trim_leading', True)
+                            trim_leading=False,
+                            trim_pages=new_state.get('trim_pages') or None,
+                            manual_split_ratio=new_state.get('manual_split_ratio'),
                         )
                         preprocessing_state = new_state
                         last_previewed_pdf = None
@@ -6931,7 +6997,8 @@ class PaperProcessorDaemon:
                             original_pdf,
                             border_removal=new_state.get('border_removal', True),
                             split_method='none',
-                            trim_leading=new_state.get('trim_leading', True)
+                            trim_leading=False,
+                            trim_pages=new_state.get('trim_pages') or None,
                         )
                         preprocessing_state = new_state
                         last_previewed_pdf = None
@@ -6946,7 +7013,8 @@ class PaperProcessorDaemon:
                             original_pdf,
                             border_removal=new_state.get('border_removal', True),
                             split_method='50-50',
-                            trim_leading=new_state.get('trim_leading', True)
+                            trim_leading=False,
+                            trim_pages=new_state.get('trim_pages') or None,
                         )
                         preprocessing_state = new_state
                         last_previewed_pdf = None
@@ -6963,15 +7031,15 @@ class PaperProcessorDaemon:
                             split_method=new_state.get('split_method', 'auto'),
                             trim_leading=False,
                             manual_split_ratio=new_state.get('manual_split_ratio'),
+                            trim_pages=None,
                         )
                         preprocessing_state = new_state
                         last_previewed_pdf = None
                         # Continue loop to show preview again
                     
                     elif action == 'add_trim':
-                        # Add trimming
+                        # Add trimming (prompt; do not forward existing list)
                         new_state = preprocessing_state.copy()
-                        new_state['trim_leading'] = True
                         print("\n🔄 Restarting preprocessing with trimming...")
                         processed_pdf, new_state = self._preprocess_pdf_with_options(
                             original_pdf,
@@ -6979,10 +7047,29 @@ class PaperProcessorDaemon:
                             split_method=new_state.get('split_method', 'auto'),
                             trim_leading=True,
                             manual_split_ratio=new_state.get('manual_split_ratio'),
+                            trim_pages=None,
                         )
                         preprocessing_state = new_state
                         last_previewed_pdf = None
                         # Continue loop to show preview again
+                    
+                    elif action == 'add_more_trim':
+                        unioned = self._prompt_add_more_trim_pages(
+                            Path(processed_pdf),
+                            list(preprocessing_state.get('trim_pages') or []),
+                        )
+                        if unioned is not None:
+                            print("\n🔄 Restarting preprocessing with updated trim...")
+                            processed_pdf, preprocessing_state = self._preprocess_pdf_with_options(
+                                original_pdf,
+                                border_removal=preprocessing_state.get('border_removal', False),
+                                split_method=preprocessing_state.get('split_method', 'none'),
+                                trim_leading=False,
+                                manual_split_ratio=preprocessing_state.get('manual_split_ratio'),
+                                trim_pages=unioned,
+                            )
+                            last_previewed_pdf = None
+                        # else: cancelled — stay on preview
                     
                     elif action == 'manual_split':
                         # Prompt for ratio, then restart full pipeline from original
@@ -7012,8 +7099,9 @@ class PaperProcessorDaemon:
                                     original_pdf,
                                     border_removal=preprocessing_state.get('border_removal', False),
                                     split_method='manual',
-                                    trim_leading=preprocessing_state.get('trim_leading', False),
+                                    trim_leading=False,
                                     manual_split_ratio=ratio,
+                                    trim_pages=preprocessing_state.get('trim_pages') or None,
                                 )
                                 last_previewed_pdf = None
                                 break
@@ -8359,142 +8447,276 @@ class PaperProcessorDaemon:
                     pass  # Ignore errors during cleanup
             return None
     
-    def _prompt_trim_leading_pages_for_attachment(self, pdf_path: Path) -> Tuple[Path, bool]:
-        """Prompt user to optionally trim leading or trailing pages before attachment.
-        
-        Supports both positive numbers (trim from start) and negative numbers (trim from end).
-        Example: "3" trims first 3 pages, "-2" trims last 2 pages.
+    def _drop_pdf_pages(self, pdf_path: Path, pages_1based: List[int]) -> Optional[Path]:
+        """Create a temporary PDF with the given 1-based pages removed.
         
         Args:
-            pdf_path: Current working PDF path (after any splitting)
+            pdf_path: Source PDF
+            pages_1based: Sorted unique 1-based page numbers to drop
         
         Returns:
-            Tuple of (path_to_use, trimmed_flag). If trimmed_flag is True, path_to_use
-            points to a temporary PDF with pages trimmed.
+            Path to new PDF, or None on failure / empty keep set
+        """
+        if not pages_1based:
+            return pdf_path
+        if not pdf_path.exists():
+            return None
+        
+        try:
+            import fitz
+        except ImportError:
+            self.logger.error("PyMuPDF (fitz) not available - cannot drop pages")
+            return None
+        
+        doc = None
+        new_doc = None
+        try:
+            doc = fitz.open(str(pdf_path))
+            total = len(doc)
+            drop_set = {int(p) for p in pages_1based if 1 <= int(p) <= total}
+            if not drop_set:
+                doc.close()
+                return pdf_path
+            keep = [i for i in range(total) if (i + 1) not in drop_set]
+            if not keep:
+                self.logger.warning("Cannot drop all pages")
+                doc.close()
+                return None
+            
+            new_doc = fitz.open()
+            for page_num in keep:
+                page = doc[page_num]
+                new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
+                new_page.show_pdf_page(new_page.rect, doc, page_num)
+            
+            import tempfile
+            temp_dir = Path(tempfile.gettempdir()) / 'pdf_splits'
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            label = format_page_list(sorted(drop_set)).replace(" ", "").replace(",", "_")
+            out_path = (
+                temp_dir
+                / f"PREPROCESSED_{self._stem_for_preprocessed_artifacts(pdf_path)}_drop_{label}.pdf"
+            )
+            self._save_preprocessed_pdf(new_doc, out_path)
+            new_doc.close()
+            doc.close()
+            self.logger.info(
+                f"Dropped pages {format_page_list(sorted(drop_set))}: {out_path.name}"
+            )
+            print(f"✅ Trimmed pages {format_page_list(sorted(drop_set))} for Zotero attachment")
+            return out_path
+        except Exception as e:
+            self.logger.error(f"Failed to drop pages: {e}")
+            if new_doc is not None:
+                try:
+                    new_doc.close()
+                except Exception:
+                    pass
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
+            return None
+    
+    def _prompt_trim_pages_for_attachment(self, pdf_path: Path) -> Tuple[Path, List[int]]:
+        """Prompt user for pages to drop (1-based indices / ranges / end).
+        
+        Returns:
+            (path_to_use, list of 1-based pages dropped). Empty list means no trim.
         """
         if not pdf_path.exists():
-            return pdf_path, False
+            return pdf_path, []
+        
+        try:
+            import fitz
+            doc = fitz.open(str(pdf_path))
+            total_pages = len(doc)
+            doc.close()
+        except Exception:
+            print("⚠️  Could not read PDF to get page count.")
+            return pdf_path, []
+        
+        if total_pages < 2:
+            print("ℹ️  PDF has fewer than 2 pages — nothing to trim.")
+            return pdf_path, []
         
         print("\n" + "=" * 70)
         print(Colors.colorize("OPTIONAL: TRIM PAGES", ColorScheme.PAGE_TITLE))
         print("=" * 70)
-        print(Colors.colorize("Press Enter to keep the PDF exactly as it is.", ColorScheme.ACTION))
-        print(Colors.colorize("Enter a positive number to drop that many leading pages (e.g., '3' = drop first 3 pages).", ColorScheme.ACTION))
-        print(Colors.colorize("Enter a negative number to drop that many trailing pages (e.g., '-2' = drop last 2 pages).", ColorScheme.ACTION))
-        print(Colors.colorize("We'll show you a preview of the trimmed PDF before anything is changed.", ColorScheme.ACTION))
+        print(Colors.colorize(
+            "Enter page numbers to drop (1-based), comma-separated.",
+            ColorScheme.ACTION,
+        ))
+        print(Colors.colorize(
+            "Examples: 1  |  1-3  |  1, 4-5, 11, 13  |  end  |  -1 (last page)",
+            ColorScheme.ACTION,
+        ))
+        print(Colors.colorize(
+            "Press Enter to keep the PDF exactly as it is.",
+            ColorScheme.ACTION,
+        ))
         print("=" * 70)
         
-        # Small delay to ensure user sees the prompt and any previous input is cleared
         time.sleep(0.5)
         
         while True:
             try:
-                # Choice-ish numeric prompt: keep timeout (safe default = keep pages).
                 response = self._input_with_timeout(
-                    "Trim pages? [Enter=keep all / number=pages to drop from start / -number=pages to drop from end]: ",
+                    "Trim pages? [Enter=keep all / page list]: ",
                     default="",
                     clear_buffered=True,
                 )
                 if response is None:
                     print("\n❌ Trim cancelled - keeping all pages")
-                    return pdf_path, False
+                    return pdf_path, []
                 response = response.strip().lower()
             except (KeyboardInterrupt, EOFError):
                 print("\n❌ Trim cancelled - keeping all pages")
-                return pdf_path, False
+                return pdf_path, []
             
             if response in ("", "0", "n", "no"):
                 print("ℹ️  Keeping all pages.")
-                return pdf_path, False
+                return pdf_path, []
             
-            # Check if it's a valid number (positive or negative)
             try:
-                pages_to_drop = int(response)
-            except ValueError:
-                print_unacceptable_input()
+                pages_to_drop = parse_page_spec(response, total_pages)
+            except TrimPageSpecError as e:
+                print(f"⚠️  {e}")
                 continue
             
-            if pages_to_drop == 0:
+            if not pages_to_drop:
                 print("ℹ️  Keeping all pages.")
-                return pdf_path, False
+                return pdf_path, []
             
-            # Get total pages for validation
+            # Preview: first remaining page after drop
+            remaining = [i for i in range(1, total_pages + 1) if i not in set(pages_to_drop)]
+            first_keep_0 = remaining[0] - 1
+            preview_text, _ = self._extract_page_preview_text(pdf_path, first_keep_0)
+            print(f"\nWill drop pages: {format_page_list(pages_to_drop)}")
+            print("The first page in your new PDF will start with:")
+            if preview_text:
+                print(f'  "{preview_text}"')
+            else:
+                print("  [No text detected on that page]")
+            print()
+            
             try:
-                import fitz  # PyMuPDF
-                doc = fitz.open(pdf_path)
-                total_pages = len(doc)
-                doc.close()
-            except Exception:
-                print("⚠️  Could not read PDF to get page count.")
+                confirm = input(
+                    f"Type 'trim' to drop pages {format_page_list(pages_to_drop)}, "
+                    "or press Enter to keep everything: "
+                ).strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                print("\n❌ Trim cancelled - keeping all pages")
+                return pdf_path, []
+            
+            if confirm != "trim":
+                print("ℹ️  Keeping all pages.")
+                return pdf_path, []
+            
+            trimmed_pdf = self._drop_pdf_pages(pdf_path, pages_to_drop)
+            if not trimmed_pdf:
+                print("⚠️  Failed to create trimmed PDF. Keeping original pages.")
+                return pdf_path, []
+            
+            self.logger.info(
+                f"Trimmed pages {format_page_list(pages_to_drop)} before attachment: "
+                f"{trimmed_pdf.name}"
+            )
+            return trimmed_pdf, pages_to_drop
+    
+    def _prompt_trim_leading_pages_for_attachment(self, pdf_path: Path) -> Tuple[Path, bool]:
+        """Backward-compatible wrapper: returns (path, trimmed_flag)."""
+        path, pages = self._prompt_trim_pages_for_attachment(pdf_path)
+        return path, bool(pages)
+    
+    def _prompt_add_more_trim_pages(
+        self,
+        current_pdf: Path,
+        existing_trim_pages: List[int],
+    ) -> Optional[List[int]]:
+        """Prompt for extra pages of the current (already trimmed) view.
+        
+        Returns the full unioned source-page list, or None if cancelled / no change.
+        """
+        if not current_pdf.exists():
+            return None
+        try:
+            import fitz
+            doc = fitz.open(str(current_pdf))
+            current_count = len(doc)
+            doc.close()
+        except Exception:
+            print("⚠️  Could not read PDF to get page count.")
+            return None
+        
+        existing = sorted(set(int(p) for p in existing_trim_pages))
+        source_count = current_count + len(existing)
+        
+        print("\n" + "=" * 70)
+        print(Colors.colorize("ADD MORE PAGES TO TRIM", ColorScheme.PAGE_TITLE))
+        print("=" * 70)
+        print(Colors.colorize(
+            f"Currently dropping source pages: {format_page_list(existing) or '(none)'}",
+            ColorScheme.ACTION,
+        ))
+        print(Colors.colorize(
+            f"Enter page numbers of the CURRENT preview ({current_count} pages).",
+            ColorScheme.ACTION,
+        ))
+        print(Colors.colorize(
+            "Examples: end  |  -1  |  2, 5-6",
+            ColorScheme.ACTION,
+        ))
+        print(Colors.colorize("Press Enter to cancel (keep existing trim).", ColorScheme.ACTION))
+        print("=" * 70)
+        
+        while True:
+            try:
+                response = self._input_with_timeout(
+                    "Extra pages to drop? [Enter=cancel / page list]: ",
+                    default="",
+                    clear_buffered=True,
+                )
+                if response is None:
+                    print("ℹ️  Keeping existing trim.")
+                    return None
+                response = response.strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                print("ℹ️  Keeping existing trim.")
+                return None
+            
+            if response in ("", "0", "n", "no", "c"):
+                print("ℹ️  Keeping existing trim.")
+                return None
+            
+            try:
+                view_pages = parse_page_spec(response, current_count)
+                if not view_pages:
+                    print("ℹ️  Keeping existing trim.")
+                    return None
+                mapped = map_current_view_to_source(view_pages, existing, source_count)
+            except TrimPageSpecError as e:
+                print(f"⚠️  {e}")
                 continue
             
-            # Handle negative numbers (trim from end)
-            if pages_to_drop < 0:
-                pages_to_drop_abs = abs(pages_to_drop)
-                if pages_to_drop_abs >= total_pages:
-                    print(f"⚠️  This PDF has {total_pages} page(s); you cannot drop {pages_to_drop_abs} trailing pages.")
-                    continue
-                
-                # Show preview of last page that will remain
-                preview_text = self._extract_trailing_preview_text(pdf_path, pages_to_drop_abs)
-                print(f"\nThe last page in your new PDF (page {total_pages - pages_to_drop_abs}) will end with:")
-                if preview_text:
-                    print(f'  "...{preview_text}"')
-                else:
-                    print("  [No text detected on that page]")
-                print()
-                
-                try:
-                    confirm = input(f"Type 'trim' to drop the last {pages_to_drop_abs} page(s), or press Enter to keep everything: ").strip().lower()
-                except (KeyboardInterrupt, EOFError):
-                    print("\n❌ Trim cancelled - keeping all pages")
-                    return pdf_path, False
-                
-                if confirm != "trim":
-                    print("ℹ️  Keeping all pages.")
-                    return pdf_path, False
-                
-                trimmed_pdf = self._create_pdf_without_trailing_pages(pdf_path, pages_to_drop_abs)
-                if not trimmed_pdf:
-                    print("⚠️  Failed to create trimmed PDF. Keeping original pages.")
-                    return pdf_path, False
-                
-                print(f"✅ Trimmed last {pages_to_drop_abs} page(s) for Zotero attachment")
-                self.logger.info(f"Trimmed last {pages_to_drop_abs} page(s) before attachment: {trimmed_pdf.name}")
-                return trimmed_pdf, True
+            unioned = union_trim_pages(existing, mapped)
+            if len(unioned) >= source_count:
+                print("⚠️  That would drop every page; leave at least one.")
+                continue
             
-            # Handle positive numbers (trim from start)
-            else:
-                if pages_to_drop >= total_pages:
-                    print(f"⚠️  This PDF has {total_pages} page(s); you cannot drop {pages_to_drop} leading pages.")
-                    continue
-                
-                preview_text, _ = self._extract_page_preview_text(pdf_path, pages_to_drop)
-                print("\nThe first page in your new PDF will start with:")
-                if preview_text:
-                    print(f'  "{preview_text}"')
-                else:
-                    print("  [No text detected on that page]")
-                print()
-                
-                try:
-                    confirm = input(f"Type 'trim' to drop the first {pages_to_drop} page(s), or press Enter to keep everything: ").strip().lower()
-                except (KeyboardInterrupt, EOFError):
-                    print("\n❌ Trim cancelled - keeping all pages")
-                    return pdf_path, False
-                
-                if confirm != "trim":
-                    print("ℹ️  Keeping all pages.")
-                    return pdf_path, False
-                
-                trimmed_pdf = self._create_pdf_from_page_offset(pdf_path, pages_to_drop)
-                if not trimmed_pdf:
-                    print("⚠️  Failed to create trimmed PDF. Keeping original pages.")
-                    return pdf_path, False
-                
-                print(f"✅ Trimmed first {pages_to_drop} page(s) for Zotero attachment")
-                self.logger.info(f"Trimmed first {pages_to_drop} page(s) before attachment: {trimmed_pdf.name}")
-                return trimmed_pdf, True
+            print(f"Will drop source pages: {format_page_list(unioned)}")
+            try:
+                confirm = input(
+                    f"Type 'trim' to apply, or press Enter to cancel: "
+                ).strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                print("ℹ️  Keeping existing trim.")
+                return None
+            if confirm != "trim":
+                print("ℹ️  Keeping existing trim.")
+                return None
+            return unioned
     
     def _delete_first_page_from_pdf(self, pdf_path: Path) -> Optional[Path]:
         """Delete the first page from a PDF and return path to the modified file.
@@ -11758,8 +11980,8 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         for creator in creators:
             if not isinstance(creator, dict):
                 continue
-            first = (creator.get('firstName') or '').strip()
-            last = (creator.get('lastName') or '').strip()
+            first = as_name_str(creator.get('firstName'))
+            last = as_name_str(creator.get('lastName'))
             if not first and not last:
                 continue
             name = f"{last}, {first}" if first and last else (last or first)

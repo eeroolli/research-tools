@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from shared_tools.config.io import read_config_files
 from shared_tools.utils.identifier_validator import IdentifierValidator
+from shared_tools.utils.author_name_splitter import lastname_in_text
 
 
 class OllamaClient:
@@ -460,10 +461,13 @@ Remember: Return ONLY the JSON object. No explanatory text before or after. Use 
             # Check if at least the last name appears in text
             if len(name_parts) >= 1:
                 last_name = name_parts[-1].lower() if name_parts else ""
-                if last_name and len(last_name) > 2:  # Only check if last name is substantial
-                    if last_name in text_lower:
-                        validated_authors.append(author_clean)
-                        continue
+                # Short/digit last names (e.g. "6") use word-boundary only;
+                # longer names may use substring (legacy).
+                if last_name and lastname_in_text(
+                    last_name, text_lower, allow_substring_if_long=True
+                ):
+                    validated_authors.append(author_clean)
+                    continue
             
             # If we get here, author name not found in text - likely hallucinated
             # Log it but don't include in validated list
