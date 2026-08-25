@@ -172,8 +172,10 @@ class PaperProcessorDaemon:
         self.grobid_client = self.service_manager.grobid_client
         self.ollama_process = self.service_manager.ollama_process
         
-        # Window management
-        self._terminal_window_handle = None  # Store terminal window handle for positioning
+        # Window management (one-time layout + daemon-owned Sumatra)
+        self._terminal_window_handle = None
+        self._owned_sumatra_pid: Optional[int] = None
+        self._owned_sumatra_positioned = False
         
         # Initialize local Zotero search (read-only) - this is fast
         try:
@@ -5057,10 +5059,6 @@ class PaperProcessorDaemon:
             'RESTART' when the user requested restart from beginning; the caller
             should re-queue the same path and run the next item.
         """
-        # Clear any leftover Sumatra tabs from a prior run (Windows).
-        if sys.platform == 'win32':
-            self._close_sumatra_all_tabs()
-
         # Check if file exists before processing
         if not pdf_path.exists():
             self.logger.warning(f"File no longer exists, cannot process: {pdf_path}")
@@ -5068,12 +5066,8 @@ class PaperProcessorDaemon:
         
         self.logger.info(f"New scan: {pdf_path.name}")
         
-        # Open PDF in default viewer (non-blocking)
+        # Open in owned Sumatra (no focus steal / no re-snap)
         self._open_pdf_in_viewer(pdf_path)
-        
-        # Return focus to terminal after opening PDF
-        time.sleep(0.5)  # Small delay to ensure PDF viewer is ready
-        self._return_focus_to_terminal()
         
         # Remember the original scan path for final move operations
         self._original_scan_path = Path(pdf_path)
@@ -8929,14 +8923,12 @@ class PaperProcessorDaemon:
         self.logger.info(f"Publications: {self.publications_dir}")
         self.logger.info("="*60)
         
-        # Position terminal window on right half of screen using Windows Snap
-        # Wait for terminal window to be ready
-        time.sleep(2.0)  # Give terminal window time to be fully ready
+        # One-time layout: terminal right, owned Sumatra left, focus back to terminal
+        time.sleep(2.0)
         self._position_terminal_window()
+        self._ensure_owned_sumatra()
+        self._return_focus_to_terminal()
         self._open_web_zotero_library()
-        
-        # Note: Removed second positioning call to prevent window jumping
-        # If positioning fails, it will be retried when PDF viewer opens
         
         # Process existing files in the directory
         self.process_existing_files()
@@ -9039,22 +9031,18 @@ class PaperProcessorDaemon:
         return f"{count} new {noun} queued while finishing the current interaction"
     
     def _open_pdf_in_viewer(self, pdf_path: Path) -> bool:
-        """Open PDF in default system viewer (non-blocking) and position window.
-        
-        Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            True if opened successfully, False otherwise
+        """Open PDF in the daemon-owned viewer (non-blocking).
+
+        On Windows, uses a single SumatraPDF instance isolated via -appdata.
+        Later opens only send a quiet DDE Open (no raise / no focus steal).
         """
         try:
-            # Non-Windows (e.g., WSL/Linux): avoid calling Windows executables directly
             if sys.platform != 'win32':
-                # Try to convert WSL path to Windows path for wslview integration
                 windows_path = self._to_windows_path(pdf_path)
-                is_valid_windows_path = windows_path and ((":\\" in windows_path or ":/" in windows_path) or windows_path.startswith('\\\\'))
+                is_valid_windows_path = windows_path and (
+                    (":\\" in windows_path or ":/" in windows_path) or windows_path.startswith('\\\\')
+                )
                 if is_valid_windows_path:
-                    # Preferred path: use wslview if available to open in Windows from WSL
                     try:
                         self.logger.info(f"Opening PDF in viewer via wslview: {windows_path}")
                         proc = subprocess.Popen(
@@ -9070,7 +9058,6 @@ class PaperProcessorDaemon:
                     except Exception as e:
                         self.logger.warning(f"Failed to open PDF with wslview: {e}")
 
-                # Fallback: xdg-open with WSL path (Linux viewer if path is accessible)
                 try:
                     wsl_path_str = str(pdf_path)
                     if not (wsl_path_str.startswith('\\\\') or (':\\' in wsl_path_str or ':/' in wsl_path_str)):
@@ -9090,169 +9077,260 @@ class PaperProcessorDaemon:
 
                 self.logger.warning(f"Could not open PDF in viewer on non-Windows platform: {pdf_path}")
                 return False
-            else:
-                # Windows: ensure we're on the correct desktop before opening
-                # Bring terminal to foreground first to ensure PDF opens on same desktop
-                # This switches to the terminal's virtual desktop before opening PDF
-                if hasattr(self, '_terminal_window_handle') and self._terminal_window_handle:
-                    try:
-                        ps_script = f'''
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32 {{
-    [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")]
-    public static extern bool IsWindowVisible(IntPtr hWnd);
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-}}
-"@
-$terminalHwnd = [IntPtr]{self._terminal_window_handle}
-if ([Win32]::IsWindowVisible($terminalHwnd)) {{
-    # Restore window if minimized, then bring to foreground
-    [Win32]::ShowWindow($terminalHwnd, 9)  # SW_RESTORE = 9
-    Start-Sleep -Milliseconds 100
-    [Win32]::SetForegroundWindow($terminalHwnd)
-    # Wait longer to ensure virtual desktop switch completes
-    Start-Sleep -Milliseconds 500
-}}
-'''
-                        subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
-                    except Exception as e:
-                        self.logger.debug(f"Could not bring terminal to foreground before opening PDF: {e}")
-                
-                # Windows: use startfile (non-blocking)
-                self.logger.info(f"Opening PDF in viewer: {pdf_path}")
-                os.startfile(str(pdf_path))
-                
-                # Wait a moment for window to open, then position it
-                time.sleep(1.5)  # Slightly longer wait to ensure window is fully created
-                self._position_pdf_window(pdf_path)
-                self.logger.info("PDF viewer opened successfully")
+
+            if not self._ensure_owned_sumatra():
+                self.logger.warning("Owned SumatraPDF is not available")
+                return False
+
+            open_target = str(pdf_path)
+            escaped = open_target.replace('\\', '\\\\').replace('"', '\\"')
+            dde = f'[Open("{escaped}",0,0,0)]'
+            if self._send_owned_sumatra_dde(dde):
+                self.logger.info(f"Opened PDF in owned Sumatra: {pdf_path.name}")
                 return True
-                
+            self.logger.warning(f"Failed to open PDF in owned Sumatra: {pdf_path}")
+            return False
         except Exception as e:
             self.logger.error(f"Could not open PDF in viewer: {e}")
             return False
-        
-        self.logger.warning("All methods to open PDF viewer failed")
-        return False
 
-    def _send_sumatra_command(self, command_id: str, file_path: Optional[Path] = None) -> bool:
-        """Send a command to SumatraPDF and return True on success.
+    def _sumatra_appdata_dir(self) -> Path:
+        """Private Sumatra profile so the daemon never hijacks the user's instance."""
+        base = os.environ.get('LOCALAPPDATA') or str(Path.home() / 'AppData' / 'Local')
+        path = Path(base) / 'research-tools' / 'sumatra-daemon'
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
-        If file_path is set, opens that file with -reuse-instance before sending the DDE command.
-        """
-        cmd = (command_id or "").strip()
-        if not cmd:
+    def _sumatra_exe(self) -> Optional[str]:
+        """Resolve SumatraPDF.exe from config or PATH."""
+        configured = ""
+        try:
+            configured = self.config.get("PDF_VIEWER", "sumatra_exe", fallback="").strip().strip('"')
+        except Exception:
+            configured = ""
+        if configured and Path(configured).is_file():
+            return configured
+        found = shutil.which("SumatraPDF.exe") or shutil.which("SumatraPDF")
+        return found
+
+    def _owned_sumatra_alive(self) -> bool:
+        pid = getattr(self, '_owned_sumatra_pid', None)
+        if not pid:
+            return False
+        try:
+            result = subprocess.run(
+                ['powershell.exe', '-NoProfile', '-Command',
+                 f'if (Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue) {{ "ALIVE" }} else {{ "DEAD" }}'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                text=True,
+            )
+            return bool(result.stdout and "ALIVE" in result.stdout)
+        except Exception:
             return False
 
+    def _send_owned_sumatra_dde(self, dde_cmd: str) -> bool:
+        """Send a DDE command to the daemon-owned Sumatra (-appdata) instance."""
+        cmd = (dde_cmd or "").strip()
+        if not cmd:
+            return False
+        exe = self._sumatra_exe()
+        if not exe:
+            self.logger.debug("SumatraPDF.exe not found")
+            return False
+        appdata = str(self._sumatra_appdata_dir())
         try:
-            configured_exe = ""
-            try:
-                configured_exe = self.config.get("PDF_VIEWER", "sumatra_exe", fallback="").strip().strip('"')
-            except Exception:
-                configured_exe = ""
-
-            ps_lines = [
-                "$ErrorActionPreference = 'Stop'",
-            ]
-
-            if configured_exe:
-                escaped_exe = configured_exe.replace("'", "''")
-                ps_lines.extend([
-                    f"$exe = '{escaped_exe}'",
-                    "if (-not (Test-Path -LiteralPath $exe)) { Write-Host 'NO_SUMATRA'; exit 2 }",
-                ])
-            else:
-                ps_lines.extend([
-                    "$sumatra = Get-Command SumatraPDF.exe -ErrorAction SilentlyContinue",
-                    "if (-not $sumatra) { Write-Host 'NO_SUMATRA'; exit 2 }",
-                    "$exe = $sumatra.Source",
-                ])
-
-            if file_path is not None:
-                open_target = str(file_path)
-                if sys.platform != 'win32':
-                    windows_path = self._to_windows_path(Path(file_path))
-                    if windows_path:
-                        open_target = windows_path
-                escaped_path = open_target.replace("'", "''")
-                ps_lines.extend([
-                    f"$targetFile = '{escaped_path}'",
-                    "& $exe -reuse-instance $targetFile | Out-Null",
-                    "Start-Sleep -Milliseconds 250",
-                ])
-
-            escaped_cmd = cmd.replace("'", "''")
-            ps_lines.extend([
-                f"$ddeCmd = '[{escaped_cmd}]'",
-                "& $exe -dde $ddeCmd | Out-Null",
-                "Write-Host 'SUCCESS'",
-            ])
-
-            ps_script = "; ".join(ps_lines)
+            # Sumatra -dde: escape " and \ in the DDE string for the command line.
+            # We pass via PowerShell so quoting stays reliable.
+            escaped_exe = exe.replace("'", "''")
+            escaped_appdata = appdata.replace("'", "''")
+            escaped_dde = cmd.replace("'", "''")
+            ps = (
+                f"$exe = '{escaped_exe}'; "
+                f"$appdata = '{escaped_appdata}'; "
+                f"$dde = '{escaped_dde}'; "
+                "& $exe -appdata $appdata -dde $dde | Out-Null; "
+                "Write-Host 'SUCCESS'"
+            )
             result = subprocess.run(
-                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=6,
+                timeout=8,
                 text=True,
             )
             if result.returncode == 0 and result.stdout and "SUCCESS" in result.stdout:
                 return True
-
             if result.stdout:
-                self.logger.debug(f"Sumatra command stdout: {result.stdout.strip()}")
+                self.logger.debug(f"Owned Sumatra DDE stdout: {result.stdout.strip()}")
             if result.stderr:
-                self.logger.debug(f"Sumatra command stderr: {result.stderr.strip()}")
+                self.logger.debug(f"Owned Sumatra DDE stderr: {result.stderr.strip()}")
             return False
         except Exception as e:
-            self.logger.debug(f"Failed to send Sumatra command '{cmd}': {e}")
+            self.logger.debug(f"Failed owned Sumatra DDE '{cmd}': {e}")
             return False
 
+    def _send_sumatra_command(self, command_id: str, file_path: Optional[Path] = None) -> bool:
+        """Send a named command to the owned Sumatra instance.
+
+        Kept for tests and callers that use CmdCloseAllTabs-style IDs.
+        file_path is ignored; use _open_pdf_in_viewer to open files.
+        """
+        cmd = (command_id or "").strip()
+        if not cmd:
+            return False
+        if not cmd.startswith('['):
+            cmd = f'[{cmd}]'
+        if sys.platform == 'win32' and not self._owned_sumatra_alive():
+            # Allow DDE before ensure when only closing; otherwise ensure first.
+            if 'Close' not in cmd and 'Exit' not in cmd:
+                if not self._ensure_owned_sumatra():
+                    return False
+        return self._send_owned_sumatra_dde(cmd)
+
     def _close_sumatra_all_tabs(self) -> bool:
-        """Close all tabs in SumatraPDF. Requires Sumatra 3.6+."""
+        """Close all tabs in the owned Sumatra instance. Requires Sumatra 3.6+."""
         if self._send_sumatra_command("CmdCloseAllTabs", None):
-            self.logger.info("Closed all tabs in SumatraPDF")
+            self.logger.info("Closed all tabs in owned SumatraPDF")
             return True
         self.logger.debug("CmdCloseAllTabs failed (Sumatra not running, old version, or no window)")
         return False
 
-    def _store_terminal_window_handle(self):
-        """Store terminal window handle at startup for later use."""
+    def _ensure_owned_sumatra(self) -> bool:
+        """Launch the daemon-owned Sumatra once and position it on the left half."""
         if sys.platform != 'win32':
-            # Only supported on native Windows where user32 APIs are available
-            self.logger.debug("Skipping terminal window handle storage on non-Windows platform")
-            return
-        
-        self.logger.info("Storing terminal window handle...")
+            return False
+        if self._owned_sumatra_alive():
+            return True
+
+        exe = self._sumatra_exe()
+        if not exe:
+            self.logger.warning(
+                "SumatraPDF.exe not found on PATH; set [PDF_VIEWER] sumatra_exe in config.personal.conf"
+            )
+            return False
+
+        appdata = self._sumatra_appdata_dir()
         try:
-            # Use PowerShell to find terminal window by process tree
-            # Get current Python process, find parent (WSL/bash), then find its parent (cmd.exe)
-            ps_script = '''
-# Define all types in a single Add-Type block so they can reference each other
+            self.logger.info(f"Starting owned SumatraPDF (-appdata {appdata})")
+            proc = subprocess.Popen(
+                [exe, '-appdata', str(appdata)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._owned_sumatra_pid = proc.pid
+            self._owned_sumatra_positioned = False
+        except Exception as e:
+            self.logger.warning(f"Failed to start owned SumatraPDF: {e}")
+            self._owned_sumatra_pid = None
+            return False
+
+        # Wait briefly for the main window, then position once.
+        hwnd = self._wait_for_owned_sumatra_hwnd(timeout_s=5.0)
+        if hwnd:
+            self._position_owned_sumatra_window(hwnd)
+            self._owned_sumatra_positioned = True
+        else:
+            self.logger.warning("Owned Sumatra window not found for initial positioning")
+        return self._owned_sumatra_alive()
+
+    def _wait_for_owned_sumatra_hwnd(self, timeout_s: float = 5.0) -> Optional[int]:
+        """Return MainWindowHandle for the owned Sumatra PID, or None."""
+        pid = getattr(self, '_owned_sumatra_pid', None)
+        if not pid:
+            return None
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            try:
+                ps = (
+                    f"$p = Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue; "
+                    "if ($p -and $p.MainWindowHandle -ne 0) { "
+                    "Write-Host $p.MainWindowHandle.ToString() "
+                    "} else { Write-Host '0' }"
+                )
+                result = subprocess.run(
+                    ['powershell.exe', '-NoProfile', '-Command', ps],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    text=True,
+                )
+                raw = (result.stdout or '').strip()
+                if raw and raw != '0':
+                    return int(raw)
+            except Exception:
+                pass
+            time.sleep(0.25)
+        return None
+
+    def _position_owned_sumatra_window(self, hwnd: int) -> None:
+        """SetWindowPos the owned Sumatra window to the left half (once). No keyboard snap."""
+        if sys.platform != 'win32' or not hwnd:
+            return
+        ps_script = f'''
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
+public class Win32SumatraPos {{
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
+    public const int SM_CXSCREEN = 0;
+    public const int SM_CYSCREEN = 1;
+    public const int SW_RESTORE = 9;
+    public const uint SWP_SHOWWINDOW = 0x0040;
+}}
+"@
+$hwnd = [IntPtr]{int(hwnd)}
+[Win32SumatraPos]::ShowWindow($hwnd, [Win32SumatraPos]::SW_RESTORE) | Out-Null
+$w = [int]([Win32SumatraPos]::GetSystemMetrics([Win32SumatraPos]::SM_CXSCREEN) / 2)
+$h = [Win32SumatraPos]::GetSystemMetrics([Win32SumatraPos]::SM_CYSCREEN)
+if ([Win32SumatraPos]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, $w, $h, [Win32SumatraPos]::SWP_SHOWWINDOW)) {{
+    Write-Host "SUCCESS"
+}} else {{
+    Write-Host "FAILED"
+}}
+'''
+        try:
+            result = subprocess.run(
+                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                text=True,
+            )
+            if result.stdout and "SUCCESS" in result.stdout:
+                self.logger.info("Owned Sumatra positioned on left half")
+            else:
+                self.logger.debug(f"Owned Sumatra position result: {(result.stdout or '').strip()}")
+        except Exception as e:
+            self.logger.debug(f"Could not position owned Sumatra: {e}")
 
+    def _store_terminal_window_handle(self):
+        """Store terminal window handle at startup for later use."""
+        if sys.platform != 'win32':
+            self.logger.debug("Skipping terminal window handle storage on non-Windows platform")
+            return
+
+        self.logger.info("Storing terminal window handle...")
+        try:
+            ps_script = '''
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
 public struct RECT {
     public int Left;
     public int Top;
     public int Right;
     public int Bottom;
 }
-
 public class Win32 {
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 }
-
 public class Win32Find {
     [DllImport("user32.dll")]
     public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
@@ -9263,278 +9341,131 @@ public class Win32Find {
 
 $found = $false
 
-# Strategy 1: Find by process tree - get cmd.exe that launched WSL
-$cmdProcesses = Get-Process -Name "cmd" -ErrorAction SilentlyContinue | Where-Object { 
-    $_.MainWindowHandle -ne [IntPtr]::Zero 
-} | Sort-Object StartTime -Descending
-
-Write-Host "Checking $($cmdProcesses.Count) cmd.exe processes..."
-foreach ($proc in $cmdProcesses) {
-    try {
-        $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($proc.Id)" -ErrorAction SilentlyContinue).CommandLine
-        Write-Host "Process $($proc.Id): $($proc.MainWindowTitle) - CmdLine: $cmdLine"
-        if ($cmdLine) {
-            $hasWsl = $cmdLine -like "*wsl*"
-            $hasDaemon = $cmdLine -like "*paper_processor_daemon*"
-            $notStatus = $cmdLine -notlike "*--status*"
-            Write-Host "  Has WSL: $hasWsl, Has daemon: $hasDaemon, Not status: $notStatus"
-            
-            if ($hasWsl -and $hasDaemon -and $notStatus) {
-                $hwnd = $proc.MainWindowHandle
-                $rect = New-Object RECT
-                if ([Win32]::GetWindowRect($hwnd, [ref]$rect)) {
-                    $width = $rect.Right - $rect.Left
-                    $height = $rect.Bottom - $rect.Top
-                    Write-Host "  Window size: ${width}x${height}"
-                    # Only use if reasonably sized
-                    if ($width -gt 100 -and $height -gt 100) {
-                        Write-Host "FOUND: $($hwnd.ToString())"
-                        $found = $true
-                        break
-                    }
-                }
-            }
+# Prefer foreground window at daemon start (usually the terminal that launched us)
+$hwnd = [Win32]::GetForegroundWindow()
+if ($hwnd -ne [IntPtr]::Zero) {
+    $rect = New-Object RECT
+    if ([Win32]::GetWindowRect($hwnd, [ref]$rect)) {
+        $width = $rect.Right - $rect.Left
+        $height = $rect.Bottom - $rect.Top
+        if ($width -gt 100 -and $height -gt 100) {
+            Write-Host "FOUND: $($hwnd.ToString())"
+            $found = $true
         }
-    } catch {
-        Write-Host "  Error: $_"
-        continue
     }
 }
 
-# Strategy 2: Find console window by class name
-if (!$found) {
-    Write-Host "Trying console window class name..."
-    try {
-        # Win32Find class already defined in the top-level Add-Type block
-        $hwnd = [Win32Find]::FindWindow("ConsoleWindowClass", $null)
-        if ($hwnd -ne [IntPtr]::Zero) {
-            $rect = New-Object RECT
-            if ([Win32Find]::GetWindowRect($hwnd, [ref]$rect)) {
-                $width = $rect.Right - $rect.Left
-                $height = $rect.Bottom - $rect.Top
-                Write-Host "Console window size: ${width}x${height}"
-                if ($width -gt 100 -and $height -gt 100) {
-                    Write-Host "FOUND: $($hwnd.ToString())"
-                    $found = $true
-                }
-            }
-        }
-    } catch {
-        Write-Host "Strategy 2 error: $_"
+if (-not $found) {
+    $hwnd = [Win32Find]::FindWindow("ConsoleWindowClass", $null)
+    if ($hwnd -ne [IntPtr]::Zero) {
+        Write-Host "FOUND: $($hwnd.ToString())"
+        $found = $true
     }
 }
 
-# Strategy 3: Use foreground window if no console found (fallback)
-if (!$found) {
-    Write-Host "Trying foreground window as fallback..."
-    try {
-        $hwnd = [Win32]::GetForegroundWindow()
-        if ($hwnd -ne [IntPtr]::Zero) {
-            $rect = New-Object RECT
-            if ([Win32]::GetWindowRect($hwnd, [ref]$rect)) {
-                $width = $rect.Right - $rect.Left
-                $height = $rect.Bottom - $rect.Top
-                Write-Host "Foreground window size: ${width}x${height}"
-                if ($width -gt 100 -and $height -gt 100) {
-                    Write-Host "FOUND: $($hwnd.ToString())"
-                    $found = $true
-                }
-            }
-        }
-    } catch {
-        Write-Host "Strategy 3 error: $_"
+if (-not $found) {
+    $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.MainWindowHandle -ne [IntPtr]::Zero -and
+        ($_.ProcessName -match '^(WindowsTerminal|wt|cmd|powershell|pwsh|ConEmu64|Code)$')
+    } | Sort-Object StartTime -Descending | Select-Object -First 1
+    if ($procs) {
+        Write-Host "FOUND: $($procs.MainWindowHandle.ToString())"
+        $found = $true
     }
 }
 
-if (!$found) {
+if (-not $found) {
     Write-Host "NOTFOUND"
 }
 '''
-            result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, text=True)
-            
-            if result.stdout:
-                output = result.stdout.strip()
-                # Always log the output for debugging
-                self.logger.info(f"Terminal handle search output: {output}")
-                # Look for "FOUND: <handle>" in output
-                match = re.search(r'FOUND:\s*(\d+)', output)
-                if match:
-                    handle_str = match.group(1)
-                    self._terminal_window_handle = handle_str
-                    self.logger.info(f"Stored terminal window handle: {handle_str}")
-                elif "NOTFOUND" in output:
-                    self.logger.warning("Terminal window handle not found (NOTFOUND)")
-                else:
-                    # If we got output but no FOUND, log it for debugging
-                    self.logger.warning(f"Terminal handle search completed but no handle found. Output: {output[:500]}")
+            result = subprocess.run(
+                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=8,
+                text=True,
+            )
+            output = (result.stdout or '').strip()
+            match = re.search(r'FOUND:\s*(\d+)', output)
+            if match:
+                self._terminal_window_handle = match.group(1)
+                self.logger.info(f"Stored terminal window handle: {self._terminal_window_handle}")
             else:
-                self.logger.warning("Could not find terminal window handle (no output from script)")
-            if result.stderr:
-                self.logger.warning(f"Terminal handle search errors: {result.stderr.strip()}")
-            if result.returncode != 0:
-                self.logger.warning(f"Terminal handle search script exited with code: {result.returncode}")
-                
+                self.logger.warning(f"Terminal window handle not found. Output: {output[:500]}")
         except Exception as e:
             self.logger.warning(f"Could not store terminal window handle: {e}")
-    
+
     def _position_terminal_window(self):
-        """Position terminal window on the right half of the screen using Windows Snap.
-        
-        Uses Windows keyboard shortcut (Win+Right) to snap window to right half.
-        This is more reliable than manual positioning and can create snap groups.
-        """
+        """Position terminal on the right half once via SetWindowPos (no keyboard snap)."""
         if sys.platform != 'win32':
-            # Window snapping is only supported on native Windows
             self.logger.debug("Skipping terminal window positioning on non-Windows platform")
             return
-        
-        self.logger.info("Positioning terminal window to right half using Windows Snap...")
-        try:
-            # Use Windows keyboard shortcut to snap window to right half
-            # This uses Windows' native snap functionality which is more reliable
-            ps_script = '''
+
+        self.logger.info("Positioning terminal window to right half...")
+        handle = getattr(self, '_terminal_window_handle', None) or ""
+        ps_script = f'''
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public class Win32 {
-    [DllImport("user32.dll")]
-    public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")]
-    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
-}
-"@
-
-# Find console window - try multiple strategies
-$hwnd = [IntPtr]::Zero
-
-# Strategy 1: Find console window by class name (most reliable)
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32Find {
-    [DllImport("user32.dll")]
-    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
-}
-"@
-$hwnd = [Win32Find]::FindWindow("ConsoleWindowClass", $null)
-if ($hwnd -ne [IntPtr]::Zero) {
-    Write-Host "Found console window by class name"
-}
-
-# Strategy 2: Find most recent cmd.exe window
-if ($hwnd -eq [IntPtr]::Zero) {
-    $cmdProcesses = Get-Process -Name "cmd" -ErrorAction SilentlyContinue | Where-Object { 
-        $_.MainWindowHandle -ne [IntPtr]::Zero 
-    } | Sort-Object StartTime -Descending | Select-Object -First 1
-    
-    if ($cmdProcesses) {
-        $hwnd = $cmdProcesses.MainWindowHandle
-        Write-Host "Found most recent cmd.exe window (PID: $($cmdProcesses.Id))"
-    }
-}
-
-# Strategy 3: Use foreground window if no console found (fallback)
-if ($hwnd -eq [IntPtr]::Zero) {
-    $hwnd = [Win32]::GetForegroundWindow()
-    if ($hwnd -ne [IntPtr]::Zero) {
-        Write-Host "Using foreground window as fallback"
-    }
-}
-
-if ($hwnd -ne [IntPtr]::Zero) {
-    # Add window positioning functions
-    Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32Pos {
-    [DllImport("user32.dll")]
-    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-    [DllImport("user32.dll")]
-    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    [DllImport("user32.dll")]
-    public static extern int GetSystemMetrics(int nIndex);
+public class Win32 {{
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+}}
+public class Win32Find {{
+    [DllImport("user32.dll")] public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+}}
+public class Win32Pos {{
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
     public const int SM_CXSCREEN = 0;
     public const int SM_CYSCREEN = 1;
     public const int SW_RESTORE = 9;
     public const uint SWP_SHOWWINDOW = 0x0040;
-}
-public struct RECT {
-    public int Left;
-    public int Top;
-    public int Right;
-    public int Bottom;
-}
+}}
 "@
-    
-    # Restore window if minimized
-    [Win32Pos]::ShowWindow($hwnd, [Win32Pos]::SW_RESTORE)
-    Start-Sleep -Milliseconds 100
-    
-    # Bring window to foreground (if not already)
-    [Win32]::SetForegroundWindow($hwnd)
-    Start-Sleep -Milliseconds 200
-    
-    # Get screen dimensions
+
+$hwnd = [IntPtr]::Zero
+$stored = "{handle}"
+if ($stored -ne "") {{
+    try {{ $hwnd = [IntPtr]::new([int64]$stored) }} catch {{ $hwnd = [IntPtr]::Zero }}
+}}
+if ($hwnd -eq [IntPtr]::Zero) {{
+    $hwnd = [Win32Find]::FindWindow("ConsoleWindowClass", $null)
+}}
+if ($hwnd -eq [IntPtr]::Zero) {{
+    $hwnd = [Win32]::GetForegroundWindow()
+}}
+
+if ($hwnd -ne [IntPtr]::Zero) {{
+    [Win32Pos]::ShowWindow($hwnd, [Win32Pos]::SW_RESTORE) | Out-Null
     $screenWidth = [Win32Pos]::GetSystemMetrics([Win32Pos]::SM_CXSCREEN)
     $screenHeight = [Win32Pos]::GetSystemMetrics([Win32Pos]::SM_CYSCREEN)
-    
-    # Calculate right half position and size
-    $rightHalfWidth = [int]($screenWidth / 2)
-    $rightHalfHeight = $screenHeight
-    $rightHalfX = $screenWidth / 2
-    $rightHalfY = 0
-    
-    # Use SetWindowPos to position AND size explicitly
-    $result = [Win32Pos]::SetWindowPos($hwnd, [IntPtr]::Zero, $rightHalfX, $rightHalfY, $rightHalfWidth, $rightHalfHeight, [Win32Pos]::SWP_SHOWWINDOW)
-    
-    if ($result) {
-        Write-Host "Positioned terminal window using SetWindowPos (right half, $rightHalfWidth x $rightHalfHeight)"
-        Start-Sleep -Milliseconds 100
-        # Also try Windows Snap as backup to ensure it's properly snapped
-        [Win32]::keybd_event(0x5B, 0, 0, 0)  # Win key down
-        Start-Sleep -Milliseconds 50
-        [Win32]::keybd_event(0x27, 0, 0, 0)  # Right arrow down
-        Start-Sleep -Milliseconds 50
-        [Win32]::keybd_event(0x27, 0, 0x0002, 0)  # Right arrow up
-        [Win32]::keybd_event(0x5B, 0, 0x0002, 0)  # Win key up
+    $w = [int]($screenWidth / 2)
+    $x = $screenWidth - $w
+    if ([Win32Pos]::SetWindowPos($hwnd, [IntPtr]::Zero, $x, 0, $w, $screenHeight, [Win32Pos]::SWP_SHOWWINDOW)) {{
         Write-Host "SUCCESS"
-    } else {
-        Write-Host "SetWindowPos failed, trying Windows Snap only"
-        # Fallback to Windows Snap
-        [Win32]::keybd_event(0x5B, 0, 0, 0)  # Win key down
-        Start-Sleep -Milliseconds 50
-        [Win32]::keybd_event(0x27, 0, 0, 0)  # Right arrow down
-        Start-Sleep -Milliseconds 50
-        [Win32]::keybd_event(0x27, 0, 0x0002, 0)  # Right arrow up
-        [Win32]::keybd_event(0x5B, 0, 0x0002, 0)  # Win key up
-        Write-Host "SUCCESS"
-    }
-} else {
+    }} else {{
+        Write-Host "FAILED"
+    }}
+}} else {{
     Write-Host "Could not find terminal window"
-}
+}}
 '''
-            
-            result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
-            
-            if result.stdout:
-                output = result.stdout.strip()
-                if "SUCCESS" in output:
-                    self.logger.info("Terminal window snapped to right half successfully")
-                else:
-                    self.logger.info(f"Terminal snap output: {output}")
-            if result.stderr:
-                self.logger.warning(f"Terminal snap errors: {result.stderr.strip()}")
-                
-        except subprocess.TimeoutExpired:
-            self.logger.warning("Terminal snap script timed out")
+        try:
+            result = subprocess.run(
+                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                text=True,
+            )
+            if result.stdout and "SUCCESS" in result.stdout:
+                self.logger.info("Terminal window positioned on right half")
+            elif result.stdout:
+                self.logger.info(f"Terminal position output: {result.stdout.strip()}")
         except Exception as e:
-            self.logger.warning(f"Could not snap terminal window: {e}")
+            self.logger.warning(f"Could not position terminal window: {e}")
 
     def _open_url_default_browser(self, url: str) -> None:
         """Open URL with the Windows default browser; prefer a new window when supported."""
@@ -9596,13 +9527,9 @@ public struct RECT {
                 webbrowser.open(url, new=2)
                 return
 
-            # Same virtual desktop as the terminal, then move to the other monitor.
-            self._return_focus_to_terminal()
             self._open_url_default_browser(url)
             time.sleep(2.0)
             self._position_browser_on_other_screen()
-            time.sleep(0.5)
-            self._return_focus_to_terminal()
         except Exception as e:
             self.logger.warning(f"Could not open Web Zotero library: {e}")
 
@@ -9636,13 +9563,6 @@ public struct RECT {{ public int Left; public int Top; public int Right; public 
 "@
 
 $terminalHwnd = [IntPtr]{terminal_hwnd}
-if ($terminalHwnd -ne [IntPtr]::Zero -and [Win32Browser]::IsWindowVisible($terminalHwnd)) {{
-    [Win32Browser]::ShowWindow($terminalHwnd, 9)
-    Start-Sleep -Milliseconds 150
-    [Win32Browser]::SetForegroundWindow($terminalHwnd)
-    Start-Sleep -Milliseconds 400
-}}
-
 $screens = [System.Windows.Forms.Screen]::AllScreens
 $terminalScreen = [System.Windows.Forms.Screen]::PrimaryScreen
 if ($terminalHwnd -ne [IntPtr]::Zero -and [Win32Browser]::IsWindowVisible($terminalHwnd)) {{
@@ -9677,14 +9597,11 @@ if ($browserHwnd -eq [IntPtr]::Zero) {{ Write-Host "BROWSER_NOT_FOUND"; exit 1 }
 
 [Win32Browser]::ShowWindow($browserHwnd, 9)
 Start-Sleep -Milliseconds 100
-[Win32Browser]::SetForegroundWindow($browserHwnd)
-Start-Sleep -Milliseconds 300
 
 if ($otherScreen) {{
     $wa = $otherScreen.WorkingArea
     if ([Win32Browser]::SetWindowPos($browserHwnd, [IntPtr]::Zero, $wa.X, $wa.Y, $wa.Width, $wa.Height, 0x0040)) {{
         [Win32Browser]::ShowWindow($browserHwnd, 3)
-        [Win32Browser]::SetForegroundWindow($browserHwnd)
         Write-Host "SUCCESS"
     }} else {{ Write-Host "SETWINDOWPOS_FAILED"; exit 1 }}
 }} else {{
@@ -9710,337 +9627,86 @@ if ($otherScreen) {{
                 self.logger.debug(f"Browser placement attempt {attempt + 1} failed: {e}")
                 if attempt < 2:
                     time.sleep(0.6)
-    
-    def _position_pdf_window(self, pdf_path: Path):
-        """Position PDF viewer window on the left half of the screen and ensure it's on the same desktop as terminal.
-        
-        Args:
-            pdf_path: Path to PDF file (used to find window by title)
-        """
-        # Only supported on native Windows where user32 APIs are available
-        if sys.platform != 'win32':
-            self.logger.debug("Skipping PDF window positioning on non-Windows platform")
-            return
-        
-        # Retry logic: Sumatra may take a moment to open
-        max_retries = 3
-        retry_delay = 0.5
-        
-        for attempt in range(max_retries):
-            try:
-                if sys.platform != 'win32':
-                    windows_path = self._to_windows_path(pdf_path)
-                    if not windows_path:
-                        return
-                    filename = Path(windows_path).name
-                else:
-                    filename = pdf_path.name
-                
-                # Get terminal window handle if stored
-                terminal_hwnd = None
-                if hasattr(self, '_terminal_window_handle') and self._terminal_window_handle:
-                    try:
-                        terminal_hwnd = int(self._terminal_window_handle)
-                    except (ValueError, TypeError):
-                        terminal_hwnd = None
-                
-                # PowerShell script to find PDF viewer, move to same desktop as terminal, and position it
-                ps_script = f'''
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32 {{
-    [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    [DllImport("user32.dll")]
-    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-    [DllImport("user32.dll")]
-    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-    [DllImport("user32.dll")]
-    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
-    [DllImport("user32.dll")]
-    public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")]
-    public static extern bool IsWindowVisible(IntPtr hWnd);
-}}
-public struct RECT {{
-    public int Left;
-    public int Top;
-    public int Right;
-    public int Bottom;
-}}
-"@
 
-$filename = "{filename}"
-$terminalHwnd = {terminal_hwnd if terminal_hwnd else "[IntPtr]::Zero"}
-
-# Find Sumatra PDF process specifically
-$sumatraProcesses = Get-Process -Name "SumatraPDF" -ErrorAction SilentlyContinue | Where-Object {{
-    $_.MainWindowHandle -ne [IntPtr]::Zero
-}}
-
-$pdfHwnd = [IntPtr]::Zero
-foreach ($proc in $sumatraProcesses) {{
-    $title = $proc.MainWindowTitle
-    # Match by filename in title or just use first Sumatra window
-    if ($title -like "*$filename*" -or $sumatraProcesses.Count -eq 1) {{
-        $pdfHwnd = $proc.MainWindowHandle
-        Write-Host "Found Sumatra PDF window: $title"
-        break
-    }}
-}}
-
-# Fallback: find any PDF viewer with filename in title
-if ($pdfHwnd -eq [IntPtr]::Zero) {{
-    $processes = Get-Process | Where-Object {{
-        $_.MainWindowHandle -ne [IntPtr]::Zero -and
-        ($_.MainWindowTitle -like "*$filename*" -or $_.MainWindowTitle -like "*PDF*")
-    }} | Select-Object -First 1
-    
-    if ($processes) {{
-        $pdfHwnd = $processes.MainWindowHandle
-        Write-Host "Found PDF viewer window: $($processes.ProcessName) - $($processes.MainWindowTitle)"
-    }}
-}}
-
-if ($pdfHwnd -ne [IntPtr]::Zero) {{
-    # Step 1: Ensure PDF viewer is on the same desktop as terminal
-    # Bring terminal to foreground first (if we have its handle) to switch to its desktop
-    if ($terminalHwnd -ne [IntPtr]::Zero) {{
-        try {{
-            $terminalPtr = [IntPtr]$terminalHwnd
-            if ([Win32]::IsWindowVisible($terminalPtr)) {{
-                # Restore window if minimized, then bring to foreground
-                [Win32]::ShowWindow($terminalPtr, 9)  # SW_RESTORE = 9
-                Start-Sleep -Milliseconds 150
-                [Win32]::SetForegroundWindow($terminalPtr)
-                # Wait longer to ensure virtual desktop switch completes
-                Start-Sleep -Milliseconds 800
-                Write-Host "Brought terminal to foreground (switched to terminal desktop)"
-            }}
-        }} catch {{
-            Write-Host "Could not bring terminal to foreground: $_"
-        }}
-    }}
-    
-    # Step 2: Bring PDF viewer to foreground (this moves it to current desktop)
-    [Win32]::ShowWindow($pdfHwnd, 9)  # SW_RESTORE = 9
-    Start-Sleep -Milliseconds 150
-    [Win32]::SetForegroundWindow($pdfHwnd)
-    Start-Sleep -Milliseconds 300
-    Write-Host "Brought PDF viewer to foreground"
-    
-    # Step 3: Position PDF viewer relative to terminal or use Windows Snap
-    if ($terminalHwnd -ne [IntPtr]::Zero) {{
-        try {{
-            $terminalPtr = [IntPtr]$terminalHwnd
-            $terminalRect = New-Object RECT
-            if ([Win32]::GetWindowRect($terminalPtr, [ref]$terminalRect)) {{
-                $terminalLeft = $terminalRect.Left
-                $terminalTop = $terminalRect.Top
-                $terminalWidth = $terminalRect.Right - $terminalRect.Left
-                $terminalHeight = $terminalRect.Bottom - $terminalRect.Top
-                
-                # Get screen dimensions using Add-Type
-                Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class ScreenInfo {{
-    [DllImport("user32.dll")]
-    public static extern int GetSystemMetrics(int nIndex);
-    public const int SM_CXSCREEN = 0;
-    public const int SM_CYSCREEN = 1;
-}}
-"@
-                $screenWidth = [ScreenInfo]::GetSystemMetrics([ScreenInfo]::SM_CXSCREEN)
-                $screenHeight = [ScreenInfo]::GetSystemMetrics([ScreenInfo]::SM_CYSCREEN)
-                
-                # Position PDF viewer on left half, terminal on right half
-                # Calculate left half position and size explicitly
-                $pdfWidth = [int]($screenWidth / 2)
-                $pdfHeight = $screenHeight
-                $pdfX = 0
-                $pdfY = 0
-                
-                # Use SetWindowPos to position AND size explicitly
-                $result = [Win32]::SetWindowPos($pdfHwnd, [IntPtr]::Zero, $pdfX, $pdfY, $pdfWidth, $pdfHeight, 0x0040)
-                if ($result) {{
-                    Write-Host "Positioned PDF viewer using SetWindowPos (left half, $pdfWidth x $pdfHeight)"
-                    Start-Sleep -Milliseconds 100
-                    # Also try Windows Snap as backup to ensure it's properly snapped
-                    [Win32]::keybd_event(0x5B, 0, 0, 0)  # Win key down
-                    Start-Sleep -Milliseconds 50
-                    [Win32]::keybd_event(0x25, 0, 0, 0)  # Left arrow down
-                    Start-Sleep -Milliseconds 50
-                    [Win32]::keybd_event(0x25, 0, 0x0002, 0)  # Left arrow up
-                    [Win32]::keybd_event(0x5B, 0, 0x0002, 0)  # Win key up
-                }} else {{
-                    Write-Host "SetWindowPos failed, trying Windows Snap only"
-                    # Fallback to Windows Snap
-                    [Win32]::keybd_event(0x5B, 0, 0, 0)  # Win key down
-                    Start-Sleep -Milliseconds 50
-                    [Win32]::keybd_event(0x25, 0, 0, 0)  # Left arrow down
-                    Start-Sleep -Milliseconds 50
-                    [Win32]::keybd_event(0x25, 0, 0x0002, 0)  # Left arrow up
-                    [Win32]::keybd_event(0x5B, 0, 0x0002, 0)  # Win key up
-                }}
-            }} else {{
-                Write-Host "Could not get terminal window rect, using Windows Snap"
-                # Fallback to Windows Snap
-                [Win32]::keybd_event(0x5B, 0, 0, 0)  # Win key down
-                Start-Sleep -Milliseconds 50
-                [Win32]::keybd_event(0x25, 0, 0, 0)  # Left arrow down
-                Start-Sleep -Milliseconds 50
-                [Win32]::keybd_event(0x25, 0, 0x0002, 0)  # Left arrow up
-                [Win32]::keybd_event(0x5B, 0, 0x0002, 0)  # Win key up
-            }}
-        }} catch {{
-            Write-Host "Error positioning relative to terminal: $_"
-            # Fallback to Windows Snap
-            [Win32]::keybd_event(0x5B, 0, 0, 0)  # Win key down
-            Start-Sleep -Milliseconds 50
-            [Win32]::keybd_event(0x25, 0, 0, 0)  # Left arrow down
-            Start-Sleep -Milliseconds 50
-            [Win32]::keybd_event(0x25, 0, 0x0002, 0)  # Left arrow up
-            [Win32]::keybd_event(0x5B, 0, 0x0002, 0)  # Win key up
-        }}
-    }} else {{
-        # No terminal handle - use Windows Snap
-        Write-Host "No terminal handle, using Windows Snap"
-        [Win32]::keybd_event(0x5B, 0, 0, 0)  # Win key down
-        Start-Sleep -Milliseconds 50
-        [Win32]::keybd_event(0x25, 0, 0, 0)  # Left arrow down
-        Start-Sleep -Milliseconds 50
-        [Win32]::keybd_event(0x25, 0, 0x0002, 0)  # Left arrow up
-        [Win32]::keybd_event(0x5B, 0, 0x0002, 0)  # Win key up
-    }}
-    
-    Write-Host "SUCCESS"
-}} else {{
-    Write-Host "PDF viewer window not found"
-}}
-'''
-                
-                result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
-                
-                if result.stdout and "SUCCESS" in result.stdout:
-                    self.logger.info(f"PDF viewer positioned successfully (attempt {attempt + 1})")
-                    if result.stdout.strip():
-                        self.logger.debug(f"Positioning output: {result.stdout.strip()}")
-                    return
-                elif attempt < max_retries - 1:
-                    self.logger.debug(f"PDF viewer not found yet, retrying in {retry_delay}s...")
-                    time.sleep(retry_delay)
-                else:
-                    if result.stdout:
-                        self.logger.warning(f"PDF viewer positioning failed: {result.stdout.strip()}")
-                    if result.stderr:
-                        self.logger.warning(f"PDF viewer positioning errors: {result.stderr.strip()}")
-                        
-            except subprocess.TimeoutExpired:
-                self.logger.warning("PDF viewer positioning script timed out")
-            except Exception as e:
-                self.logger.debug(f"Could not position PDF window (attempt {attempt + 1}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
-    
     def _return_focus_to_terminal(self):
-        """Return focus to terminal window after PDF viewer opens."""
+        """Return focus to terminal window (used once after initial layout)."""
         self.logger.info("Returning focus to terminal window...")
         try:
             handle_arg = self._terminal_window_handle if self._terminal_window_handle else ""
             ps_script = f'''
 param([string]$StoredHandle = "{handle_arg}")
-
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public class Win32 {{
-    [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")]
-    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
 }}
 "@
-
 $hwnd = [IntPtr]::Zero
-
-# Try stored handle first
 if ($StoredHandle -and $StoredHandle -ne "") {{
-    try {{
-        $hwnd = [IntPtr]::new([int64]$StoredHandle)
-        Write-Host "Using stored handle for focus: $StoredHandle"
-    }} catch {{
-        Write-Host "Invalid stored handle, finding window..."
-    }}
+    try {{ $hwnd = [IntPtr]::new([int64]$StoredHandle) }} catch {{ }}
 }}
-
-# If no stored handle, find window
 if ($hwnd -eq [IntPtr]::Zero) {{
-    # Strategy 1: Find console window by class name
     $hwnd = [Win32]::FindWindow("ConsoleWindowClass", $null)
-    if ($hwnd -ne [IntPtr]::Zero) {{
-        Write-Host "Found console window by class name"
-    }}
 }}
-
-# Strategy 2: Find cmd.exe with WSL
-if ($hwnd -eq [IntPtr]::Zero) {{
-    $cmdProcesses = Get-Process -Name "cmd" -ErrorAction SilentlyContinue | Where-Object {{ 
-        $_.MainWindowHandle -ne [IntPtr]::Zero 
-    }} | Sort-Object StartTime -Descending
-    
-    foreach ($proc in $cmdProcesses) {{
-        try {{
-            $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($proc.Id)" -ErrorAction SilentlyContinue).CommandLine
-            if ($cmdLine -and $cmdLine -like "*wsl*" -and $cmdLine -notlike "*--status*") {{
-                $hwnd = $proc.MainWindowHandle
-                Write-Host "Found cmd.exe window (PID: $($proc.Id))"
-                break
-            }}
-        }} catch {{
-            continue
-        }}
-    }}
-}}
-
-# Set focus
 if ($hwnd -ne [IntPtr]::Zero) {{
-    $result = [Win32]::SetForegroundWindow($hwnd)
-    if ($result) {{
-        Write-Host "SUCCESS"
-    }} else {{
-        Write-Host "SetForegroundWindow returned false"
-    }}
+    [Win32]::ShowWindow($hwnd, 9) | Out-Null
+    if ([Win32]::SetForegroundWindow($hwnd)) {{ Write-Host "SUCCESS" }} else {{ Write-Host "FAILED" }}
 }} else {{
     Write-Host "Could not find terminal window"
 }}
 '''
-            
-            result = subprocess.run(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
-            
+            result = subprocess.run(
+                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                text=True,
+            )
             if result.stdout and "SUCCESS" in result.stdout:
                 self.logger.info("Focus returned to terminal successfully")
-            else:
-                if result.stdout:
-                    self.logger.debug(f"Focus management output: {result.stdout.strip()}")
-                    
+            elif result.stdout:
+                self.logger.debug(f"Focus management output: {result.stdout.strip()}")
         except Exception as e:
             self.logger.debug(f"Could not return focus to terminal: {e}")
-    
+
     def _close_pdf_viewer(self):
-        """Close all Sumatra tabs when processing completes."""
+        """Close tabs in owned Sumatra so Windows file locks are released; keep process alive."""
         try:
             self._close_sumatra_all_tabs()
             if hasattr(self, '_pdf_viewer_process'):
                 delattr(self, '_pdf_viewer_process')
         except Exception as e:
             self.logger.debug(f"Could not close PDF viewer: {e}")
-    
+
+    def _exit_owned_sumatra(self):
+        """Exit only the daemon-owned Sumatra instance on shutdown."""
+        if sys.platform != 'win32':
+            return
+        pid = getattr(self, '_owned_sumatra_pid', None)
+        if not pid and not self._owned_sumatra_alive():
+            return
+        try:
+            if self._send_owned_sumatra_dde('[CmdExit]'):
+                self.logger.info("Requested owned Sumatra exit via CmdExit")
+            time.sleep(0.4)
+            if self._owned_sumatra_alive() and pid:
+                subprocess.run(
+                    ['powershell.exe', '-NoProfile', '-Command',
+                     f'Stop-Process -Id {int(pid)} -Force -ErrorAction SilentlyContinue'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+                self.logger.info(f"Terminated owned Sumatra PID {pid}")
+        except Exception as e:
+            self.logger.debug(f"Could not exit owned Sumatra: {e}")
+        finally:
+            self._owned_sumatra_pid = None
+            self._owned_sumatra_positioned = False
+
     def process_existing_files(self):
         """Process existing PDF files in the watch directory."""
         self.logger.info("Checking for existing PDF files to process...")
@@ -10089,6 +9755,8 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         if self.observer:
             self.observer.stop()
             self.observer.join()
+        
+        self._exit_owned_sumatra()
         
         # Shutdown services using ServiceManager
         if hasattr(self, 'service_manager'):

@@ -87,7 +87,7 @@ def test_open_web_zotero_windows_opens_and_positions(monkeypatch):
 
     daemon._open_web_zotero_library()
 
-    assert daemon._return_focus_to_terminal.call_count == 2
+    daemon._return_focus_to_terminal.assert_not_called()
     daemon._open_url_default_browser.assert_called_once_with(
         "https://www.zotero.org/eero.olli/library"
     )

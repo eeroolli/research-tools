@@ -31,6 +31,8 @@ For detailed development status, technical architecture, and upcoming features, 
 
 4. **Stop when done:** Press Ctrl+C in the terminal
 
+On Windows, the daemon starts its own SumatraPDF window beside the terminal (left) once; later papers reuse that window without stealing focus. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for details and the optional `[PDF_VIEWER] sumatra_exe` setting.
+
 **Setup for Epson Scanner:**
 1. **Before scanning**: Run `scripts/start_scanner_daemon_restart.vbs` to start/restart the daemon
 2. In Epson Capture Pro, set Send → Destination → **Do Nothing** (no Application). Save the PDF to the watch folder only; the running daemon picks it up via the folder watcher

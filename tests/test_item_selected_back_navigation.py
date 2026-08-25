@@ -470,24 +470,40 @@ def test_process_paper_create_passes_original_scan_not_working_pdf(
     assert received[0].name == "EN_20260820_0002.pdf"
 
 
+def _lightweight_daemon() -> PaperProcessorDaemon:
+    """Avoid full PaperProcessorDaemon.__init__ (services / window PowerShell)."""
+    d = object.__new__(PaperProcessorDaemon)
+    d.logger = SimpleNamespace(
+        info=lambda *a, **k: None,
+        debug=lambda *a, **k: None,
+        warning=lambda *a, **k: None,
+    )
+    return d
+
+
 def test_close_pdf_viewer_calls_close_sumatra_all_tabs_on_windows(
-    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    daemon = _lightweight_daemon()
     calls: list[bool] = []
 
     def _close_all() -> bool:
         calls.append(True)
         return True
 
+    exit_calls: list[str] = []
     monkeypatch.setattr(daemon, "_close_sumatra_all_tabs", _close_all)
+    monkeypatch.setattr(daemon, "_exit_owned_sumatra", lambda: exit_calls.append("exit"))
     monkeypatch.setattr("scripts.paper_processor_daemon.sys.platform", "win32")
     daemon._close_pdf_viewer()
     assert calls == [True]
+    assert exit_calls == []
 
 
 def test_close_pdf_viewer_attempts_sumatra_on_non_windows(
-    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    daemon = _lightweight_daemon()
     calls: list[bool] = []
 
     def _close_all() -> bool:
@@ -501,8 +517,9 @@ def test_close_pdf_viewer_attempts_sumatra_on_non_windows(
 
 
 def test_close_sumatra_all_tabs_sends_cmd_close_all_tabs(
-    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    daemon = _lightweight_daemon()
     sent: list[tuple[str, object]] = []
 
     def _send(cmd: str, path) -> bool:
@@ -516,8 +533,9 @@ def test_close_sumatra_all_tabs_sends_cmd_close_all_tabs(
 
 
 def test_close_sumatra_all_tabs_attempts_off_windows(
-    daemon: PaperProcessorDaemon, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    daemon = _lightweight_daemon()
     sent: list[tuple[str, object]] = []
 
     def _send(cmd: str, path) -> bool:

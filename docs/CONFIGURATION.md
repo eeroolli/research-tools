@@ -41,6 +41,17 @@ scanner_papers_dir = /mnt/i/FraScanner/papers
 publications_dir = /mnt/i/publications
 ```
 
+### [PDF_VIEWER]
+
+Optional Windows-only setting for the daemon-owned SumatraPDF instance:
+
+```ini
+[PDF_VIEWER]
+sumatra_exe = C:\Program Files\SumatraPDF\SumatraPDF.exe
+```
+
+Leave unset if `SumatraPDF.exe` is already on PATH. The daemon always uses a private `-appdata` profile so it does not control your normal Sumatra window.
+
 ### [GROBID]
 
 GROBID service configuration for metadata extraction.
@@ -305,11 +316,21 @@ python .\scripts\paper_processor_daemon.py
 In this mode (`sys.platform == 'win32'`):
 
 - Windows-style paths in `[PATHS]` (like `I:\FraScanner\papers` and `I:\publications`) are used directly.
-- The daemon can manage the terminal window position and the PDF viewer window using Windows APIs.
+- At startup the daemon positions the terminal on the right half once (`SetWindowPos` only; no keyboard snap).
+- It also starts a **daemon-owned** SumatraPDF instance with a private `-appdata` profile (`%LOCALAPPDATA%\research-tools\sumatra-daemon`), positions that window on the left half once, then returns focus to the terminal. Any Sumatra you already had open is left alone.
+- Later papers only send a quiet DDE `Open` to that owned instance (no raise, no focus steal, no re-snap). Closing tabs releases file locks; the process stays up until daemon shutdown (`CmdExit`).
 - At startup, if `PATHS.zotero_web_library_url` is set, the default browser opens that Web Zotero library; with two or more monitors the browser is moved to the screen that does not host the terminal.
-- PDF files are opened with the default Windows PDF viewer (e.g. SumatraPDF, Edge, Acrobat) using `os.startfile`.
+- If `SumatraPDF.exe` is not on PATH, set `[PDF_VIEWER] sumatra_exe` in `config.personal.conf`.
 
-Running the daemon from inside WSL is still supported as a best-effort mode, but Windows-specific features (terminal snapping, PDF window positioning, PowerShell-based file copying) are skipped, and only Linux tools such as `wslview` and `xdg-open` are used for opening PDFs.
+#### Owned Sumatra / window layout (manual check)
+
+1. Open Sumatra on another virtual desktop (or leave it closed).
+2. Start the daemon from a terminal on your usual desktop.
+3. Confirm a **new** Sumatra window appears beside the terminal (left), not the one on the other desktop.
+4. Process a paper, then another: the document changes in the owned window without stealing keyboard focus from the terminal.
+5. Stop the daemon: the owned Sumatra should exit; your other Sumatra (if any) should remain.
+
+Running the daemon from inside WSL is still supported as a best-effort mode, but Windows-specific features (one-time terminal/Sumatra placement, PowerShell-based file copying) are skipped, and only Linux tools such as `wslview` and `xdg-open` are used for opening PDFs.
 
 ### Services Not Starting
 
