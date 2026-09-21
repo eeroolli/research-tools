@@ -363,3 +363,117 @@ def test_process_paper_runs_preprocessing_before_metadata_extraction(
     assert extract_paths == [working_pdf]
     assert daemon._working_pdf == working_pdf
     assert daemon._preprocessing_state.get("split_succeeded") is True
+
+
+def test_is_landscape_page_helper() -> None:
+    assert PaperProcessorDaemon._is_landscape_page(842, 595) is True
+    assert PaperProcessorDaemon._is_landscape_page(595, 842) is False
+    assert PaperProcessorDaemon._is_landscape_page(600, 600) is False
+
+
+def _make_sized_pdf(path: Path, page_sizes: list[tuple[float, float]]) -> None:
+    """Create a multi-page PDF with given (width, height) per page."""
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    for width, height in page_sizes:
+        page = doc.new_page(width=width, height=height)
+        page.insert_text((36, 72), f"{width:.0f}x{height:.0f}")
+    doc.save(path)
+    doc.close()
+
+
+def test_split_keeps_portrait_pages_in_mixed_pdf(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Portrait, landscape, portrait → 4 output pages; ends keep source size."""
+    fitz = pytest.importorskip("fitz")
+    pdf_path = tmp_path / "mixed_orient.pdf"
+    portrait = (595.0, 842.0)
+    landscape = (842.0, 595.0)
+    _make_sized_pdf(pdf_path, [portrait, landscape, portrait])
+
+    # Avoid writing under system temp; save into tmp_path
+    monkeypatch.setattr(
+        daemon,
+        "_save_preprocessed_pdf",
+        lambda doc, out_path: doc.save(str(out_path)),
+    )
+    monkeypatch.setattr(
+        "tempfile.gettempdir",
+        lambda: str(tmp_path),
+    )
+
+    out_path, err = daemon._split_with_custom_gutter(pdf_path, landscape[0] / 2)
+    assert err is None
+    assert out_path is not None
+    assert out_path.exists()
+
+    out = fitz.open(str(out_path))
+    try:
+        assert len(out) == 4
+        assert abs(out[0].rect.width - portrait[0]) < 1.0
+        assert abs(out[0].rect.height - portrait[1]) < 1.0
+        assert abs(out[1].rect.width - landscape[0] / 2) < 1.0
+        assert abs(out[1].rect.height - landscape[1]) < 1.0
+        assert abs(out[2].rect.width - landscape[0] / 2) < 1.0
+        assert abs(out[2].rect.height - landscape[1]) < 1.0
+        assert abs(out[3].rect.width - portrait[0]) < 1.0
+        assert abs(out[3].rect.height - portrait[1]) < 1.0
+    finally:
+        out.close()
+
+
+def test_split_all_landscape_doubles_page_count(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fitz = pytest.importorskip("fitz")
+    pdf_path = tmp_path / "all_landscape.pdf"
+    landscape = (842.0, 595.0)
+    _make_sized_pdf(pdf_path, [landscape, landscape])
+
+    monkeypatch.setattr(
+        daemon,
+        "_save_preprocessed_pdf",
+        lambda doc, out_path: doc.save(str(out_path)),
+    )
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+
+    out_path, err = daemon._split_with_custom_gutter(pdf_path, landscape[0] / 2)
+    assert err is None
+    assert out_path is not None
+
+    out = fitz.open(str(out_path))
+    try:
+        assert len(out) == 4
+    finally:
+        out.close()
+
+
+def test_split_all_portrait_copies_through(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fitz = pytest.importorskip("fitz")
+    pdf_path = tmp_path / "all_portrait.pdf"
+    portrait = (595.0, 842.0)
+    _make_sized_pdf(pdf_path, [portrait, portrait, portrait])
+
+    monkeypatch.setattr(
+        daemon,
+        "_save_preprocessed_pdf",
+        lambda doc, out_path: doc.save(str(out_path)),
+    )
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+
+    # Gutter value is unused for portrait-only; any value is fine
+    out_path, err = daemon._split_with_custom_gutter(pdf_path, 300.0)
+    assert err is None
+    assert out_path is not None
+
+    out = fitz.open(str(out_path))
+    try:
+        assert len(out) == 3
+        for i in range(3):
+            assert abs(out[i].rect.width - portrait[0]) < 1.0
+            assert abs(out[i].rect.height - portrait[1]) < 1.0
+    finally:
+        out.close()

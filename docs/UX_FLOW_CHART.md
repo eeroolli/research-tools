@@ -357,7 +357,7 @@ Behavior note:
 
 These words mean different things in this codebase and in the UX:
 
-- **Split (landscape / two-up):** Preprocessing that **reformats layout** inside one PDF—e.g. turning a landscape two-up scan into portrait-oriented pages (gutter detection, geometric 50/50, `_double` filename rule, “Split” lines on PDF PREVIEW). It is about **how each physical page is cut**, not about producing multiple library items from one file.
+- **Split (landscape / two-up):** Preprocessing that **reformats layout** inside one PDF—e.g. turning a landscape two-up scan into portrait-oriented pages (gutter detection, geometric 50/50, `_double` filename rule, “Split” lines on PDF PREVIEW). It is about **how each physical page is cut**, not about producing multiple library items from one file. **Portrait pages in a mixed PDF are left unsplit** (covers, chapter openers); only pages with width > height are cut.
 - **Separation (document separator):** Taking **one scan PDF** and writing **several output PDFs** (different papers/items), using separator sheets and/or a manual **separation plan** (`shared_tools/pdf/document_separator.py`). It applies whether the file is already portrait or still two-up; plan page numbers follow the file shown in **PDF PREVIEW** (often the preprocessed, post-split layout).
 
 ### 6. Intelligent Two-Up Page Splitting
@@ -366,6 +366,7 @@ These words mean different things in this codebase and in the UX:
   - Checks for `_double.pdf` filename pattern (always split)
   - For other files: Analyzes aspect ratio (>1.3) and content structure
   - Stores detection results (dimensions, two-up status) before border removal
+- **Per-page orientation:** During the split, portrait/square pages are copied as-is; only landscape pages are cut left/right. Gutter detection also ignores portrait pages and uses the first landscape page’s width for validation.
 - **Gutter Detection:** Image-based analysis to find actual gutter position (not just 50% split)
 - **Dual Methods:** 
   - Spine detection for physical books (finds darker gray spine area)

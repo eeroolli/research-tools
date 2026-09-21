@@ -7266,12 +7266,21 @@ class PaperProcessorDaemon:
                 )
                 return None
             
-            # Get page width from first page
+            # Get page width from first landscape page (portrait covers skew 30-70% checks)
             doc = fitz.open(str(pdf_path))
             if len(doc) == 0:
                 doc.close()
                 return None
-            page_width = doc[0].rect.width
+            page_width = None
+            for i in range(len(doc)):
+                r = doc[i].rect
+                if self._is_landscape_page(r.width, r.height):
+                    page_width = r.width
+                    break
+            if page_width is None:
+                self.logger.debug("No landscape pages for gutter detection")
+                doc.close()
+                return None
             
             # Process each page: check individual validations, check agreement, final safety check
             valid_gutter_positions = []
@@ -7280,6 +7289,13 @@ class PaperProcessorDaemon:
             
             for page_num in range(len(edge_results)):
                 if page_num >= len(doc):
+                    continue
+
+                page = doc[page_num]
+                if not self._is_landscape_page(page.rect.width, page.rect.height):
+                    self.logger.debug(
+                        f"Page {page_num + 1} is portrait - skipping gutter detection"
+                    )
                     continue
                 
                 # Unpack edge detection results: (left_box, right_box, gutter_x_pts, is_valid, validation_errors, left_col_right_px, right_col_left_px, edge_mode)
@@ -7623,8 +7639,16 @@ class PaperProcessorDaemon:
                     pass
             raise
     
+    @staticmethod
+    def _is_landscape_page(width: float, height: float) -> bool:
+        """True when page is wider than tall (two-up candidate). Square counts as portrait."""
+        return width > height
+    
     def _split_with_custom_gutter(self, pdf_path: Path, gutter_x: float, gutter_x_per_page: Optional[List[float]] = None) -> Tuple[Optional[Path], Optional[str]]:
         """Split a two-up PDF at a custom X coordinate using PyMuPDF.
+
+        Portrait pages (width <= height) are copied through unchanged. Only landscape
+        pages are split left/right.
         
         Args:
             pdf_path: Path to input PDF
@@ -7653,6 +7677,8 @@ class PaperProcessorDaemon:
             new_doc = fitz.open()
             
             pages_created = 0
+            portrait_kept = 0
+            landscape_split = 0
             stage = "start"
             current_page_num = None
             doc_len = len(doc)
@@ -7684,6 +7710,17 @@ class PaperProcessorDaemon:
                 page_rect = page.rect
                 page_width = page_rect.width
                 page_height = page_rect.height
+
+                # Portrait / square: copy through unchanged (covers, chapter starts, etc.)
+                if not self._is_landscape_page(page_width, page_height):
+                    stage = "copy_portrait"
+                    new_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    pages_created += 1
+                    portrait_kept += 1
+                    self.logger.debug(
+                        f"Page {page_num + 1} portrait ({page_width:.1f}x{page_height:.1f}) - kept unsplit"
+                    )
+                    continue
                 
                 # Use per-page gutter if available, otherwise use single gutter_x
                 if gutter_x_per_page and page_num < len(gutter_x_per_page):
@@ -7804,6 +7841,7 @@ class PaperProcessorDaemon:
                         new_doc.close()
                         return None, error_msg
                 pages_created += 2
+                landscape_split += 1
                 
                 # Diagnostic logging: Check content immediately after creation
                 stage = "post_split_diagnostics"
@@ -7854,19 +7892,14 @@ class PaperProcessorDaemon:
                     pass
                 
             
-            # Check if we have the expected number of pages (2 per original)
-            expected_pages = len(doc) * 2
+            # Expected: 1 output page per portrait source, 2 per landscape source
+            expected_pages = portrait_kept + landscape_split * 2
             actual_pages = len(new_doc)
             
-            
-            # Empty page detection removed: A clean split should produce exactly 2 pages per original page.
-            # If a page is empty, that indicates a bug in gutter detection or split logic, not a valid edge case.
-            # We'll rely on diagnostic logging to identify and fix root causes instead of masking the problem.
-            
-            # Legacy cleanup for 3-page pattern (if somehow we have extra pages)
-            if actual_pages > expected_pages:
-                # We have extra pages - remove every 3rd page starting from index 1
-                # (assuming pattern: left, gutter, right, left, gutter, right, ...)
+            # Legacy cleanup for 3-page pattern (only when every source page was landscape
+            # and we somehow got one extra middle page per original). Skip when mixed
+            # portrait/landscape so 1+2+1… output is not treated as an error.
+            if portrait_kept == 0 and actual_pages > expected_pages:
                 extra_pages = actual_pages - expected_pages
                 if extra_pages == len(doc):  # One extra per original
                     pages_to_remove_legacy = []
@@ -7892,7 +7925,11 @@ class PaperProcessorDaemon:
             new_doc.close()
             doc.close()
             
-            self.logger.info(f"Split PDF created with custom gutter: {out_path.name}")
+            self.logger.info(
+                f"Split PDF created with custom gutter: {out_path.name} "
+                f"(landscape_split={landscape_split}, portrait_kept={portrait_kept}, "
+                f"output_pages={pages_created})"
+            )
             return out_path, None
             
         except Exception as e:

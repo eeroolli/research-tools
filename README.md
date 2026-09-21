@@ -188,6 +188,7 @@ Configuration: [`config.conf [ENRICHMENT]`](docs/CONFIGURATION.md#enrichment) co
 ### PDF Splitting Notes
 - Two-up splits use content-based gutter detection with an outer-edge fallback for skewed scans
 - Splits preserve original PDF compression by clipping pages instead of rasterizing
+- Mixed orientation: only landscape pages are split; portrait pages (covers, chapter starts) are copied through unchanged
 
 ### Current Status
 ✅ **Paper processing is fully implemented and working!** The interactive daemon provides a complete workflow for processing scanned academic papers with enhanced Zotero integration.
