@@ -7638,7 +7638,7 @@ class PaperProcessorDaemon:
                 except OSError:
                     pass
             raise
-    
+
     @staticmethod
     def _is_landscape_page(width: float, height: float) -> bool:
         """True when page is wider than tall (two-up candidate). Square counts as portrait."""
@@ -9115,6 +9115,10 @@ class PaperProcessorDaemon:
                 self.logger.warning(f"Could not open PDF in viewer on non-Windows platform: {pdf_path}")
                 return False
 
+            if not Path(pdf_path).is_file():
+                self.logger.warning(f"Cannot open PDF in viewer; file not found: {pdf_path}")
+                return False
+
             if not self._ensure_owned_sumatra():
                 self.logger.warning("Owned SumatraPDF is not available")
                 return False
@@ -9168,7 +9172,12 @@ class PaperProcessorDaemon:
             return False
 
     def _send_owned_sumatra_dde(self, dde_cmd: str) -> bool:
-        """Send a DDE command to the daemon-owned Sumatra (-appdata) instance."""
+        """Send a DDE command to the daemon-owned Sumatra (-appdata) instance.
+
+        Invokes Sumatra as an argv list so a Path with spaces stays one argument.
+        DDE Open("…") quoting/escaping lives inside the payload (Sumatra protocol),
+        not in a PowerShell command string.
+        """
         cmd = (dde_cmd or "").strip()
         if not cmd:
             return False
@@ -9178,29 +9187,15 @@ class PaperProcessorDaemon:
             return False
         appdata = str(self._sumatra_appdata_dir())
         try:
-            # Sumatra -dde: escape " and \ in the DDE string for the command line.
-            # We pass via PowerShell so quoting stays reliable.
-            escaped_exe = exe.replace("'", "''")
-            escaped_appdata = appdata.replace("'", "''")
-            escaped_dde = cmd.replace("'", "''")
-            ps = (
-                f"$exe = '{escaped_exe}'; "
-                f"$appdata = '{escaped_appdata}'; "
-                f"$dde = '{escaped_dde}'; "
-                "& $exe -appdata $appdata -dde $dde | Out-Null; "
-                "Write-Host 'SUCCESS'"
-            )
             result = subprocess.run(
-                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-Command', ps],
-                stdout=subprocess.PIPE,
+                [exe, "-appdata", appdata, "-dde", cmd],
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 timeout=8,
                 text=True,
             )
-            if result.returncode == 0 and result.stdout and "SUCCESS" in result.stdout:
+            if result.returncode == 0:
                 return True
-            if result.stdout:
-                self.logger.debug(f"Owned Sumatra DDE stdout: {result.stdout.strip()}")
             if result.stderr:
                 self.logger.debug(f"Owned Sumatra DDE stderr: {result.stderr.strip()}")
             return False

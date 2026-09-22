@@ -159,6 +159,77 @@ def test_open_pdf_in_viewer_uses_quiet_dde_open(monkeypatch, tmp_path: Path) -> 
     assert "scan.pdf" in sent[0]
 
 
+def test_open_pdf_in_viewer_dde_keeps_full_path_with_spaces(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Spaced filenames must stay one Open(...) path, not truncated at the first space."""
+    daemon = _make_daemon()
+    pdf = tmp_path / "PREPROCESSED_EN_Verweij_2011_Clumsy solutions_split.pdf"
+    pdf.write_bytes(b"%PDF")
+
+    monkeypatch.setattr("scripts.paper_processor_daemon.sys.platform", "win32")
+    monkeypatch.setattr(daemon, "_ensure_owned_sumatra", lambda: True)
+    sent: list[str] = []
+    monkeypatch.setattr(
+        daemon, "_send_owned_sumatra_dde", lambda cmd: sent.append(cmd) or True
+    )
+
+    assert daemon._open_pdf_in_viewer(pdf) is True
+    assert len(sent) == 1
+    # Open(...) escapes backslashes for Sumatra's DDE protocol.
+    escaped = str(pdf).replace("\\", "\\\\").replace('"', '\\"')
+    assert escaped in sent[0]
+    assert "Clumsy solutions_split.pdf" in sent[0]
+
+
+def test_open_pdf_in_viewer_missing_file_skips_dde(monkeypatch, tmp_path: Path) -> None:
+    daemon = _make_daemon()
+    missing = tmp_path / "no such file.pdf"
+
+    monkeypatch.setattr("scripts.paper_processor_daemon.sys.platform", "win32")
+    sent: list[str] = []
+    monkeypatch.setattr(
+        daemon, "_send_owned_sumatra_dde", lambda cmd: sent.append(cmd) or True
+    )
+    ensure = MagicMock(return_value=True)
+    monkeypatch.setattr(daemon, "_ensure_owned_sumatra", ensure)
+
+    assert daemon._open_pdf_in_viewer(missing) is False
+    assert sent == []
+    ensure.assert_not_called()
+
+
+def test_send_owned_sumatra_dde_uses_argv_list_not_powershell(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Path with spaces must be one -dde argv element; no PowerShell string build."""
+    daemon = _make_daemon()
+    exe = tmp_path / "SumatraPDF.exe"
+    exe.write_bytes(b"")
+    appdata = tmp_path / "sumatra-daemon"
+    appdata.mkdir()
+
+    monkeypatch.setattr(daemon, "_sumatra_exe", lambda: str(exe))
+    monkeypatch.setattr(daemon, "_sumatra_appdata_dir", lambda: appdata)
+
+    run = MagicMock(return_value=SimpleNamespace(returncode=0, stderr=""))
+    monkeypatch.setattr("scripts.paper_processor_daemon.subprocess.run", run)
+
+    dde = '[Open("C:\\\\temp\\\\PREPROCESSED_Clumsy solutions_split.pdf",0,0,0)]'
+    assert daemon._send_owned_sumatra_dde(dde) is True
+
+    run.assert_called_once()
+    args = run.call_args[0][0]
+    assert isinstance(args, list)
+    assert args[0] == str(exe)
+    assert args[1] == "-appdata"
+    assert args[2] == str(appdata)
+    assert args[3] == "-dde"
+    assert args[4] == dde
+    assert "powershell" not in args[0].lower()
+    assert "Clumsy solutions_split.pdf" in args[4]
+
+
 def test_close_pdf_viewer_closes_tabs_not_exit(monkeypatch) -> None:
     daemon = _make_daemon()
     sent: list[str] = []
