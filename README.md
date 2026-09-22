@@ -208,6 +208,25 @@ Notes:
 - First-page text extraction uses PyPDF2 if installed; otherwise it returns an empty string.
 - Identifier extraction uses a lightweight heuristic today and will be replaced by Ollama-based extraction in Phase 4.
 
+## Helper Scripts
+
+### Searchable text layer (`add_text_layer.py`)
+
+Use this for image-only or mixed PDFs that need a searchable Tesseract layer. Original page images stay; the default output is a sibling `{stem}_ocr.pdf` (never overwrites the source).
+
+```bash
+# conda research-tools / research-tools-win, or .venv-win with ocrmypdf, tesseract, and gs on PATH
+python scripts/add_text_layer.py INPUT.pdf
+python scripts/add_text_layer.py INPUT.pdf --pages 1-3 --txt
+python scripts/add_text_layer.py INPUT.pdf --redo-ocr
+python scripts/add_text_layer.py INPUT.pdf --force-ocr
+python scripts/add_text_layer.py INPUT.pdf --clean   # unpaper; WSL research-tools if win-64 lacks it
+```
+
+Existing text: default `--skip-text` (OCR pages with no layer). `--redo-ocr` replaces OCR-looking text and cannot be combined with `--deskew` or `--clean` (ocrmypdf limitation); the CLI omits deskew for `--redo-ocr` unless you pass `--deskew`, which then errors. Use `--force-ocr` if you need deskew (it rasterizes every page). `--clean` is off by default (unpaper can help noisy photocopies and can also damage thin strokes); if you pass it and `unpaper` is missing, the command fails with a WSL/apt or conda hint.
+
+Prefer whichever env already has `ocrmypdf`, `tesseract`, and `gs`. The wrapper sets `TESSDATA_PREFIX` from conda `share/tessdata` when that env var is missing (PowerShell often does not inherit conda-forge's `env_vars.d` JSON) and copies `configs/` from `Library/share/tessdata` when conda splits those trees. If `ocrmypdf` fails on import with `cannot import name '_ASCII_CHAR_INFO' from 'charset_normalizer.md'`, leftover pip `.pyd` files are shadowing conda's `charset-normalizer`: `pip uninstall charset-normalizer`, delete `md*.pyd` under site-packages, then `conda install -c conda-forge --force-reinstall charset-normalizer`. Do not use `ocr_pdf.py` for this job (it auto-rotates and silently falls back). `create_searchable_pdf.py` re-rasterizes pages.
+
 ## JSTOR Metadata Extraction (requires session cookies)
 
 JSTOR pages are protected; you must supply your own browser cookies for the JSTOR client to fetch metadata/DOI:

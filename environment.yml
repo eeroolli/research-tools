@@ -12,6 +12,9 @@ dependencies:
   - pyzbar  # Barcode detection
   - pillow  # Image processing
   - pyyaml  # Configuration files
+  - ocrmypdf  # PDF OCR pipeline (scripts/add_text_layer.py)
+  - tesseract  # OCR engine used by ocrmypdf
+  - ghostscript  # required by ocrmypdf
   - pytesseract  # OCR engine (used in scripts/ocr_pdf.py for Tesseract-based OCR)
   - requests  # API calls
   - configparser  # Configuration parsing
