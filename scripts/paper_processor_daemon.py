@@ -10534,10 +10534,9 @@ if ($hwnd -ne [IntPtr]::Zero) {{
     def _resolve_author_list_entries(self, name: str) -> list:
         """Resolve a typed/extracted author name into selection-list entries.
         
-        Exact full-name hit → one recognized entry.
-        Single last-name hit → keep display name, set recognized_as + paper_count.
-        Multiple last-name hits → one entry per Zotero creator (for disambiguation).
-        No match → one unrecognized entry.
+        Delegates to AuthorValidator.resolve_list_entries when available.
+        Surname-only with several Zotero hits expands for disambiguation;
+        a full name that is not one of those creators stays as typed.
         """
         unknown = {
             'name': name,
@@ -10547,46 +10546,21 @@ if ($hwnd -ne [IntPtr]::Zero) {{
         }
         if not self.author_validator:
             return [unknown]
-        
-        exact = self.author_validator.get_author_info(name)
-        if exact:
-            return [{
-                'name': name,
-                'paper_count': exact.get('paper_count', 0),
-                'recognized': True,
-                'recognized_as': exact.get('name'),
-            }]
-        
-        matches = self.author_validator.find_by_lastname(name)
-        if len(matches) == 1:
-            match = matches[0]
-            return [{
-                'name': name,
-                'paper_count': match.get('paper_count', 0),
-                'recognized': True,
-                'recognized_as': match.get('name'),
-            }]
-        if len(matches) > 1:
-            return [{
-                'name': m['name'],
-                'paper_count': m.get('paper_count', 0),
-                'recognized': True,
-                'recognized_as': m['name'],
-            } for m in matches]
-        
-        try:
-            suggestion = self.author_validator.suggest_ocr_correction(name)
-            if suggestion:
-                return [{
-                    'name': name,
-                    'paper_count': suggestion.get('paper_count', 0),
-                    'recognized': True,
-                    'recognized_as': suggestion.get('corrected_name'),
-                }]
-        except Exception:
-            pass
-        
-        return [unknown]
+        return self.author_validator.resolve_list_entries(name)
+    
+    def _extend_author_info_deduped(self, author_info: list, resolved: list) -> list:
+        """Append resolved entries whose display names are not already listed (casefold)."""
+        existing = {(info.get('name') or '').casefold() for info in author_info}
+        added = []
+        for entry in resolved:
+            key = (entry.get('name') or '').casefold()
+            if key and key in existing:
+                continue
+            author_info.append(entry)
+            if key:
+                existing.add(key)
+            added.append(entry)
+        return added
     
     def select_authors_for_search(self, authors: list) -> list:
         """Let user select which authors to search by and in what order.
@@ -10695,13 +10669,18 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                     if new_name:
                         edit_idx = int(edit_choice) - 1
                         resolved = self._resolve_author_list_entries(new_name)
-                        author_info[edit_idx:edit_idx + 1] = resolved
+                        # Replace the edited slot, then drop duplicates among siblings
+                        others = author_info[:edit_idx] + author_info[edit_idx + 1:]
+                        author_info = others
+                        added = self._extend_author_info_deduped(author_info, resolved)
                         authors = [info['name'] for info in author_info]
-                        if len(resolved) == 1:
-                            print(f"✅ Updated: {old_name} → {resolved[0]['name']}")
+                        if not added:
+                            print(f"⚠️  '{new_name}' already on the list (no change)")
+                        elif len(added) == 1:
+                            print(f"✅ Updated: {old_name} → {added[0]['name']}")
                         else:
-                            names = ', '.join(r['name'] for r in resolved)
-                            print(f"✅ Updated: {old_name} → {len(resolved)} matches: {names}")
+                            names = ', '.join(r['name'] for r in added)
+                            print(f"✅ Updated: {old_name} → {len(added)} matches: {names}")
                     else:
                         print("⚠️  No change made")
                 else:
@@ -10713,13 +10692,15 @@ if ($hwnd -ne [IntPtr]::Zero) {{
                 new_author = input("\nEnter new author name: ").strip()
                 if new_author:
                     resolved = self._resolve_author_list_entries(new_author)
-                    author_info.extend(resolved)
+                    added = self._extend_author_info_deduped(author_info, resolved)
                     authors = [info['name'] for info in author_info]
-                    if len(resolved) == 1:
-                        print(f"✅ Added: {resolved[0]['name']}")
+                    if not added:
+                        print(f"⚠️  Already on the list: {resolved[0]['name'] if resolved else new_author}")
+                    elif len(added) == 1:
+                        print(f"✅ Added: {added[0]['name']}")
                     else:
-                        names = ', '.join(r['name'] for r in resolved)
-                        print(f"✅ Added {len(resolved)} matches: {names}")
+                        names = ', '.join(r['name'] for r in added)
+                        print(f"✅ Added {len(added)} matches: {names}")
                 else:
                     print("⚠️  No author name entered")
                 print()  # Blank line before showing list again

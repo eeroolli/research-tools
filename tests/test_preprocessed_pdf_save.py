@@ -79,7 +79,7 @@ def test_save_preprocessed_pdf_overwrites_existing(
     doc = _FakeDoc(b"new-content")
     daemon._save_preprocessed_pdf(doc, out_path)
 
-    assert close_calls == ["closed"]
+    assert close_calls == []
     assert out_path.read_bytes() == b"new-content"
     assert not out_path.with_suffix(".tmp.pdf").exists()
 

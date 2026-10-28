@@ -199,35 +199,61 @@ def test_open_pdf_in_viewer_missing_file_skips_dde(monkeypatch, tmp_path: Path) 
     ensure.assert_not_called()
 
 
-def test_send_owned_sumatra_dde_uses_argv_list_not_powershell(
+def test_send_owned_sumatra_dde_posts_to_owned_frame(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """Path with spaces must be one -dde argv element; no PowerShell string build."""
+    """Open payload is posted to the owned frame, including paths with spaces."""
     daemon = _make_daemon()
-    exe = tmp_path / "SumatraPDF.exe"
-    exe.write_bytes(b"")
-    appdata = tmp_path / "sumatra-daemon"
-    appdata.mkdir()
+    daemon._owned_sumatra_pid = 4242
+    posted: list[tuple[int, str]] = []
 
-    monkeypatch.setattr(daemon, "_sumatra_exe", lambda: str(exe))
-    monkeypatch.setattr(daemon, "_sumatra_appdata_dir", lambda: appdata)
-
-    run = MagicMock(return_value=SimpleNamespace(returncode=0, stderr=""))
+    monkeypatch.setattr(daemon, "_find_sumatra_frame_hwnd", lambda pid: 77 if pid == 4242 else None)
+    monkeypatch.setattr(
+        daemon, "_post_sumatra_dde", lambda hwnd, cmd: posted.append((hwnd, cmd)) or True
+    )
+    run = MagicMock()
     monkeypatch.setattr("scripts.paper_processor_daemon.subprocess.run", run)
 
     dde = '[Open("C:\\\\temp\\\\PREPROCESSED_Clumsy solutions_split.pdf",0,0,0)]'
     assert daemon._send_owned_sumatra_dde(dde) is True
+    assert posted == [(77, dde)]
+    assert "Clumsy solutions_split.pdf" in posted[0][1]
+    run.assert_not_called()
 
-    run.assert_called_once()
-    args = run.call_args[0][0]
-    assert isinstance(args, list)
-    assert args[0] == str(exe)
-    assert args[1] == "-appdata"
-    assert args[2] == str(appdata)
-    assert args[3] == "-dde"
-    assert args[4] == dde
-    assert "powershell" not in args[0].lower()
-    assert "Clumsy solutions_split.pdf" in args[4]
+
+def test_wait_adopts_reuse_instance_survivor_and_open_posts_there(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Launcher PID has no frame; surviving -appdata PID has it — adopt and Open there."""
+    daemon = _make_daemon()
+    daemon._owned_sumatra_pid = 1111  # short-lived ReuseInstance launcher
+    appdata = tmp_path / "sumatra-daemon"
+    appdata.mkdir()
+    monkeypatch.setattr(daemon, "_sumatra_appdata_dir", lambda: appdata)
+    monkeypatch.setattr("scripts.paper_processor_daemon.sys.platform", "win32")
+    monkeypatch.setattr("scripts.paper_processor_daemon.time.sleep", lambda *_: None)
+
+    frames = {2222: 88}
+    monkeypatch.setattr(
+        daemon,
+        "_find_sumatra_frame_hwnd",
+        lambda pid: frames.get(int(pid)),
+    )
+    monkeypatch.setattr(
+        daemon, "_owned_sumatra_pids_for_appdata", lambda: [1111, 2222]
+    )
+
+    hwnd = daemon._wait_for_owned_sumatra_hwnd(timeout_s=1.0)
+    assert hwnd == 88
+    assert daemon._owned_sumatra_pid == 2222
+
+    posted: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        daemon, "_post_sumatra_dde", lambda h, cmd: posted.append((h, cmd)) or True
+    )
+    dde = '[Open("C:\\\\temp\\\\scan.pdf",0,0,0)]'
+    assert daemon._send_owned_sumatra_dde(dde) is True
+    assert posted == [(88, dde)]
 
 
 def test_close_pdf_viewer_closes_tabs_not_exit(monkeypatch) -> None:
