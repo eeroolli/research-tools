@@ -1517,6 +1517,7 @@ class PaperProcessorDaemon:
         pdf_path: Path,
         *,
         force_prompt_year: bool = False,
+        skip_author_select: bool = False,
     ) -> tuple:
         """Run Zotero selection/search loop with consistent z/r/q semantics.
 
@@ -1525,16 +1526,22 @@ class PaperProcessorDaemon:
         - back: leave loop so caller can re-show document type
         - restart: restart processing for this same PDF
         - quit: quit this PDF -> move to manual review
+
+        force_prompt_year / skip_author_select apply only on the first pass;
+        back_to_authors resets both so the user can change year/authors again.
         """
         current_metadata = starting_metadata
         prompt_year = force_prompt_year
+        skip_authors = skip_author_select
         while True:
             action_value, selected_item_value, current_metadata = self.search_and_display_local_zotero(
                 current_metadata,
                 force_prompt_year=prompt_year,
+                skip_author_select=skip_authors,
             )
-            # Only force year on the first entry (e.g. user chose change author/year).
+            # Only force year / skip author pick on the first entry.
             prompt_year = False
+            skip_authors = False
 
             if action_value == 'back_to_authors':
                 print("⬅️  Going back to author selection...")
@@ -1554,7 +1561,12 @@ class PaperProcessorDaemon:
 
             return (action_value, selected_item_value, current_metadata)
 
-    def search_and_display_local_zotero(self, metadata: dict, force_prompt_year: bool = False) -> tuple:
+    def search_and_display_local_zotero(
+        self,
+        metadata: dict,
+        force_prompt_year: bool = False,
+        skip_author_select: bool = False,
+    ) -> tuple:
         """Interactive Zotero search with author selection and item selection.
         
         SAFETY: This method only performs READ operations on the database.
@@ -1570,6 +1582,7 @@ class PaperProcessorDaemon:
         Args:
             metadata: Metadata to search with
             force_prompt_year: If True, prompts for year even if one exists (allows changing)
+            skip_author_select: If True, use metadata['authors'] as-is without prompting
             
         Returns:
             Tuple of (action, selected_item, updated_metadata):
@@ -1823,8 +1836,12 @@ class PaperProcessorDaemon:
             # Step 5: Author-based search (for Priority 1, Priority 4 with author provided, or Priority 5)
             if has_author:
                 # If we already have authors from metadata, let user select which to use
+                # (unless skip_author_select: use current authors after metadata edit)
                 if metadata.get('authors'):
-                    selected_authors = self.select_authors_for_search(metadata['authors'].copy())
+                    if skip_author_select:
+                        selected_authors = metadata['authors'].copy()
+                    else:
+                        selected_authors = self.select_authors_for_search(metadata['authors'].copy())
                 else:
                     # Authors were just provided above, use them directly
                     selected_authors = metadata.get('authors', [])
@@ -1894,7 +1911,19 @@ class PaperProcessorDaemon:
                 year_str = f" (year: {year})" if year else " (any year)"
                 doc_type = metadata.get('document_type')
                 doc_type_str = f" [type: {doc_type}]" if doc_type else ""
-                print(f"\n🔍 Searching Zotero database for authors (in order): {author_display}{year_str}{doc_type_str}")
+                title_for_search = (metadata.get('title') or '').strip()
+                title_str = f' [title: "{title_for_search}"]' if title_for_search else ""
+                print(
+                    f"\n🔍 Searching Zotero database for authors (in order): "
+                    f"{author_display}{year_str}{title_str}{doc_type_str}"
+                )
+
+                # Title/DOI metadata hits (not limited by year/type SQL filters) go first.
+                title_hits: List[Dict] = []
+                if title_for_search or metadata.get('doi') or metadata.get('url'):
+                    metadata_matches = self.local_zotero.search_by_metadata(metadata, max_matches=10)
+                    if metadata_matches:
+                        title_hits = [self._normalize_search_result(item) for item in metadata_matches]
                 
                 attempt_specs = [
                     {'year': year, 'document_type': doc_type, 'notice': None}
@@ -1929,6 +1958,22 @@ class PaperProcessorDaemon:
                     attempts.append(spec)
                 
                 author_arrow_str = ' → '.join([a.split()[-1] for a in selected_authors])
+
+                def _item_key(item: dict) -> str:
+                    return str(item.get('key') or item.get('item_key') or '')
+
+                def _merge_title_and_author_hits(author_hits: list) -> list:
+                    """Prepend title/DOI hits; dedupe by item key (title hits win)."""
+                    merged = []
+                    seen_keys = set()
+                    for item in title_hits + author_hits:
+                        key = _item_key(item)
+                        if key and key in seen_keys:
+                            continue
+                        if key:
+                            seen_keys.add(key)
+                        merged.append(item)
+                    return merged
                 
                 db_unavailable = False
                 for spec in attempts:
@@ -1952,9 +1997,12 @@ class PaperProcessorDaemon:
                         print("\n⚠️  Zotero database is currently locked or unavailable – cannot search for existing items by ordered authors.")
                         break
                     normalized_matches = [self._normalize_search_result(item) for item in matches]
+                    combined_matches = _merge_title_and_author_hits(normalized_matches)
                     
-                    if normalized_matches:
+                    if combined_matches:
                         search_info = f"by {author_arrow_str}"
+                        if title_for_search:
+                            search_info += f' / title "{title_for_search}"'
                         if target_year:
                             search_info += f" in {target_year}"
                         elif year:
@@ -1964,8 +2012,14 @@ class PaperProcessorDaemon:
                         elif target_type is None and doc_type:
                             search_info += " [all types]"
                         
-                        action, item = self.display_and_select_zotero_matches(normalized_matches, search_info)
+                        action, item = self.display_and_select_zotero_matches(combined_matches, search_info)
                         return (action, item, metadata)
+
+                # Author-ordered attempts empty, but title/DOI still found something.
+                if title_hits and not db_unavailable:
+                    search_info = f'by title "{title_for_search}"' if title_for_search else "by metadata"
+                    action, item = self.display_and_select_zotero_matches(title_hits, search_info)
+                    return (action, item, metadata)
                 
                 # Fallback: search broadly by first author's last name (only if DB available
                 # and we do not already have a confirmed Zotero author identity).
@@ -5773,11 +5827,17 @@ class PaperProcessorDaemon:
             updated_metadata = metadata.copy()  # Track any edits made during search
             should_restart_search = False
             
-            def _run_zotero_selection_loop(starting_metadata: dict, *, force_prompt_year: bool = False):
+            def _run_zotero_selection_loop(
+                starting_metadata: dict,
+                *,
+                force_prompt_year: bool = False,
+                skip_author_select: bool = False,
+            ):
                 return self._run_zotero_selection_loop(
                     starting_metadata,
                     pdf_path,
                     force_prompt_year=force_prompt_year,
+                    skip_author_select=skip_author_select,
                 )
 
             def _reconfirm_doc_type_after_back(meta: dict) -> tuple:
@@ -5817,6 +5877,8 @@ class PaperProcessorDaemon:
                 Returns:
                     - 'handled': action completed for this paper
                     - 'continue_selection': return to Zotero selection flow
+                    - 'continue_selection_force_year': re-search; prompt year; keep authors
+                    - 'continue_selection_skip_authors': re-search with edited metadata as-is
                     - 'back_to_doc_type': author-select back; re-show document type
                     - 'exit': stop current paper processing
                     - 'restart': restart current paper from beginning
@@ -5839,43 +5901,20 @@ class PaperProcessorDaemon:
                         return 'exit'
                     return 'handled'
                 elif action_value == 'search':
-                    # User wants to search again - allow year editing by clearing confirmation flag
+                    # Change author/year: keep the selected author list; outer loop re-prompts year.
                     if metadata_value.get('_year_confirmed'):
                         metadata_value.pop('_year_confirmed', None)
-                    # Reset authors to full set if available, then recursive call
-                    if metadata_value.get('_all_authors'):
-                        metadata_value['authors'] = metadata_value['_all_authors'].copy()
-                    action2, selected_item2, metadata_value = _run_zotero_selection_loop(
-                        metadata_value,
-                        force_prompt_year=True,
-                    )
-                    if action2 == 'back':
-                        return 'back_to_doc_type'
-                    action2_outcome = _handle_zotero_action(action2, selected_item2, metadata_value)
-                    if action2_outcome in ('continue_selection', 'handled', 'back_to_doc_type'):
-                        return action2_outcome
-                    if action2_outcome == 'restart':
-                        return 'restart'
-                    return 'exit'
+                    return 'continue_selection_force_year'
                 elif action_value == 'edit':
-                    # Edit metadata then search again
+                    # Edit metadata then search again (outer loop skips author picker once).
                     print("\n✏️  Editing metadata...")
                     edited_metadata = self.edit_metadata_interactively(metadata_value)
 
                     if edited_metadata:
-                        # Re-run Zotero search with edited metadata
+                        metadata_value.clear()
+                        metadata_value.update(edited_metadata)
                         print("\n🔍 Searching Zotero with edited metadata...")
-                        action2, selected_item2, final_metadata = _run_zotero_selection_loop(edited_metadata)
-                        if action2 == 'back':
-                            metadata_value.clear()
-                            metadata_value.update(final_metadata)
-                            return 'back_to_doc_type'
-                        action2_outcome = _handle_zotero_action(action2, selected_item2, final_metadata)
-                        if action2_outcome in ('continue_selection', 'handled', 'back_to_doc_type'):
-                            return action2_outcome
-                        if action2_outcome == 'restart':
-                            return 'restart'
-                        return 'exit'
+                        return 'continue_selection_skip_authors'
 
                     # User cancelled editing
                     print("❌ Metadata editing cancelled")
@@ -5916,6 +5955,21 @@ class PaperProcessorDaemon:
                 print("⚠️  Unrecognized action; returning to Zotero selection (no file move).")
                 return 'continue_selection'
 
+            def _resume_zotero_selection(*, force_prompt_year: bool = False, skip_author_select: bool = False):
+                """Re-enter Zotero selection; handle restart/quit/back like the outer loop."""
+                next_action, next_item, next_meta = _run_zotero_selection_loop(
+                    updated_metadata,
+                    force_prompt_year=force_prompt_year,
+                    skip_author_select=skip_author_select,
+                )
+                if next_action == 'restart':
+                    return ('restart', None, next_meta)
+                if next_action == 'handled':
+                    return ('handled', None, next_meta)
+                if next_action == 'back':
+                    return _reconfirm_doc_type_after_back(next_meta)
+                return (next_action, next_item, next_meta)
+
             # Step 4: Handle action from Zotero search
             while True:
                 action_outcome = _handle_zotero_action(action, selected_item, updated_metadata)
@@ -5928,20 +5982,20 @@ class PaperProcessorDaemon:
                     if action == 'back':
                         continue
                     continue
-                if action_outcome == 'continue_selection':
-                    action, selected_item, updated_metadata = _run_zotero_selection_loop(updated_metadata)
+                if action_outcome in (
+                    'continue_selection',
+                    'continue_selection_force_year',
+                    'continue_selection_skip_authors',
+                ):
+                    action, selected_item, updated_metadata = _resume_zotero_selection(
+                        force_prompt_year=(action_outcome == 'continue_selection_force_year'),
+                        skip_author_select=(action_outcome == 'continue_selection_skip_authors'),
+                    )
                     if action == 'restart':
                         return 'RESTART'
                     if action == 'handled':
                         return
                     if action == 'back':
-                        action, selected_item, updated_metadata = _reconfirm_doc_type_after_back(updated_metadata)
-                        if action == 'restart':
-                            return 'RESTART'
-                        if action == 'handled':
-                            return
-                        if action == 'back':
-                            continue
                         continue
                     continue
                 if action_outcome == 'restart':

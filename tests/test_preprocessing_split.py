@@ -349,7 +349,7 @@ def test_process_paper_runs_preprocessing_before_metadata_extraction(
         ensure_grobid_ready=lambda: False, grobid_ready=False, grobid_client=None
     )
     daemon.local_zotero = object()
-    daemon.search_and_display_local_zotero = lambda metadata, force_prompt_year=False: (
+    daemon.search_and_display_local_zotero = lambda metadata, force_prompt_year=False, skip_author_select=False: (
         "manual",
         None,
         metadata,

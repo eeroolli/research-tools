@@ -398,7 +398,9 @@ def test_process_paper_no_match_create_path_does_not_move_to_manual(
     )
     daemon.service_manager = SimpleNamespace(ensure_grobid_ready=lambda: False, grobid_ready=False, grobid_client=None)
     daemon.local_zotero = object()
-    daemon.search_and_display_local_zotero = lambda metadata, force_prompt_year=False: ("create", None, metadata)
+    daemon.search_and_display_local_zotero = (
+        lambda metadata, force_prompt_year=False, skip_author_select=False: ("create", None, metadata)
+    )
 
     create_calls = {"count": 0, "pdf": None}
     manual_calls = {"count": 0}
@@ -459,7 +461,9 @@ def test_process_paper_create_failure_falls_back_to_manual_review(
     )
     daemon.service_manager = SimpleNamespace(ensure_grobid_ready=lambda: False, grobid_ready=False, grobid_client=None)
     daemon.local_zotero = object()
-    daemon.search_and_display_local_zotero = lambda metadata, force_prompt_year=False: ("create", None, metadata)
+    daemon.search_and_display_local_zotero = (
+        lambda metadata, force_prompt_year=False, skip_author_select=False: ("create", None, metadata)
+    )
 
     manual_calls = {"count": 0}
     daemon.handle_create_new_item = lambda *_args, **_kwargs: False
