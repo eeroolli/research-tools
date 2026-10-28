@@ -125,3 +125,51 @@ def test_suggest_ocr_correction_lastname_index_uses_strings():
     assert suggestion is not None
     assert suggestion["corrected_name"] == "Hakan Gürcan Sicakkan"
     assert suggestion["paper_count"] == 5
+
+
+def _fischer_validator():
+    return _mock_validator([
+        {
+            "name": "Ronald Fischer",
+            "last_name": "Fischer",
+            "first_name": "Ronald",
+            "paper_count": 4,
+        },
+        {
+            "name": "Wladimir Fischer",
+            "last_name": "Fischer",
+            "first_name": "Wladimir",
+            "paper_count": 1,
+        },
+    ])
+
+
+def test_resolve_list_entries_surname_only_expands():
+    """Surname-only with several creators returns one entry per Zotero person."""
+    validator = _fischer_validator()
+    entries = validator.resolve_list_entries("Fischer")
+    assert len(entries) == 2
+    names = {e["name"] for e in entries}
+    assert names == {"Ronald Fischer", "Wladimir Fischer"}
+    assert all(e["recognized"] for e in entries)
+
+
+def test_resolve_list_entries_unknown_full_name_kept():
+    """Full name that is not a library creator stays typed (not remapped to siblings)."""
+    validator = _fischer_validator()
+    entries = validator.resolve_list_entries("David Hacket Fischer")
+    assert len(entries) == 1
+    assert entries[0]["name"] == "David Hacket Fischer"
+    assert entries[0]["recognized"] is False
+    assert entries[0]["paper_count"] == 0
+
+
+def test_resolve_list_entries_matching_given_name():
+    """Given name matching exactly one creator resolves to that creator."""
+    validator = _fischer_validator()
+    for typed in ("Ronald Fischer", "Fischer, Ronald"):
+        entries = validator.resolve_list_entries(typed)
+        assert len(entries) == 1
+        assert entries[0]["name"] == "Ronald Fischer"
+        assert entries[0]["recognized"] is True
+        assert entries[0]["paper_count"] == 4

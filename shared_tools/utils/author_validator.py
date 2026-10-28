@@ -245,6 +245,25 @@ class AuthorValidator:
         
         return name.lower()
     
+    def _extract_given_name(self, name: str) -> str:
+        """
+        Extract given name from an author string.
+        
+        "Last, First" → text after the comma.
+        "First Last" → tokens before the last word.
+        Surname-only → empty string.
+        """
+        name = name.strip()
+        if not name:
+            return ""
+        if ',' in name:
+            parts = name.split(',', 1)
+            return parts[1].strip() if len(parts) > 1 else ""
+        parts = name.split()
+        if len(parts) < 2:
+            return ""
+        return " ".join(parts[:-1]).strip()
+    
     def _build_lastname_index(self):
         """Build simple last name index for all Zotero authors."""
         self.lastname_index = {}
@@ -284,6 +303,88 @@ class AuthorValidator:
             if info:
                 results.append(info)
         return results
+    
+    def resolve_list_entries(self, name: str) -> List[Dict]:
+        """
+        Resolve a typed/extracted author name into selection-list entries.
+        
+        Exact full-name hit → one recognized entry (keep typed display name).
+        Single last-name hit → keep display name, set recognized_as + paper_count.
+        Surname-only with multiple hits → one entry per Zotero creator.
+        Full name with multiple surname hits → match on first_name if unique;
+            otherwise keep the typed name as unrecognized (no OCR remap).
+        No match → one unrecognized entry (OCR suggestion if available).
+        
+        Each entry has: name, paper_count, recognized, recognized_as.
+        """
+        name = (name or "").strip()
+        unknown = {
+            'name': name,
+            'paper_count': 0,
+            'recognized': False,
+            'recognized_as': None,
+        }
+        if not name:
+            return [unknown]
+        
+        exact = self.get_author_info(name)
+        if exact:
+            return [{
+                'name': name,
+                'paper_count': exact.get('paper_count', 0),
+                'recognized': True,
+                'recognized_as': exact.get('name'),
+            }]
+        
+        matches = self.find_by_lastname(name)
+        if len(matches) == 1:
+            match = matches[0]
+            return [{
+                'name': name,
+                'paper_count': match.get('paper_count', 0),
+                'recognized': True,
+                'recognized_as': match.get('name'),
+            }]
+        if len(matches) > 1:
+            given = self._extract_given_name(name)
+            if not given:
+                # Surname-only: expand for disambiguation
+                return [{
+                    'name': m['name'],
+                    'paper_count': m.get('paper_count', 0),
+                    'recognized': True,
+                    'recognized_as': m['name'],
+                } for m in matches]
+            
+            given_cf = given.casefold()
+            first_matches = [
+                m for m in matches
+                if (m.get('first_name') or '').casefold() == given_cf
+            ]
+            if len(first_matches) == 1:
+                match = first_matches[0]
+                return [{
+                    'name': match['name'],
+                    'paper_count': match.get('paper_count', 0),
+                    'recognized': True,
+                    'recognized_as': match['name'],
+                }]
+            # Full name that is not one of the library creators: keep typed name
+            return [unknown]
+        
+        try:
+            suggestion = self.suggest_ocr_correction(name)
+            if suggestion:
+                return [{
+                    'name': name,
+                    'paper_count': suggestion.get('paper_count', 0),
+                    'recognized': True,
+                    'recognized_as': suggestion.get('corrected_name'),
+                }]
+        except Exception:
+            pass
+        
+        return [unknown]
     
     def suggest_ocr_correction(self, extracted_name: str, max_distance: int = 2) -> Optional[Dict]:
         """
