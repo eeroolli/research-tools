@@ -5109,9 +5109,9 @@ class PaperProcessorDaemon:
             pdf_path: Path to PDF file
             
         Returns:
-            None when finished (success, failed, or cancelled).
+            None when finished (success, failed, cancelled, or next-file skip).
             'RESTART' when the user requested restart from beginning; the caller
-            should re-queue the same path and run the next item.
+            should reprocess the same path immediately.
         """
         # Check if file exists before processing
         if not pdf_path.exists():
@@ -5162,8 +5162,11 @@ class PaperProcessorDaemon:
                     print("\n🔄 Document separator: output PDFs were queued; continuing with the queue.")
                     return
                 if final_state.get('back'):
-                    print("\n⬅️  Cancelled this scan — restarting from beginning...")
+                    print("\n🔄 Restarting this scan from the beginning...")
                     return 'RESTART'
+                if final_state.get('next'):
+                    print("\n➡️  Leaving this scan in the watch folder — continuing with next file...")
+                    return
                 if final_state.get('quit'):
                     moved = self.move_to_manual_review(pdf_path)
                     if moved:
@@ -6859,7 +6862,8 @@ class PaperProcessorDaemon:
         - Improve border detection and split when currently using fast 50/50
         - Use 50/50 split instead
         - Drop trimming
-        - Cancel this scan
+        - Restart this scan from the beginning
+        - Next file (leave this scan in the watch folder)
         - Quit to manual review
         
         Args:
@@ -6868,7 +6872,9 @@ class PaperProcessorDaemon:
             preprocessing_state: Dict with keys: border_removal, split_method, trim_leading
         
         Returns:
-            Tuple of (final_pdf_path, final_preprocessing_state) or (None, {}) if user quits
+            Tuple of (final_pdf_path, final_preprocessing_state) or (None, state)
+            when the user restarts (`back`), skips to the next file (`next`), or
+            quits to manual review (`quit`).
         """
         last_previewed_pdf: Optional[Path] = None
         while True:
@@ -6983,7 +6989,8 @@ class PaperProcessorDaemon:
             option_map[option_num] = 'separate_documents'
             print(Colors.colorize(f"  [{option_num}] Separate this PDF into files (two or more papers)", ColorScheme.LIST))
             
-            print(Colors.colorize("  [z] Cancel this scan", ColorScheme.LIST))
+            print(Colors.colorize("  [z] Restart this scan from the beginning", ColorScheme.LIST))
+            print(Colors.colorize("  [n] Next file — leave this scan in the watch folder", ColorScheme.LIST))
             print(Colors.colorize("  [q] Quit - move to manual review", ColorScheme.LIST))
             print()
             
@@ -7183,8 +7190,12 @@ class PaperProcessorDaemon:
             except ValueError:
                 # Not a number, check for letter choices
                 if choice == 'z':
-                    # Cancel this scan (caller should handle restart/cancel)
+                    # Restart this scan from the beginning
                     return None, {'back': True}
+
+                elif choice == 'n':
+                    # Leave this scan in the watch folder; continue with next queued file
+                    return None, {'next': True}
                 
                 elif choice == 'q':
                     # Quit to manual review

@@ -112,9 +112,13 @@ def daemon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PaperProcessorDae
     watch_dir = tmp_path / "watch"
     watch_dir.mkdir()
 
-    # Instantiate daemon; this may still read config.conf, so we rely on the
-    # existing test environment. If that becomes an issue, we can monkeypatch
-    # _load_config or related helpers to use a synthetic config.
+    # Skip interactive publications-path prompts when NAS/cloud mounts are offline.
+    monkeypatch.setattr(
+        PaperProcessorDaemon,
+        "_validate_publications_directory",
+        lambda self: None,
+    )
+
     d = PaperProcessorDaemon(watch_dir, debug=False)
 
     # For safety, point publications_dir to a temp location to avoid touching real files
@@ -363,6 +367,78 @@ def test_process_paper_runs_preprocessing_before_metadata_extraction(
     assert extract_paths == [working_pdf]
     assert daemon._working_pdf == working_pdf
     assert daemon._preprocessing_state.get("split_succeeded") is True
+
+
+def test_preview_z_returns_back_and_process_paper_restarts(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PDF PREVIEW [z] restarts the same scan without moving the file."""
+    pdf_path = tmp_path / "DE_20261028_0002.pdf"
+    _make_dummy_pdf(pdf_path)
+
+    daemon._close_sumatra_all_tabs = lambda: True
+    daemon._open_pdf_in_viewer = lambda *_args, **_kwargs: True
+    daemon._return_focus_to_terminal = lambda: None
+    daemon._close_pdf_viewer = lambda: None
+    daemon._maybe_auto_document_separator_early = lambda *_args, **_kwargs: False
+    daemon._preprocess_pdf_with_options = lambda pdf, **_kwargs: (pdf, {"trim_leading": False})
+
+    moves: list[str] = []
+    daemon.move_to_skipped = lambda *_a, **_k: moves.append("skipped")
+    daemon.move_to_done = lambda *_a, **_k: moves.append("done")
+    daemon.move_to_manual_review = lambda *_a, **_k: moves.append("manual")
+    daemon.move_to_failed = lambda *_a, **_k: moves.append("failed")
+
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: "z")
+
+    final_pdf, state = daemon._preview_and_modify_preprocessing(
+        pdf_path, pdf_path, {"trim_leading": False}
+    )
+    assert final_pdf is None
+    assert state == {"back": True}
+
+    daemon._preview_and_modify_preprocessing = lambda *_a, **_k: (None, {"back": True})
+    result = daemon.process_paper(pdf_path)
+
+    assert result == "RESTART"
+    assert moves == []
+    assert pdf_path.exists()
+
+
+def test_preview_n_leaves_file_and_process_paper_continues(
+    daemon: PaperProcessorDaemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PDF PREVIEW [n] leaves the scan in the watch folder and does not restart."""
+    pdf_path = tmp_path / "DE_20261028_0002.pdf"
+    _make_dummy_pdf(pdf_path)
+
+    daemon._close_sumatra_all_tabs = lambda: True
+    daemon._open_pdf_in_viewer = lambda *_args, **_kwargs: True
+    daemon._return_focus_to_terminal = lambda: None
+    daemon._close_pdf_viewer = lambda: None
+    daemon._maybe_auto_document_separator_early = lambda *_args, **_kwargs: False
+    daemon._preprocess_pdf_with_options = lambda pdf, **_kwargs: (pdf, {"trim_leading": False})
+
+    moves: list[str] = []
+    daemon.move_to_skipped = lambda *_a, **_k: moves.append("skipped")
+    daemon.move_to_done = lambda *_a, **_k: moves.append("done")
+    daemon.move_to_manual_review = lambda *_a, **_k: moves.append("manual")
+    daemon.move_to_failed = lambda *_a, **_k: moves.append("failed")
+
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: "n")
+
+    final_pdf, state = daemon._preview_and_modify_preprocessing(
+        pdf_path, pdf_path, {"trim_leading": False}
+    )
+    assert final_pdf is None
+    assert state == {"next": True}
+
+    daemon._preview_and_modify_preprocessing = lambda *_a, **_k: (None, {"next": True})
+    result = daemon.process_paper(pdf_path)
+
+    assert result is None
+    assert moves == []
+    assert pdf_path.exists()
 
 
 def test_is_landscape_page_helper() -> None:
