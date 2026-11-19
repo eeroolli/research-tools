@@ -1,2 +1,5 @@
 # Shell scripts run in WSL bash and break on CRLF; keep them LF on every checkout.
 *.sh text eol=lf
+# Windows batch files need CRLF (labels and goto break with LF).
+*.bat text eol=crlf
+*.cmd text eol=crlf
